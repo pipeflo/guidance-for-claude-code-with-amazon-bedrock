@@ -751,13 +751,18 @@ class DeployCommand(Command):
                 )
 
                 # Get OIDC configuration for JWT authentication
-                oidc_issuer_url = profile.provider_domain
-                # Ensure issuer URL has https:// prefix
-                if oidc_issuer_url and not oidc_issuer_url.startswith(("http://", "https://")):
-                    oidc_issuer_url = f"https://{oidc_issuer_url}"
-                # Auth0 tokens include trailing slash in iss claim, so authorizer must match
-                if profile.provider_type == "auth0" and oidc_issuer_url and not oidc_issuer_url.endswith("/"):
-                    oidc_issuer_url = f"{oidc_issuer_url}/"
+                # Cognito issuer URL uses cognito-idp endpoint, not the hosted UI domain
+                if profile.provider_type == "cognito" and profile.cognito_user_pool_id:
+                    region = profile.cognito_user_pool_id.split("_")[0]
+                    oidc_issuer_url = f"https://cognito-idp.{region}.amazonaws.com/{profile.cognito_user_pool_id}"
+                else:
+                    oidc_issuer_url = profile.provider_domain
+                    # Ensure issuer URL has https:// prefix
+                    if oidc_issuer_url and not oidc_issuer_url.startswith(("http://", "https://")):
+                        oidc_issuer_url = f"https://{oidc_issuer_url}"
+                    # Auth0 tokens include trailing slash in iss claim, so authorizer must match
+                    if profile.provider_type == "auth0" and oidc_issuer_url and not oidc_issuer_url.endswith("/"):
+                        oidc_issuer_url = f"{oidc_issuer_url}/"
                 oidc_client_id = profile.client_id
 
                 params = [
@@ -816,6 +821,7 @@ class DeployCommand(Command):
                     # Update metrics aggregator Lambda environment if successful
                     if result == 0:
                         self._update_metrics_aggregator_env(profile, stack_name, console)
+                        self._create_default_quota_policy(profile, stack_name, console)
 
                     return result
 
@@ -989,6 +995,46 @@ class DeployCommand(Command):
 
         except Exception as e:
             console.print(f"[yellow]Warning: Error updating metrics aggregator: {str(e)}[/yellow]")
+
+    def _create_default_quota_policy(self, profile, quota_stack_name: str, console: Console) -> None:
+        """Auto-create default quota policy in DynamoDB after quota stack deployment."""
+        try:
+            from claude_code_with_bedrock.models import EnforcementMode, PolicyType
+            from claude_code_with_bedrock.quota_policies import PolicyAlreadyExistsError, QuotaPolicyManager
+
+            # Get the policies table name from stack outputs
+            quota_outputs = get_stack_outputs(quota_stack_name, profile.aws_region)
+            if not quota_outputs or not quota_outputs.get("PoliciesTableName"):
+                console.print("[yellow]Warning: Could not get policies table name from stack outputs[/yellow]")
+                return
+
+            table_name = quota_outputs["PoliciesTableName"]
+            manager = QuotaPolicyManager(table_name, profile.aws_region)
+
+            monthly_limit = getattr(profile, "monthly_token_limit", 225000000)
+            daily_limit = getattr(profile, "daily_token_limit", None)
+            monthly_enforcement = getattr(profile, "monthly_enforcement_mode", "block")
+
+            enforcement_mode = EnforcementMode.BLOCK if monthly_enforcement == "block" else EnforcementMode.ALERT
+
+            try:
+                manager.create_policy(
+                    policy_type=PolicyType.DEFAULT,
+                    identifier="default",
+                    monthly_token_limit=monthly_limit,
+                    daily_token_limit=daily_limit,
+                    enforcement_mode=enforcement_mode,
+                )
+                console.print(
+                    f"[green]Created default quota policy "
+                    f"(monthly: {monthly_limit:,} tokens, enforcement: {monthly_enforcement})[/green]"
+                )
+            except PolicyAlreadyExistsError:
+                console.print("[dim]Default quota policy already exists (skipping)[/dim]")
+
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not create default quota policy: {str(e)}[/yellow]")
+            console.print("[dim]Run 'ccwb quota set-default' manually to configure quota limits[/dim]")
 
     def _check_orphaned_stacks(self, stacks_to_deploy, profile, cf_manager, console: Console) -> list:
         """Check for stacks that exist but are disabled in config.

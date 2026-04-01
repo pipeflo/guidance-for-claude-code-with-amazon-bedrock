@@ -336,7 +336,8 @@ class InitCommand(Command):
 
                     # Check for exact domain match or subdomain match
                     # Using endswith with leading dot prevents bypass attacks
-                    if hostname_lower.endswith(".okta.com") or hostname_lower == "okta.com":
+                    okta_domains = (".okta.com", ".oktapreview.com", ".okta-emea.com")
+                    if hostname_lower.endswith(okta_domains) or hostname_lower in ("okta.com", "oktapreview.com", "okta-emea.com"):
                         provider_type = "okta"
                     elif hostname_lower.endswith(".auth0.com") or hostname_lower == "auth0.com":
                         provider_type = "auth0"

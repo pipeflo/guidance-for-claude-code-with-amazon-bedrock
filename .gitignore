@@ -38,6 +38,7 @@ Thumbs.db
 
 # Claude Code settings
 .claude/
+CLAUDE.md
 
 #Claude Code plugin settings
 .claude-plugin
@@ -53,7 +54,6 @@ output.json
 *.bak
 test_*.py
 
-CLAUDE.md
 
 guidance-docs/
 parameters.json
