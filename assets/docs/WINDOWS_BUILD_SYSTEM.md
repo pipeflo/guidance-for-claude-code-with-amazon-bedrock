@@ -1,5 +1,56 @@
 # Windows Build System Documentation
 
+> **NOTE: The Nuitka/CodeBuild build system documented below has been replaced by Go cross-compilation.** Go produces native statically-linked binaries for all 5 platforms from a single machine, eliminating the need for CodeBuild, Docker, and per-platform toolchains. See the [Go Build System](#go-build-system-recommended) section below.
+
+## Go Build System (Recommended)
+
+Native Go binaries replace the previous PyInstaller/Nuitka build pipeline. Key advantages:
+
+- **No AV false positives**: Go binaries pass Windows Defender (PyInstaller/Nuitka triggered Error 225)
+- **Cross-compile from any OS**: All 5 platforms built from a single `make all` command
+- **No CodeBuild needed**: Eliminates 3 CodeBuild projects and 30+ minute Windows builds
+- **4x smaller**: ~14 MB vs ~60-80 MB for credential-process
+- **Pre-built binaries**: Stored in `source/go/prebuilt/` — no build tools needed for packaging
+
+### Windows-Specific Build Requirements
+
+Windows binaries have special requirements to avoid Defender cloud ML (Wacatac.B!ml) detections:
+
+1. **Do NOT strip**: No `-s -w` ldflags (stripping triggers Defender ML heuristics)
+2. **Embed PE version info**: Use `go-winres` to embed RT_VERSION + RT_MANIFEST resources
+3. **`.syso` files**: Located at `cmd/credential-process/rsrc_windows_amd64.syso` and `cmd/otel-helper/rsrc_windows_amd64.syso`, auto-linked by the Go compiler for Windows builds
+
+### Building Windows Binaries
+
+```bash
+cd source/go
+
+# Build all 10 binaries (Windows unstripped, others stripped)
+make all
+
+# Or build just Windows:
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
+  -ldflags "-X github.com/bluedoors/ccwb-binaries/internal/version.Version=2.0.0" \
+  -o bin/credential-process-windows.exe ./cmd/credential-process/
+
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
+  -ldflags "-X github.com/bluedoors/ccwb-binaries/internal/version.Version=2.0.0" \
+  -o bin/otel-helper-windows.exe ./cmd/otel-helper/
+```
+
+### Verification
+
+Binaries have been verified on Windows EC2 with Defender real-time + cloud protection enabled:
+- Defender scan: **No threats found**
+- Binary execution: **Works** (credential-process --version)
+- Claude Code E2E: **Working** with OIDC auth flow
+
+---
+
+## Legacy Build System (Nuitka/CodeBuild)
+
+> **Deprecated**: The following documentation is preserved for reference. New deployments should use Go binaries.
+
 ## Table of Contents
 
 1. [Overview](#overview)
@@ -14,7 +65,7 @@
 
 ## Overview
 
-The Windows build system enables IT administrators to create native Windows executables for Claude Code authentication tools. Due to Nuitka's requirement for native compilation on target platforms, Windows binaries must be built on Windows systems. This is accomplished using AWS CodeBuild with Windows Server 2022 containers.
+The legacy Windows build system used Nuitka via AWS CodeBuild with Windows Server 2022 containers. This approach has been replaced by Go cross-compilation due to Windows Defender false positives (Error 225) with Nuitka-compiled binaries.
 
 ### Key Features
 

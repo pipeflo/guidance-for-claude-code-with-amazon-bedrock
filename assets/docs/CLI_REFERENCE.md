@@ -233,79 +233,48 @@ poetry run ccwb package [options]
 **Options:**
 
 - `--target-platform <platform>` - Target platform for binary (default: "all")
-  - `macos` - Build for current macOS architecture
-  - `macos-arm64` - Build for Apple Silicon Macs
-  - `macos-intel` - Build for Intel Macs (uses Rosetta on ARM Macs)
-  - `linux` - Build for Linux (native, current architecture)
-  - `linux-x64` - Build for Linux x64 using Docker
-  - `linux-arm64` - Build for Linux ARM64 using Docker
-  - `windows` - Build for Windows (uses CodeBuild - requires enabling during init)
-  - `all` - Build for all available platforms
-- `--distribute` - Upload package and generate distribution URL
-- `--expires-hours <hours>` - Distribution URL expiration in hours (with --distribute) [default: "48"]
-- `--profile <name>` - Configuration profile to use [default: "default"]
+  - `macos-arm64` - Apple Silicon Macs (M1/M2/M3/M4)
+  - `macos-intel` - Intel Macs
+  - `linux-x64` - Linux x86-64
+  - `linux-arm64` - Linux ARM64 (Graviton, etc.)
+  - `windows` - Windows x64
+  - `all` - All 5 platforms
+- `--prebuilt` - Use pre-built Go binaries (recommended, no build tools needed)
+- `--go` - Cross-compile Go binaries locally (requires Go installed)
+- `--profile <name>` - Configuration profile to use [default: active profile]
+- `--regenerate-installers` - Regenerate config and install scripts using existing binaries from latest dist
 
 **What it does:**
 
-- Builds Nuitka executable from authentication code
-- Creates configuration file with:
-  - OIDC provider settings
-  - Identity Pool ID from deployed stack
-  - Credential storage method (keyring or session)
-  - Selected Claude model and cross-region profile
-  - Source region for model inference
-- Generates installer script (install.sh for Unix, install.bat for Windows)
-- Creates user documentation
-- Optionally uploads to S3 and generates presigned URL (with --distribute)
+1. Copies pre-built native Go binaries from `source/go/prebuilt/` (with `--prebuilt`)
+2. Creates `config.json` with federation config read from the admin profile
+3. Creates `claude-settings/settings.json` with Bedrock model and OTel endpoint
+4. Copies generic installer scripts (`install.sh`, `install.bat`, `ccwb-install.ps1`)
+5. Outputs to `dist/{profile}/{timestamp}/`
 
-**Platform Support (Hybrid Build System):**
+**Build Modes:**
 
-- **macOS**: Uses PyInstaller with architecture-specific builds
-  - ARM64: Native build on Apple Silicon Macs (works on all Macs)
-  - Intel: **Optional** - requires x86_64 Python environment on ARM Macs
-  - Universal: Requires both architectures' Python libraries (not currently automated)
-- **Linux**: Uses PyInstaller in Docker containers
-  - x64: Uses linux/amd64 Docker platform
-  - ARM64: Uses linux/arm64 Docker platform
-  - Docker Desktop handles architecture emulation automatically
-- **Windows**: Uses Nuitka via AWS CodeBuild (if enabled during init)
-  - Automated builds take 12-15 minutes
-  - Requires CodeBuild to be enabled during `init`
-  - Will be skipped if CodeBuild is not enabled
+| Mode | Flag | Requirements | Best for |
+|---|---|---|---|
+| **Pre-built** | `--prebuilt` | None (binaries in repo) | Most admins — no build tools needed |
+| **Go cross-compile** | `--go` | Go installed | Developers updating binaries |
+| **Legacy** | (default) | PyInstaller, Docker, CodeBuild | Backward compatibility |
 
-**Intel Mac Build Setup (Optional):**
+**Platform Support (Go Cross-Compilation):**
 
-To enable Intel builds on Apple Silicon Macs (optional):
+With `--prebuilt` or `--go`, all 5 platforms are always available regardless of the admin's OS. No Docker, CodeBuild, x86 venvs, or platform-specific toolchains needed.
 
-```bash
-# Step 1: Install x86_64 Homebrew (if not already installed)
-arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+- **macOS ARM64**: Native Apple Silicon binary (~9 MB)
+- **macOS Intel**: Native x86-64 binary (~10 MB)
+- **Linux x64**: Statically linked, works on any distro (~10 MB)
+- **Linux ARM64**: Statically linked for Graviton/ARM (~9 MB)
+- **Windows x64**: Native PE with embedded version info (~14 MB, unstripped for Defender compatibility)
 
-# Step 2: Install x86_64 Python
-arch -x86_64 /usr/local/bin/brew install python@3.12
+**Offline Packaging:**
 
-# Step 3: Create x86_64 virtual environment
-arch -x86_64 /usr/local/bin/python3.12 -m venv ~/venv-x86
-
-# Step 4: Install required packages
-arch -x86_64 ~/venv-x86/bin/pip install pyinstaller boto3 keyring
-```
-
-**Behavior when Intel environment is not set up:**
-
-- For `--target-platform=all`: Skips Intel builds with a note, builds all other platforms
-- For `--target-platform=macos-intel`: Shows instructions for optional setup, skips the build
-- The package process continues successfully without Intel binaries
-- ARM64 binaries can be distributed to all Mac users (Intel and Apple Silicon)
-
-**Graceful Fallback Behavior:**
-
-The package command is designed to handle missing optional components gracefully:
-
-- **Intel Mac builds**: Skipped if x86_64 Python environment is not available on ARM Macs
-- **Windows builds**: Skipped if CodeBuild was not enabled during `init`
-- **Linux builds**: Skipped if Docker is not available
-- **At least one platform must build successfully** for the package command to succeed
+After running `ccwb deploy` once (which saves stack outputs to the profile), `ccwb package --prebuilt` requires **zero network access**. All data comes from:
+- Pre-built binaries in the git repo (`source/go/prebuilt/latest/`)
+- Profile JSON (`~/.ccwb/profiles/{name}.json`) with federation config + OTel endpoint
 
 This ensures that packaging always works, even if some optional platforms are not available.
 

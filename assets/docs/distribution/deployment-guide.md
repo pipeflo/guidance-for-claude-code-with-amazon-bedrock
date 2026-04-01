@@ -696,14 +696,17 @@ poetry run ccwb package --target-platform all
 Or build for specific platforms:
 
 ```bash
-# macOS only
-poetry run ccwb package --target-platform macos
+# Using pre-built Go binaries (recommended — no build tools needed)
+poetry run ccwb package --prebuilt
 
-# Windows only (requires CodeBuild)
-poetry run ccwb package --target-platform windows
+# macOS only
+poetry run ccwb package --prebuilt --target-platform macos-arm64
+
+# Windows only (no CodeBuild needed with Go)
+poetry run ccwb package --prebuilt --target-platform windows
 
 # Linux only
-poetry run ccwb package --target-platform linux
+poetry run ccwb package --prebuilt --target-platform linux-x64
 ```
 
 Packages are created in `dist/` directory:

@@ -66,26 +66,17 @@ poetry run ccwb package --target-platform=macos      # Current macOS architectur
 poetry run ccwb package --target-platform=linux      # Linux via Docker
 ```
 
-**Platform Build Methods (Hybrid System):**
+**Build Modes:**
 
-- **Windows**: Uses Nuitka via AWS CodeBuild
-  - Optimized for performance and minimal antivirus false positives
-- **macOS**: Uses PyInstaller with architecture-specific builds
-  - ARM64: Native build on Apple Silicon Macs (works on all Macs via Rosetta)
-  - Intel: **Optional** - requires x86_64 Python environment on ARM Macs
-  - Universal: Requires both architectures' Python libraries
-- **Linux x64/ARM64**: Uses PyInstaller in Docker containers
-  - Automatically builds both architectures when Docker is available
-  - Docker Desktop handles architecture emulation via Rosetta
+| Mode | Flag | Requirements | Best for |
+|---|---|---|---|
+| **Pre-built** (recommended) | `--prebuilt` | None | Most admins — no build tools needed |
+| **Go cross-compile** | `--go` | Go installed | Developers updating binaries |
+| **Legacy** | (none) | PyInstaller, Docker, CodeBuild | Backward compatibility only |
 
-**Optional: Intel Mac Setup**
+With `--prebuilt`, all 5 platforms (macOS ARM64/Intel, Linux x64/ARM64, Windows) are always available. No Docker, CodeBuild, or platform-specific toolchains required.
 
-To build Intel binaries on Apple Silicon Macs, you'll need an x86_64 Python environment.
-See [CLI Reference](CLI_REFERENCE.md#intel-mac-build-setup-optional) for setup instructions.
-
-The package command will continue successfully even without this setup.
-
-This command performs several operations. First, it retrieves the Cognito Identity Pool ID from your deployed CloudFormation stack. Then it compiles the Python authentication code into standalone executables using PyInstaller for macOS/Linux and Nuitka for Windows. Your organization's configuration - provider domain, client ID, and infrastructure details - gets written to a config.json file that the executables read at runtime.
+This command reads federation configuration from the admin profile (saved during `ccwb deploy`), copies pre-built native Go binaries from the repo, and generates customer-specific `config.json` and `settings.json` files. No AWS access or build tools are needed for this step.
 
 The resulting `dist/` folder contains everything users need:
 
