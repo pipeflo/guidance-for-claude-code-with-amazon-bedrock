@@ -54,6 +54,7 @@ class PackageCommand(Command):
         option("build-verbose", description="Enable verbose logging for build processes", flag=True),
         option("regenerate-installers", description="Regenerate installer scripts using existing binaries from latest dist", flag=True),
         option("go", description="Build binaries using Go cross-compilation (native binaries, no AV false positives)", flag=True),
+        option("prebuilt", description="Use pre-built Go binaries (no build tools needed, default for Go)", flag=True),
     ]
 
     def handle(self) -> int:
@@ -89,6 +90,7 @@ class PackageCommand(Command):
 
         # Go build mode: all platforms always available via cross-compilation
         use_go = self.option("go")
+        use_prebuilt = self.option("prebuilt")
 
         # Interactive prompts if not provided via CLI
         target_platform = self.option("target-platform")
@@ -103,8 +105,8 @@ class PackageCommand(Command):
                 "linux-arm64",
             ]
 
-            # With Go, Windows is always available (cross-compile from any platform)
-            if use_go:
+            # With Go or prebuilt, Windows is always available
+            if use_go or use_prebuilt:
                 platform_choices.append("windows")
             elif hasattr(profile, "enable_codebuild") and profile.enable_codebuild:
                 platform_choices.append("windows")
@@ -162,35 +164,42 @@ class PackageCommand(Command):
             )
             return 1
 
-        # Get actual Identity Pool ID or Role ARN from stack outputs
-        console.print("[yellow]Fetching deployment information...[/yellow]")
-        stack_outputs = get_stack_outputs(
-            profile.stack_names.get("auth", f"{profile.identity_pool_name}-stack"), profile.aws_region
-        )
-
-        if not stack_outputs:
-            console.print("[red]Could not fetch stack outputs. Is the stack deployed?[/red]")
-            return 1
-
-        # Check federation type and get appropriate identifier
-        federation_type = stack_outputs.get("FederationType", profile.federation_type)
+        # Get federation identifier — try profile first, fall back to CloudFormation
+        federation_type = profile.federation_type
         identity_pool_id = None
         federated_role_arn = None
 
-        if federation_type == "direct":
-            # Try DirectSTSRoleArn first (both old and new templates have this for direct mode)
-            # Then fallback to FederatedRoleArn (new templates)
-            federated_role_arn = stack_outputs.get("DirectSTSRoleArn")
-            if not federated_role_arn or federated_role_arn == "N/A":
-                federated_role_arn = stack_outputs.get("FederatedRoleArn")
-            if not federated_role_arn or federated_role_arn == "N/A":
-                console.print("[red]Direct STS Role ARN not found in stack outputs.[/red]")
-                return 1
+        if federation_type == "direct" and getattr(profile, "federated_role_arn", None):
+            federated_role_arn = profile.federated_role_arn
+            console.print(f"[dim]Using role ARN from profile: {federated_role_arn}[/dim]")
+        elif federation_type != "direct" and getattr(profile, "identity_pool_name", None):
+            identity_pool_id = profile.identity_pool_name
+            console.print(f"[dim]Using identity pool from profile: {identity_pool_id}[/dim]")
         else:
-            identity_pool_id = stack_outputs.get("IdentityPoolId")
-            if not identity_pool_id:
-                console.print("[red]Identity Pool ID not found in stack outputs.[/red]")
+            # Fall back to CloudFormation stack outputs
+            console.print("[yellow]Fetching deployment information from CloudFormation...[/yellow]")
+            stack_outputs = get_stack_outputs(
+                profile.stack_names.get("auth", f"{profile.identity_pool_name}-stack"), profile.aws_region
+            )
+
+            if not stack_outputs:
+                console.print("[red]Could not fetch stack outputs. Is the stack deployed?[/red]")
                 return 1
+
+            federation_type = stack_outputs.get("FederationType", profile.federation_type)
+
+            if federation_type == "direct":
+                federated_role_arn = stack_outputs.get("DirectSTSRoleArn")
+                if not federated_role_arn or federated_role_arn == "N/A":
+                    federated_role_arn = stack_outputs.get("FederatedRoleArn")
+                if not federated_role_arn or federated_role_arn == "N/A":
+                    console.print("[red]Direct STS Role ARN not found in stack outputs.[/red]")
+                    return 1
+            else:
+                identity_pool_id = stack_outputs.get("IdentityPoolId")
+                if not identity_pool_id:
+                    console.print("[red]Identity Pool ID not found in stack outputs.[/red]")
+                    return 1
 
         # Welcome
         console.print(
@@ -233,8 +242,8 @@ class PackageCommand(Command):
         # Build package
         console.print("\n[bold]Building package...[/bold]")
 
-        # Pre-flight check for Intel builds on ARM Macs (not needed for Go cross-compile)
-        if not use_go and platform.system().lower() == "darwin" and platform.machine().lower() == "arm64":
+        # Pre-flight check for Intel builds on ARM Macs (not needed for Go cross-compile or prebuilt)
+        if not use_go and not use_prebuilt and platform.system().lower() == "darwin" and platform.machine().lower() == "arm64":
             if target_platform in ["macos-intel", "all"]:
                 x86_venv_path = Path.home() / "venv-x86"
                 if not (x86_venv_path.exists() and (x86_venv_path / "bin" / "pyinstaller").exists()):
@@ -254,10 +263,10 @@ class PackageCommand(Command):
                         console.print()
 
         # Build executable(s)
-        # With Go, cross-compilation makes all platforms available from any machine
-        if use_go and not isinstance(target_platform, list) and target_platform == "all":
+        # With Go or prebuilt, all platforms available from any machine
+        if (use_go or use_prebuilt) and not isinstance(target_platform, list) and target_platform == "all":
             platforms_to_build = ["macos-arm64", "macos-intel", "linux-x64", "linux-arm64", "windows"]
-        elif use_go and isinstance(target_platform, list) and "all" in target_platform:
+        elif (use_go or use_prebuilt) and isinstance(target_platform, list) and "all" in target_platform:
             platforms_to_build = ["macos-arm64", "macos-intel", "linux-x64", "linux-arm64", "windows"]
         elif isinstance(target_platform, list):
             # User selected multiple platforms via checkbox
@@ -339,7 +348,17 @@ class PackageCommand(Command):
 
         console.print()
 
-        if use_go:
+        if use_prebuilt:
+            # Use pre-built binaries: no build tools needed
+            console.print("[cyan]Using pre-built Go binaries...[/cyan]")
+            try:
+                go_results = self._use_prebuilt_binaries(output_dir, platforms_to_build, profile.monitoring_enabled)
+                built_executables = go_results["executables"]
+                built_otel_helpers = go_results["otel_helpers"]
+            except Exception as e:
+                console.print(f"[red]Pre-built binaries not available: {e}[/red]")
+                return 1
+        elif use_go:
             # Go cross-compilation: build all selected platforms at once
             console.print("[cyan]Building Go binaries (cross-compilation)...[/cyan]")
             try:
@@ -521,6 +540,67 @@ class PackageCommand(Command):
         except Exception as e:
             console.print(f"[red]Error checking build status: {e}[/red]")
             return 1
+
+    def _use_prebuilt_binaries(self, output_dir: Path, platforms: list, monitoring_enabled: bool) -> dict:
+        """Copy pre-built Go binaries from source/go/prebuilt/ instead of compiling.
+
+        No Go, Docker, or AWS access required. The prebuilt directory contains
+        generic binaries that work for all customers.
+        """
+        import shutil
+
+        prebuilt_dir = Path(__file__).parents[3] / "go" / "prebuilt" / "latest"
+        if not prebuilt_dir.exists():
+            raise FileNotFoundError(
+                f"Pre-built binaries not found at {prebuilt_dir}. "
+                "Run 'make prebuilt' from source/go/ or use --go to compile locally."
+            )
+
+        executables = []
+        otel_helpers = []
+
+        for plat in platforms:
+            # Copy credential-process
+            if plat == "windows":
+                src_name = "credential-process-windows.exe"
+            else:
+                src_name = f"credential-process-{plat}"
+
+            src = prebuilt_dir / src_name
+            if not src.exists():
+                raise FileNotFoundError(f"Pre-built binary not found: {src}")
+            dst = output_dir / src_name
+            shutil.copy2(src, dst)
+            executables.append((plat, dst))
+
+            self.line(f"  Copied <comment>{src_name}</comment>")
+
+            # Copy otel-helper
+            if monitoring_enabled:
+                if plat == "windows":
+                    src_name = "otel-helper-windows.exe"
+                else:
+                    src_name = f"otel-helper-{plat}"
+
+                src = prebuilt_dir / src_name
+                if not src.exists():
+                    raise FileNotFoundError(f"Pre-built binary not found: {src}")
+                dst = output_dir / src_name
+                shutil.copy2(src, dst)
+                otel_helpers.append((plat, dst))
+
+                self.line(f"  Copied <comment>{src_name}</comment>")
+
+        # Copy generic install scripts
+        for script in ["install.sh", "install.bat", "ccwb-install.ps1"]:
+            src = prebuilt_dir / script
+            if src.exists():
+                shutil.copy2(src, output_dir / script)
+                if script == "install.sh":
+                    (output_dir / script).chmod(0o755)
+
+        self.line(f"  <info>Copied {len(executables) + len(otel_helpers)} binaries + install scripts</info>")
+        return {"executables": executables, "otel_helpers": otel_helpers}
 
     def _build_go_binaries(self, output_dir: Path, platforms: list, monitoring_enabled: bool) -> dict:
         """Build binaries using Go cross-compilation.
@@ -1863,23 +1943,33 @@ RUN pyinstaller \
         for plat, helper_path in built_otel_helpers:
             shutil.copy2(helper_path, output_dir / helper_path.name)
 
-        # Get federation info from stack outputs
-        console.print("[cyan]Fetching deployment information...[/cyan]")
-        stack_outputs = get_stack_outputs(
-            profile.stack_names.get("auth", f"{profile.identity_pool_name}-stack"), profile.aws_region
-        )
-        if not stack_outputs:
-            console.print("[red]Could not fetch stack outputs. Is the stack deployed?[/red]")
-            return 1
+        # Get federation info — try profile first, fall back to CloudFormation
+        federation_type = profile.federation_type
+        federation_identifier = None
 
-        federation_type = stack_outputs.get("FederationType", profile.federation_type)
-        if federation_type == "direct":
-            federation_identifier = stack_outputs.get("DirectSTSRoleArn") or stack_outputs.get("FederatedRoleArn")
+        if federation_type == "direct" and getattr(profile, "federated_role_arn", None):
+            federation_identifier = profile.federated_role_arn
+            console.print(f"[dim]Using role ARN from profile: {federation_identifier}[/dim]")
+        elif federation_type != "direct" and getattr(profile, "identity_pool_name", None):
+            federation_identifier = profile.identity_pool_name
+            console.print(f"[dim]Using identity pool from profile: {federation_identifier}[/dim]")
         else:
-            federation_identifier = stack_outputs.get("IdentityPoolId")
+            console.print("[cyan]Fetching deployment information from CloudFormation...[/cyan]")
+            stack_outputs = get_stack_outputs(
+                profile.stack_names.get("auth", f"{profile.identity_pool_name}-stack"), profile.aws_region
+            )
+            if not stack_outputs:
+                console.print("[red]Could not fetch stack outputs. Is the stack deployed?[/red]")
+                return 1
+
+            federation_type = stack_outputs.get("FederationType", profile.federation_type)
+            if federation_type == "direct":
+                federation_identifier = stack_outputs.get("DirectSTSRoleArn") or stack_outputs.get("FederatedRoleArn")
+            else:
+                federation_identifier = stack_outputs.get("IdentityPoolId")
 
         if not federation_identifier or federation_identifier == "N/A":
-            console.print("[red]Federation identifier not found in stack outputs.[/red]")
+            console.print("[red]Federation identifier not found in profile or stack outputs.[/red]")
             return 1
 
         # Prompt for co-authorship and OTEL attributes
@@ -1978,6 +2068,12 @@ RUN pyinstaller \
         # Add selected_model if available
         if hasattr(profile, "selected_model") and profile.selected_model:
             config[profile_name]["selected_model"] = profile.selected_model
+
+        # Add quota enforcement settings if configured
+        if hasattr(profile, "quota_api_endpoint") and profile.quota_api_endpoint:
+            config[profile_name]["quota_api_endpoint"] = profile.quota_api_endpoint
+            config[profile_name]["quota_fail_mode"] = getattr(profile, "quota_fail_mode", "open")
+            config[profile_name]["quota_check_interval"] = getattr(profile, "quota_check_interval", 30)
 
         config_path = output_dir / "config.json"
         with open(config_path, "w") as f:
@@ -2764,33 +2860,45 @@ Available metrics include:
 
             # If monitoring is enabled, add telemetry configuration
             if profile.monitoring_enabled:
-                # Get monitoring stack outputs
-                monitoring_stack = profile.stack_names.get("monitoring", f"{profile.identity_pool_name}-otel-collector")
-                cmd = [
-                    "aws",
-                    "cloudformation",
-                    "describe-stacks",
-                    "--stack-name",
-                    monitoring_stack,
-                    "--region",
-                    profile.aws_region,
-                    "--query",
-                    "Stacks[0].Outputs",
-                    "--output",
-                    "json",
-                ]
+                # Try profile first (saved by ccwb deploy), fall back to CloudFormation query
+                endpoint = getattr(profile, "otel_collector_endpoint", None)
 
-                result = subprocess.run(cmd, capture_output=True, text=True)
-                if result.returncode == 0:
-                    outputs = json.loads(result.stdout)
-                    endpoint = None
+                if not endpoint:
+                    # Fall back to reading from CloudFormation stack outputs
+                    monitoring_stack = profile.stack_names.get("monitoring", f"{profile.identity_pool_name}-otel-collector")
+                    cmd = [
+                        "aws",
+                        "cloudformation",
+                        "describe-stacks",
+                        "--stack-name",
+                        monitoring_stack,
+                        "--region",
+                        profile.aws_region,
+                        "--query",
+                        "Stacks[0].Outputs",
+                        "--output",
+                        "json",
+                    ]
 
-                    for output in outputs:
-                        if output["OutputKey"] == "CollectorEndpoint":
-                            endpoint = output["OutputValue"]
-                            break
+                    result = subprocess.run(cmd, capture_output=True, text=True)
+                    if result.returncode == 0:
+                        outputs = json.loads(result.stdout)
+                        for output in outputs:
+                            if output["OutputKey"] == "CollectorEndpoint":
+                                endpoint = output["OutputValue"]
+                                break
 
-                    if endpoint:
+                        # Save to profile for next time
+                        if endpoint:
+                            profile.otel_collector_endpoint = endpoint
+                            try:
+                                from claude_code_with_bedrock.config import Config
+                                config = Config.load()
+                                config.save_profile(profile)
+                            except Exception:
+                                pass
+
+                if endpoint:
                         # Add monitoring configuration
                         resource_attrs = otel_resource_attributes or (
                             "department=engineering,team.id=default,"
@@ -2817,10 +2925,8 @@ Available metrics include:
                             console.print(
                                 "[dim]WARNING: Using HTTP endpoint - consider enabling HTTPS for production[/dim]"
                             )
-                    else:
-                        console.print("[yellow]Warning: No monitoring endpoint found in stack outputs[/yellow]")
                 else:
-                    console.print("[yellow]Warning: Could not fetch monitoring stack outputs[/yellow]")
+                    console.print("[yellow]Warning: No monitoring endpoint found[/yellow]")
 
             # Save settings.json
             settings_path = claude_dir / "settings.json"

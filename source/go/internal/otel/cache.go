@@ -28,7 +28,10 @@ func CacheDir() (string, error) {
 	return dir, nil
 }
 
-// ReadCachedHeaders returns cached headers if the token hasn't expired (with 10 min buffer).
+// ReadCachedHeaders returns cached headers if available.
+// Headers are static user attributes (email, department, etc.) that don't change
+// when the JWT token expires, so we return them even if the token has expired.
+// This prevents triggering browser re-authentication just for telemetry headers.
 func ReadCachedHeaders(profile string) (map[string]string, error) {
 	dir, err := CacheDir()
 	if err != nil {
@@ -45,12 +48,11 @@ func ReadCachedHeaders(profile string) (map[string]string, error) {
 		return nil, err
 	}
 
-	now := time.Now().Unix()
-	if entry.TokenExp-now > 600 {
-		return entry.Headers, nil
+	if len(entry.Headers) == 0 {
+		return nil, fmt.Errorf("cache empty")
 	}
 
-	return nil, fmt.Errorf("cache expired")
+	return entry.Headers, nil
 }
 
 // WriteCachedHeaders writes both the metadata cache and the raw headers file atomically.

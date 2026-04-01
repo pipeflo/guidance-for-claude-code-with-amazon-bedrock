@@ -46,7 +46,7 @@ func TestWriteAndReadCachedHeaders(t *testing.T) {
 	}
 }
 
-func TestReadCachedHeaders_Expired(t *testing.T) {
+func TestReadCachedHeaders_ExpiredTokenStillReturnsHeaders(t *testing.T) {
 	tmpDir := t.TempDir()
 	origHome := os.Getenv("HOME")
 	os.Setenv("HOME", tmpDir)
@@ -54,13 +54,17 @@ func TestReadCachedHeaders_Expired(t *testing.T) {
 
 	profile := "expired-profile"
 	headers := map[string]string{"x-user-email": "test@example.com"}
-	tokenExp := time.Now().Unix() + 300 // Only 5 min left (< 10 min buffer)
+	tokenExp := time.Now().Unix() - 3600 // Expired 1 hour ago
 
 	_ = WriteCachedHeaders(profile, headers, tokenExp)
 
-	_, err := ReadCachedHeaders(profile)
-	if err == nil {
-		t.Error("expected error for expired cache")
+	// Should still return headers — they're static user attributes
+	cached, err := ReadCachedHeaders(profile)
+	if err != nil {
+		t.Fatalf("expected headers even with expired token, got error: %v", err)
+	}
+	if cached["x-user-email"] != "test@example.com" {
+		t.Errorf("x-user-email = %q, want test@example.com", cached["x-user-email"])
 	}
 }
 

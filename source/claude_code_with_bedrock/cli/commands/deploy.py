@@ -613,9 +613,24 @@ class DeployCommand(Command):
                     params.append(f"HostedZoneId={monitoring_config['hosted_zone_id']}")
 
                 console.print(f"[dim]Using parameters: {params}[/dim]")
-                return deploy_with_cf(
+                result = deploy_with_cf(
                     template, stack_name, params, task_description="Deploying monitoring collector..."
                 )
+
+                # Save OTel collector endpoint to profile immediately after deploy
+                if result == 0:
+                    monitoring_outputs = get_stack_outputs(stack_name, profile.aws_region)
+                    if monitoring_outputs:
+                        endpoint = monitoring_outputs.get("CollectorEndpoint")
+                        if endpoint and endpoint != "N/A":
+                            profile.otel_collector_endpoint = endpoint
+                            try:
+                                Config.load().save_profile(profile)
+                                console.print(f"[dim]Saved OTel endpoint to profile: {endpoint}[/dim]")
+                            except Exception:
+                                pass
+
+                return result
 
             elif stack_type == "dashboard":
                 template = project_root / "deployment" / "infrastructure" / "claude-code-dashboard.yaml"
@@ -881,6 +896,12 @@ class DeployCommand(Command):
                 console.print("\n[bold]Monitoring Stack:[/bold]")
                 endpoint = monitoring_outputs.get("CollectorEndpoint", "N/A")
                 console.print(f"• OTLP Endpoint: [cyan]{endpoint}[/cyan]")
+
+                # Save endpoint to profile so ccwb package doesn't need to read CF outputs
+                if endpoint and endpoint != "N/A":
+                    profile.otel_collector_endpoint = endpoint
+                    config.save_profile(profile)
+                    console.print("[dim]  Saved to profile for package generation[/dim]")
 
             dashboard_stack = profile.stack_names.get("dashboard", f"{profile.identity_pool_name}-dashboard")
             dashboard_outputs = get_stack_outputs(dashboard_stack, profile.aws_region)

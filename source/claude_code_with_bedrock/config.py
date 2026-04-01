@@ -65,6 +65,9 @@ class Profile:
     quota_fail_mode: str = "open"  # "open" (allow on error) or "closed" (deny on error)
     quota_check_interval: int = 30  # Minutes between quota re-checks (0 = every request)
 
+    # Monitoring endpoint (saved from deploy, avoids re-reading CloudFormation outputs)
+    otel_collector_endpoint: str | None = None  # OTel collector ALB endpoint URL
+
     # Federation configuration
     federation_type: str = "cognito"  # "cognito" or "direct"
     federated_role_arn: str | None = None  # ARN for Direct STS federation
