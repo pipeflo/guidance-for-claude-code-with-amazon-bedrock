@@ -12,7 +12,7 @@ The credential provider embeds the user's email in the STS session name, so the 
 arn:aws:sts::123456789012:assumed-role/app-role/alice@acme.com
 ```
 
-This ARN automatically appears in the `line_item_iam_principal` column of CUR 2.0 when IAM principal data is enabled.
+This ARN automatically appears in the `line_item_iam_principal` column of CUR 2.0 when IAM principal data is enabled. **This is the default behavior — no IdP changes or tag configuration required.**
 
 ### Enable IAM principal data in CUR 2.0
 
@@ -20,7 +20,13 @@ This ARN automatically appears in the `line_item_iam_principal` column of CUR 2.
 2. Create or edit a Standard data export (CUR 2.0)
 3. Under **Additional export content**, enable **"Include caller identity (IAM principal) allocation data"**
 
-Query `line_item_iam_principal` in CUR 2.0 (for example, via Athena) to see per-user spend. Cost Explorer does not expose this column as a filter dimension.
+The following example shows per-user Bedrock costs queried from CUR 2.0 data using Athena:
+
+![Per-user Bedrock cost attribution via CUR 2.0](../images/cost-attribution-per-user.png)
+
+Each user's email is visible in the `line_item_iam_principal` column, enabling per-user cost visibility without any IdP changes or tag configuration.
+
+> **Note:** `line_item_iam_principal` is available in CUR 2.0 data and can be queried using tools like Athena or QuickSight. Cost Explorer does not expose this column as a filter or grouping dimension. To see per-user costs in Cost Explorer, configure session tags as described in [section 3](#3-optional-session-tags-for-richer-per-user-attribution).
 
 ---
 
@@ -146,3 +152,9 @@ After at least one Bedrock API call has been made with session tags:
 2. Filter for **user-defined** cost allocation tags (not "IAM principal type" — that is for section 2 role-level tags)
 3. Locate `UserEmail` and `UserId` and click **Activate** — tags take up to **24 hours to appear** after the first tagged API call, and a further **24 hours to activate**
 4. In Cost Explorer, group or filter by **Tag → `UserEmail`** to see per-user Bedrock spend
+
+Once activated, session tags are available in both **Cost Explorer** and **CUR 2.0**. This means you can group or filter costs by tag in the Cost Explorer console without needing Athena, unlike the `line_item_iam_principal` column in section 1 which is only available in CUR 2.0.
+
+With session tags configured, you can also group costs by department or any other tag dimension. The following example shows department-level Bedrock costs queried from CUR 2.0 data using Athena:
+
+![Per-department Bedrock cost attribution via CUR 2.0](../images/cost-attribution-per-department.png)
