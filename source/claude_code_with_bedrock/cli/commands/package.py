@@ -2868,69 +2868,109 @@ Available metrics include:
 
                 if not endpoint:
                     # Fall back to reading from CloudFormation stack outputs
-                    monitoring_stack = profile.stack_names.get("monitoring", f"{profile.identity_pool_name}-otel-collector")
-                    cmd = [
-                        "aws",
-                        "cloudformation",
-                        "describe-stacks",
-                        "--stack-name",
-                        monitoring_stack,
-                        "--region",
-                        profile.aws_region,
-                        "--query",
-                        "Stacks[0].Outputs",
-                        "--output",
-                        "json",
+                    # Try multiple possible stack name patterns
+                    possible_stacks = [
+                        profile.stack_names.get("monitoring"),
+                        f"{profile.identity_pool_name}-otel-collector" if hasattr(profile, "identity_pool_name") and profile.identity_pool_name else None,
+                        f"{profile.stack_names.get('auth', '')}-otel-collector" if profile.stack_names.get("auth") else None,
                     ]
+                    # Remove None/empty entries
+                    possible_stacks = [s for s in possible_stacks if s]
 
-                    result = subprocess.run(cmd, capture_output=True, text=True)
-                    if result.returncode == 0:
-                        outputs = json.loads(result.stdout)
-                        for output in outputs:
-                            if output["OutputKey"] == "CollectorEndpoint":
-                                endpoint = output["OutputValue"]
-                                break
+                    for monitoring_stack in possible_stacks:
+                        cmd = [
+                            "aws",
+                            "cloudformation",
+                            "describe-stacks",
+                            "--stack-name",
+                            monitoring_stack,
+                            "--region",
+                            profile.aws_region,
+                            "--query",
+                            "Stacks[0].Outputs",
+                            "--output",
+                            "json",
+                        ]
 
-                        # Save to profile for next time
+                        result = subprocess.run(cmd, capture_output=True, text=True)
+                        if result.returncode == 0:
+                            try:
+                                outputs = json.loads(result.stdout)
+                                for output in outputs:
+                                    if output["OutputKey"] == "CollectorEndpoint":
+                                        endpoint = output["OutputValue"]
+                                        break
+                            except (json.JSONDecodeError, TypeError):
+                                pass
+
                         if endpoint:
+                            # Save to profile for next time
                             profile.otel_collector_endpoint = endpoint
                             try:
                                 from claude_code_with_bedrock.config import Config
                                 config = Config.load()
                                 config.save_profile(profile)
+                                console.print(f"[dim]Found endpoint from stack '{monitoring_stack}', saved to profile[/dim]")
                             except Exception:
                                 pass
+                            break
+
+                if not endpoint:
+                    # Monitoring stack not deployed or endpoint not found
+                    console.print("[yellow]Warning: No OTel collector endpoint found in profile or CloudFormation.[/yellow]")
+                    console.print("[yellow]Run 'ccwb deploy' to deploy the monitoring stack, or enter the endpoint manually.[/yellow]")
+                    try:
+                        import questionary
+                        endpoint = questionary.text(
+                            "OTel collector endpoint URL (leave blank to skip telemetry):",
+                            default="",
+                        ).ask()
+                        if endpoint:
+                            endpoint = endpoint.strip()
+                        if endpoint:
+                            # Save to profile so this is never asked again
+                            profile.otel_collector_endpoint = endpoint
+                            try:
+                                from claude_code_with_bedrock.config import Config
+                                config = Config.load()
+                                config.save_profile(profile)
+                                console.print(f"[dim]Saved endpoint to profile[/dim]")
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
 
                 if endpoint:
-                        # Add monitoring configuration
-                        resource_attrs = otel_resource_attributes or (
-                            "department=engineering,team.id=default,"
-                            "cost_center=default,organization=default,"
-                            "project=default"
-                        )
-                        settings["env"].update(
-                            {
-                                "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
-                                "OTEL_METRICS_EXPORTER": "otlp",
-                                "OTEL_LOGS_EXPORTER": "otlp",
-                                "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
-                                "OTEL_EXPORTER_OTLP_ENDPOINT": endpoint,
-                                "OTEL_RESOURCE_ATTRIBUTES": resource_attrs,
-                            }
-                        )
+                    # Add monitoring configuration
+                    resource_attrs = otel_resource_attributes or (
+                        "department=engineering,team.id=default,"
+                        "cost_center=default,organization=default,"
+                        "project=default"
+                    )
+                    settings["env"].update(
+                        {
+                            "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+                            "OTEL_METRICS_EXPORTER": "otlp",
+                            "OTEL_LOGS_EXPORTER": "otlp",
+                            "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
+                            "OTEL_EXPORTER_OTLP_ENDPOINT": endpoint,
+                            "OTEL_RESOURCE_ATTRIBUTES": resource_attrs,
+                        }
+                    )
 
-                        # Add the helper executable for generating OTEL headers with user attributes
-                        # Use a placeholder that will be replaced by the installer script based on platform
-                        settings["otelHeadersHelper"] = "__OTEL_HELPER_PATH__"
+                    # Add the helper executable for generating OTEL headers with user attributes
+                    # Use a placeholder that will be replaced by the installer script based on platform
+                    settings["otelHeadersHelper"] = "__OTEL_HELPER_PATH__"
 
-                        is_https = endpoint.startswith("https://")
-                        console.print(f"[dim]Added monitoring with {'HTTPS' if is_https else 'HTTP'} endpoint[/dim]")
-                        if not is_https:
-                            console.print(
-                                "[dim]WARNING: Using HTTP endpoint - consider enabling HTTPS for production[/dim]"
-                            )
+                    is_https = endpoint.startswith("https://")
+                    console.print(f"[dim]Added monitoring with {'HTTPS' if is_https else 'HTTP'} endpoint[/dim]")
+                    if not is_https:
+                        console.print(
+                            "[dim]WARNING: Using HTTP endpoint - consider enabling HTTPS for production[/dim]"
+                        )
                 else:
-                    console.print("[yellow]Warning: No monitoring endpoint found[/yellow]")
+                    console.print("[red]ERROR: Monitoring enabled but no OTel endpoint configured.[/red]")
+                    console.print("[red]Run 'ccwb deploy' first or set otel_collector_endpoint in the profile.[/red]")
 
             # Save settings.json
             settings_path = claude_dir / "settings.json"
