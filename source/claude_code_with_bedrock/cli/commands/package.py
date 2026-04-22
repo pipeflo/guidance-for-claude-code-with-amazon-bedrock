@@ -2848,15 +2848,18 @@ Available metrics include:
             if hasattr(profile, "selected_model") and profile.selected_model:
                 settings["env"]["ANTHROPIC_MODEL"] = profile.selected_model
 
-                # Determine and set small/fast model based on selected model family
-                if "opus" in profile.selected_model:
-                    # For Opus, use Haiku as small/fast model
+                # Determine and set small/fast model and default Haiku model
+                if "opus" in profile.selected_model or "sonnet" in profile.selected_model:
+                    # For Opus/Sonnet, use Haiku as small/fast model
                     model_id = profile.selected_model
                     prefix = model_id.split(".anthropic")[0]  # Get us/eu/apac prefix
-                    settings["env"]["ANTHROPIC_SMALL_FAST_MODEL"] = f"{prefix}.anthropic.claude-3-5-haiku-20241022-v1:0"
+                    haiku_model = f"{prefix}.anthropic.claude-haiku-4-5-20251001-v1:0"
+                    settings["env"]["ANTHROPIC_SMALL_FAST_MODEL"] = haiku_model
+                    settings["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = haiku_model
                 else:
-                    # For other models, use same model as small/fast (or could use Haiku)
+                    # For Haiku or other models, use same model as small/fast
                     settings["env"]["ANTHROPIC_SMALL_FAST_MODEL"] = profile.selected_model
+                    settings["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = profile.selected_model
 
             # If monitoring is enabled, add telemetry configuration
             if profile.monitoring_enabled:
