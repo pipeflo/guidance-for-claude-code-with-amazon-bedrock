@@ -2902,7 +2902,8 @@ Available metrics include:
                         # Add monitoring configuration
                         resource_attrs = otel_resource_attributes or (
                             "department=engineering,team.id=default,"
-                            "cost_center=default,organization=default"
+                            "cost_center=default,organization=default,"
+                            "project=default"
                         )
                         settings["env"].update(
                             {
