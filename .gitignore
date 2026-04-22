@@ -82,3 +82,23 @@ PARTITION_*.md
 FEEDBACK.md
 .claudeignore
 .mcp.json
+
+# Local POC/demo distributions and customer-scoped output bundles.
+# Never commit these: they contain signed installers, signed URLs,
+# platform zips and generated config.json specific to a tenant.
+*-poc-dist/
+*-poc/
+
+# Ad-hoc scratch/fix workspaces inside source/ (duplicate trees used
+# for one-off fixes). Keep them out of the package.
+source/fix*/
+
+# Developer-local profile/test dumps produced by `ccwb` wizards.
+# These can contain Okta/Auth0/Azure domains, client IDs, VPC and
+# subnet IDs from the developer's sandbox.
+ccwb-test.json
+ccwb-*-test.json
+
+# Ad-hoc developer fix scripts at repo root.
+/apply-fix*.sh
+/ccwb-fix*.sh
