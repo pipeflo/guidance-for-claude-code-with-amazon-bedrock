@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"regexp"
-	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -74,17 +73,27 @@ func AssumeRoleWithWebIdentity(region, roleARN, idToken string, claims jwt.Claim
 	}, nil
 }
 
+// buildSessionName derives an STS RoleSessionName from OIDC claims.
+//
+// The resulting principal ARN (assumed-role/RoleName/<session-name>) is what
+// appears in the CUR 2.0 line_item_iam_principal column, enabling per-user
+// Bedrock cost visibility without IdP-side session tag configuration. To
+// produce readable rows like assumed-role/RoleName/alice@acme.com, we use
+// the full email when available and fall back to sub only when email is
+// absent (e.g. some Entra ID configurations).
+//
+// AWS STS RoleSessionName regex: [\w+=,.@-]*, max length 64.
 func buildSessionName(claims jwt.Claims) string {
-	if sub := claims.GetString("sub"); sub != "" {
-		sanitized := sanitizeRe.ReplaceAllString(sub, "-")
-		if len(sanitized) > 32 {
-			sanitized = sanitized[:32]
-		}
-		return "claude-code-" + sanitized
-	}
 	if email := claims.GetString("email"); email != "" {
-		parts := strings.SplitN(email, "@", 2)
-		sanitized := sanitizeRe.ReplaceAllString(parts[0], "-")
+		sanitized := sanitizeRe.ReplaceAllString(email, "-")
+		if len(sanitized) > 64 {
+			sanitized = sanitized[:64]
+		}
+		return sanitized
+	}
+	if sub := claims.GetString("sub"); sub != "" {
+		// Auth0 often uses pipe-delimited sub (e.g. auth0|12345); sanitize first.
+		sanitized := sanitizeRe.ReplaceAllString(sub, "-")
 		if len(sanitized) > 32 {
 			sanitized = sanitized[:32]
 		}
