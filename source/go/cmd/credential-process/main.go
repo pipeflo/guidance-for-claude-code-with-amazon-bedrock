@@ -40,6 +40,7 @@ func main() {
 	clearCache := flag.Bool("clear-cache", false, "Clear cached credentials")
 	checkExpiration := flag.Bool("check-expiration", false, "Check if credentials are expired")
 	refreshIfNeeded := flag.Bool("refresh-if-needed", false, "Refresh credentials if expired")
+	showTags := flag.Bool("show-tags", false, "Print the https://aws.amazon.com/tags claim from the cached ID token (debug)")
 	flag.Parse()
 
 	if *versionFlag || *shortVersion {
@@ -79,6 +80,10 @@ func main() {
 	if *clearCache {
 		app.clearCache()
 		os.Exit(0)
+	}
+
+	if *showTags {
+		os.Exit(app.showTags())
 	}
 
 	if *getMonitoring {
@@ -211,6 +216,46 @@ func (a *credentialApp) checkExpiration() int {
 		return 1
 	}
 	fmt.Fprintf(os.Stderr, "Credentials valid for profile '%s'\n", a.profile)
+	return 0
+}
+
+// showTags prints the contents of the `https://aws.amazon.com/tags` claim
+// from the cached monitoring token. This is a diagnostic for customers
+// setting up session-tag-based cost attribution -- it answers "is my IdP
+// actually emitting the tags I expect?" without needing to decode JWTs
+// by hand. Triggers a fresh OIDC flow if no cached token is available.
+func (a *credentialApp) showTags() int {
+	token, _ := storage.GetMonitoringToken(a.profile, a.cfg.CredentialStorage)
+	var claims jwt.Claims
+	if token != "" {
+		if c, err := jwt.DecodePayload(token); err == nil {
+			claims = c
+		}
+	}
+	if claims == nil {
+		debugPrint("No cached monitoring token; running OIDC flow to read tags claim")
+		authResult, err := a.authenticate()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			return 1
+		}
+		claims = authResult.TokenClaims
+		_ = storage.SaveMonitoringToken(a.profile, a.cfg.CredentialStorage,
+			authResult.IDToken, map[string]interface{}(claims))
+	}
+
+	tagsClaim, ok := claims["https://aws.amazon.com/tags"]
+	if !ok {
+		fmt.Fprintln(os.Stderr, "No `https://aws.amazon.com/tags` claim present in the ID token.")
+		fmt.Fprintln(os.Stderr, "Your IdP is not configured to emit session tags. See assets/docs/COST_ATTRIBUTION.md section 3.")
+		return 1
+	}
+	pretty, err := json.MarshalIndent(tagsClaim, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Could not format tags claim: %v\n", err)
+		return 1
+	}
+	fmt.Println(string(pretty))
 	return 0
 }
 
