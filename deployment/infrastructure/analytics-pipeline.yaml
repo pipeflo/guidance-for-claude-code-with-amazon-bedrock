@@ -1098,45 +1098,10 @@ Resources:
         ORDER BY greatest(tpm_utilization_pct, rpm_utilization_pct) DESC
         LIMIT 100;
 
-  IdentityProviderUsageQuery:
-    Type: AWS::Athena::NamedQuery
-    Properties:
-      Database: !Ref GlueDatabase
-      WorkGroup: !Ref AthenaWorkgroup
-      Name: Usage Analysis by Identity Provider
-      Description: Compare usage patterns across different identity providers
-      QueryString: !Sub |
-        WITH user_providers AS (
-          SELECT
-            user_id,
-            user_email,
-            -- Simple heuristic to guess IdP from email patterns or org structure
-            CASE
-              WHEN user_email LIKE '%okta%' THEN 'Okta'
-              WHEN user_email LIKE '%auth0%' THEN 'Auth0'
-              WHEN user_email LIKE '%amazonaws.com' THEN 'Cognito'
-              WHEN organization_id = 'amazon-internal' THEN 'Cognito'
-              ELSE 'Unknown'
-            END as identity_provider,
-            token_usage,
-            type
-          FROM "${GlueDatabase}".metrics
-          WHERE year = CAST(YEAR(CURRENT_DATE) AS VARCHAR)
-            AND month IN (LPAD(CAST(MONTH(CURRENT_DATE) AS VARCHAR), 2, '0'),
-                          LPAD(CAST(MONTH(CURRENT_DATE - INTERVAL '1' MONTH) AS VARCHAR), 2, '0'),
-                          LPAD(CAST(MONTH(CURRENT_DATE - INTERVAL '2' MONTH) AS VARCHAR), 2, '0'))
-            AND from_unixtime(timestamp/1000) >= CURRENT_TIMESTAMP - INTERVAL '30' DAY
-        )
-        SELECT
-          identity_provider,
-          COUNT(DISTINCT user_id) as unique_users,
-          SUM(CASE WHEN type = 'input' THEN token_usage ELSE 0 END) as input_tokens,
-          SUM(CASE WHEN type = 'output' THEN token_usage ELSE 0 END) as output_tokens,
-          SUM(token_usage) as total_tokens,
-          ROUND(SUM(token_usage) * 0.000015, 2) as estimated_cost_usd
-        FROM user_providers
-        GROUP BY identity_provider
-        ORDER BY total_tokens DESC;
+  # IdentityProviderUsageQuery removed: the classifier relied on brittle
+  # email-pattern heuristics (LIKE '%okta%' etc.) that misattribute most
+  # real-world users. If IdP-segmented usage is needed, prefer adding an
+  # explicit identity_provider column at ingest time.
 
   ProjectUsageQuery:
     Type: AWS::Athena::NamedQuery
@@ -1236,39 +1201,5 @@ Outputs:
     Value: !Sub 'https://console.aws.amazon.com/athena/home?region=${AWS::Region}#/query-editor?db=${GlueDatabase}&workgroup=${AthenaWorkgroup}'
 
   SampleQueriesInfo:
-    Description: Information about sample queries
-    Value: !Sub |
-      Enhanced queries have been created for comprehensive usage analysis:
-
-      **Real-Time Metrics:**
-      1. "Detailed TPM and RPM Analysis" - Calculate tokens per minute and requests per minute by user and model
-      2. "Peak Usage and Rate Limit Analysis" - Identify when you're approaching rate limits
-
-      **User Analytics:**
-      3. "Top Users by Token Usage" - Find top 10 users in last 7 days with email and org attribution
-      4. "User Session Analysis" - Analyze session duration, intensity, and cost metrics
-      5. "Token Usage by Email Domain" - Analyze usage patterns by email domain
-
-      **Cost & Attribution:**
-      6. "Detailed Cost Attribution" - Calculate precise costs by user, org, and model with per-token-type pricing
-      7. "Monthly Cost Per User" - Monthly cost summary per user with input/output/cache pricing
-      8. "Monthly Cost Detail for User" - Monthly cost breakdown by model and token type for a specific user
-      9. "Token Usage by Organization" - Track token usage across organizations
-
-      **Quota Monitoring:**
-      10. "Quota Tracking - Users vs Limits" - All users ranked by daily/weekly/monthly quota usage percentage
-
-      **Usage Patterns:**
-      11. "Token Usage by Model and Type" - Analyze usage by model and token type with org context
-      12. "User Activity Pattern" - Show activity patterns by hour of day
-      13. "Usage Analysis by Identity Provider" - Compare usage between Okta, Auth0, and Cognito
-
-      **Project Attribution:**
-      14. "Token Usage by Project" - Current-month usage aggregated by project (from OTEL_RESOURCE_ATTRIBUTES)
-      15. "Monthly Cost by Project and Model" - Monthly cost per project broken down by model
-
-      These queries help you:
-      - Track real-time TPM/RPM for rate limit monitoring
-      - Identify heavy users and usage spikes
-      - Calculate accurate cost attribution
-      - Debug metric collection issues
+    Description: Categories of the provisioned Athena named queries
+    Value: 'Real-time: TPM/RPM, Peak-rate-limit. User: Top-users, Session-analysis, Email-domain. Cost: Detailed-cost, Monthly-per-user, Monthly-detail-for-user, Org. Quota: Users-vs-limits. Patterns: By-model-and-type, Activity-pattern. Project: By-project, Monthly-by-project-and-model.'
