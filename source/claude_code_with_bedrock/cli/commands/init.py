@@ -221,7 +221,45 @@ class InitCommand(Command):
         )
         console.print("\n", success_panel)
 
+        # Print the per-tenant Okta Authorization Server claim expression so the
+        # admin can configure per-project cost attribution without hunting
+        # through COST_ATTRIBUTION.md. See docs section 4 for the full story.
+        if config.get("federation_type") == "direct":
+            self._print_okta_cost_attribution_hint(console, profile_name)
+
         return 0
+
+    def _print_okta_cost_attribution_hint(self, console: Console, profile_name: str) -> None:
+        """Show the admin the exact Okta claim config to set up project-based
+        cost attribution for this profile. The expression strips the profile-
+        name prefix from the user's first matching Okta group and emits the
+        remainder as the Project session tag."""
+        prefix = f"{profile_name}-"
+        expression = (
+            f'String.substringAfter(Groups.startsWith("OKTA", "{prefix}", 10).get(0), "{prefix}")'
+        )
+        okta_panel = Panel.fit(
+            "[bold cyan]Optional: per-project cost attribution (Okta setup)[/bold cyan]\n\n"
+            "If you want Bedrock spend grouped by project in Cost Explorer,\n"
+            "configure this one claim on your Okta Authorization Server\n"
+            "(Security -> API -> Authorization Servers -> default -> Claims -> Add Claim):\n\n"
+            "  [dim]Name[/dim]:         [white]https://aws.amazon.com/tags/principal_tags/Project[/white]\n"
+            "  [dim]Token type[/dim]:   ID Token, Always\n"
+            "  [dim]Value type[/dim]:   Expression\n"
+            "  [dim]Value[/dim]:        [yellow]" + expression + "[/yellow]\n"
+            "  [dim]Disable if[/dim]:   Empty string\n"
+            "  [dim]Scopes[/dim]:       openid\n\n"
+            "Group-naming convention for your customer team:\n"
+            f"  Create Okta groups named [white]{prefix}<ProjectName>[/white]\n"
+            f"    (e.g. [white]{prefix}Alpha[/white], [white]{prefix}WidgetProject[/white])\n"
+            "  Assign those groups to your Okta OIDC applications.\n\n"
+            "After the first Bedrock call lands, activate the Project tag\n"
+            "as a cost allocation tag in AWS Billing -> Cost Allocation Tags.\n"
+            "Full walkthrough: [cyan]assets/docs/COST_ATTRIBUTION.md[/cyan]",
+            border_style="cyan",
+            padding=(1, 2),
+        )
+        console.print("\n", okta_panel)
 
     def _check_prerequisites(self) -> bool:
         """Check system prerequisites."""
@@ -2084,22 +2122,29 @@ class InitCommand(Command):
         """
         console.print("\n[bold cyan]Profile Name[/bold cyan]")
         console.print("Choose a descriptive name for this deployment profile.")
-        console.print("[dim]Suggested format: {project}-{environment}-{region}[/dim]")
-        console.print("[dim]Examples: acme-prod-us-east-1, internal-dev-us-west-2[/dim]\n")
+        console.print("[dim]The name becomes your Okta group-naming prefix for per-project[/dim]")
+        console.print("[dim]cost attribution (e.g. profile 'acme-prod' -> Okta group 'acme-prod-Alpha').[/dim]")
+        console.print("[dim]Rules: start with a letter, 2-63 chars, letters/digits/hyphens only.[/dim]")
+        console.print("[dim]Examples: acme-prod, internal-dev, demo-us-west[/dim]\n")
 
         while True:
             profile_name = questionary.text(
                 "Profile name:",
-                validate=lambda x: bool(x) or "Profile name cannot be empty",
+                validate=lambda x: (
+                    True if Config._is_valid_profile_name(x) else
+                    "Must start with a letter; 2-63 chars; letters, digits, hyphens only."
+                ),
             ).ask()
 
             if profile_name is None:  # User cancelled
                 return None
 
-            # Validate profile name
+            # Defense-in-depth: the questionary validator already enforces this,
+            # but keep the check so programmatic callers can't bypass it.
             if not Config._is_valid_profile_name(profile_name):
                 console.print(
-                    "[red]Invalid profile name.[/red] " "Must be alphanumeric with hyphens only, max 64 characters.\n"
+                    "[red]Invalid profile name.[/red] "
+                    "Must start with a letter; 2-63 chars; letters, digits, and hyphens only.\n"
                 )
                 continue
 

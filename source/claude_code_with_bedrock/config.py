@@ -366,6 +366,18 @@ class Config:
     def _is_valid_profile_name(name: str) -> bool:
         """Validate profile name.
 
+        The name is used as:
+        - A file name under ~/.ccwb/profiles/<name>.json
+        - A CloudFormation stack-name prefix (CFN: must start with a letter,
+          letters/digits/hyphens only, <=128 chars)
+        - An IAM role-name prefix (similar rules)
+        - The Okta group-name prefix for per-project cost attribution
+          (Okta + AWS tag value rules are permissive enough that any
+          CFN-safe name works).
+
+        CFN is the binding constraint. We allow 2-63 chars so the profile
+        name plus any suffix fits under the 64-char IAM role-name cap.
+
         Args:
             name: Profile name to validate.
 
@@ -374,11 +386,13 @@ class Config:
         """
         import re
 
-        if not name or len(name) > 64:
+        if not name:
             return False
 
-        # Allow alphanumeric and hyphens only
-        return bool(re.match(r"^[a-zA-Z0-9\-]+$", name))
+        # Must start with a letter (CFN/IAM), then letters/digits/hyphens only.
+        # 2-63 chars leaves headroom for derived suffixes without breaking
+        # downstream length caps (IAM role = 64, CFN stack = 128).
+        return bool(re.match(r"^[a-zA-Z][a-zA-Z0-9\-]{1,62}$", name))
 
     # Compatibility methods for legacy code
     def add_profile(self, profile: Profile) -> None:
