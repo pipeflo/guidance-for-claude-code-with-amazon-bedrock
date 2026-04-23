@@ -211,9 +211,14 @@ class PackageCommand(Command):
             )
         )
 
-        # Create timestamped output directory under profile name
+        # Create timestamped output directory under profile name.
+        # Resolve to absolute immediately: subsequent Go / CodeBuild builds run
+        # subprocesses with cwd=<elsewhere>, and a relative path here would be
+        # interpreted relative to THAT cwd (binaries would land in source/go/
+        # dist/... while the config files stay in source/dist/...). Absolute
+        # path keeps binaries and config co-located.
         timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
-        output_dir = Path("./dist") / profile_name / timestamp
+        output_dir = (Path.cwd() / "dist" / profile_name / timestamp).resolve()
 
         # Create output directory
         output_dir.mkdir(parents=True, exist_ok=True)
