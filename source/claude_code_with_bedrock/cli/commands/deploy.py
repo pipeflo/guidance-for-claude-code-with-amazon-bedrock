@@ -154,18 +154,35 @@ class DeployCommand(Command):
                 console.print("[dim]Use 'ccwb deploy quota' for quota-specific updates or late enablement.[/dim]")
                 return 1
         else:
-            # Deploy all configured stacks in dependency order
+            # Deploy all configured stacks in dependency order.
+            #
+            # Ordering constraints:
+            # - auth always comes first (produces the IAM role + OIDC provider
+            #   every other stack may reference).
+            # - networking must precede any stack that needs VPC/subnet
+            #   outputs: monitoring (OTel ECS ALB) and landing-page
+            #   distribution (distribution ALB).
+            # - distribution comes after networking to satisfy the
+            #   landing-page variant; the presigned-s3 variant doesn't need
+            #   networking but scheduling it here is harmless.
+            # - dashboard / analytics / quota all follow monitoring.
+            # - codebuild is independent and can trail.
             stacks_to_deploy.append(("auth", "Authentication Stack (Cognito + IAM)"))
 
-            # Deploy distribution after networking if it's landing-page type
-            if profile.enable_distribution:
-                stacks_to_deploy.append(("distribution", "Distribution infrastructure (S3 + IAM)"))
-
-            # Deploy remaining monitoring stacks
-            if profile.monitoring_enabled:
+            # Networking first so any downstream stack can read its outputs.
+            need_networking = profile.monitoring_enabled or profile.enable_distribution
+            if need_networking:
                 vpc_config = profile.monitoring_config or {}
                 if vpc_config.get("create_vpc", True):
                     stacks_to_deploy.append(("networking", "VPC Networking for OTEL Collector"))
+
+            # Distribution (landing-page reads networking outputs; presigned-s3
+            # doesn't, but the scheduling order is a no-op either way).
+            if profile.enable_distribution:
+                stacks_to_deploy.append(("distribution", "Distribution infrastructure (S3 + IAM)"))
+
+            # Monitoring and its dependents.
+            if profile.monitoring_enabled:
                 stacks_to_deploy.append(("s3bucket", "S3 Bucket"))
                 stacks_to_deploy.append(("monitoring", "OpenTelemetry Collector"))
                 stacks_to_deploy.append(("dashboard", "CloudWatch Dashboard"))
