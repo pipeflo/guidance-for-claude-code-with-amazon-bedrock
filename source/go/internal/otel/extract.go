@@ -21,6 +21,7 @@ type UserInfo struct {
 	Manager        string `json:"manager"`
 	Location       string `json:"location"`
 	Role           string `json:"role"`
+	Project        string `json:"project"`
 	AccountUUID    string `json:"account_uuid"`
 	Issuer         string `json:"issuer"`
 	Subject        string `json:"subject"`
@@ -130,12 +131,56 @@ func ExtractUserInfo(claims jwt.Claims) UserInfo {
 		info.Role = "user"
 	}
 
+	// Project — from the AWS session-tag claim shipped by the IdP.
+	// Intentionally left empty when absent so FormatHeaders omits x-project
+	// and the collector falls back to the resource attribute `project=default`.
+	info.Project = ExtractPrincipalTag(claims, "Project")
+
 	// Technical fields
 	info.AccountUUID = claims.GetString("aud")
 	info.Issuer = claims.GetString("iss")
 	info.Subject = claims.GetString("sub")
 
 	return info
+}
+
+// ExtractPrincipalTag returns the value of an AWS session-tag claim. STS and
+// the IdP-side recipes in assets/docs/COST_ATTRIBUTION.md both accept two
+// shapes:
+//
+//   - Flat:   {"https://aws.amazon.com/tags/principal_tags/<Key>": "<value>"}
+//   - Nested: {"https://aws.amazon.com/tags": {"principal_tags": {"<Key>": "<value>" | ["<value>", ...]}}}
+//
+// Returns empty string when the tag isn't present or the claim is malformed.
+// Caller should treat empty as "no value" rather than an error.
+func ExtractPrincipalTag(claims jwt.Claims, tagKey string) string {
+	// Flat form — most common on Okta (the claim name *is* the URL).
+	if s, ok := claims["https://aws.amazon.com/tags/principal_tags/"+tagKey].(string); ok && s != "" {
+		return s
+	}
+
+	// Nested form — common on Auth0 Actions / Azure claim transforms / Cognito
+	// Pre-Token-Generation Lambdas. Value at principal_tags.<Key> may be either
+	// a plain string or a single-element array (AWS STS accepts both).
+	root, ok := claims["https://aws.amazon.com/tags"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	principalTags, ok := root["principal_tags"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	switch v := principalTags[tagKey].(type) {
+	case string:
+		return v
+	case []interface{}:
+		if len(v) > 0 {
+			if s, ok := v[0].(string); ok {
+				return s
+			}
+		}
+	}
+	return ""
 }
 
 func firstNonEmpty(values ...string) string {

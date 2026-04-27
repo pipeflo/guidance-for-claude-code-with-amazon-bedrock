@@ -8,11 +8,22 @@ import (
 	"time"
 )
 
+// currentCacheSchemaVersion identifies the shape of headers this binary
+// produces. Bump this whenever the set of emitted headers changes so that
+// upgraded binaries re-extract the JWT instead of serving stale cached
+// headers written by an older version. Cache files without a schema version
+// (or with a lower one) are treated as a miss by ReadCachedHeaders.
+//
+//	v1  initial 10-header set (no version field)
+//	v2  adds x-project (driven by the AWS session-tag claim)
+const currentCacheSchemaVersion = 2
+
 // cacheEntry is the JSON structure of {profile}-otel-headers.json.
 type cacheEntry struct {
-	Headers  map[string]string `json:"headers"`
-	TokenExp int64             `json:"token_exp"`
-	CachedAt int64             `json:"cached_at"`
+	SchemaVersion int               `json:"schema_version"`
+	Headers       map[string]string `json:"headers"`
+	TokenExp      int64             `json:"token_exp"`
+	CachedAt      int64             `json:"cached_at"`
 }
 
 // CacheDir returns the path to ~/.claude-code-session/, creating it if needed.
@@ -48,6 +59,12 @@ func ReadCachedHeaders(profile string) (map[string]string, error) {
 		return nil, err
 	}
 
+	if entry.SchemaVersion < currentCacheSchemaVersion {
+		// Stale cache from an older binary; force re-extraction so the new
+		// header set takes effect on first launch after upgrade.
+		return nil, fmt.Errorf("cache schema %d < %d; refreshing", entry.SchemaVersion, currentCacheSchemaVersion)
+	}
+
 	if len(entry.Headers) == 0 {
 		return nil, fmt.Errorf("cache empty")
 	}
@@ -64,9 +81,10 @@ func WriteCachedHeaders(profile string, headers map[string]string, tokenExp int6
 
 	// Write main cache file
 	entry := cacheEntry{
-		Headers:  headers,
-		TokenExp: tokenExp,
-		CachedAt: time.Now().Unix(),
+		SchemaVersion: currentCacheSchemaVersion,
+		Headers:       headers,
+		TokenExp:      tokenExp,
+		CachedAt:      time.Now().Unix(),
 	}
 	entryData, err := json.Marshal(entry)
 	if err != nil {

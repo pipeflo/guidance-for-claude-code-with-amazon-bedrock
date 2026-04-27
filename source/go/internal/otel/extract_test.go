@@ -173,3 +173,113 @@ func TestExtractUserInfo_ConsistentHash(t *testing.T) {
 		t.Error("Different subs should produce different UserIDs")
 	}
 }
+
+func TestExtractPrincipalTag_Flat(t *testing.T) {
+	claims := jwt.Claims{
+		"https://aws.amazon.com/tags/principal_tags/Project": "Alpha",
+	}
+	if got := ExtractPrincipalTag(claims, "Project"); got != "Alpha" {
+		t.Errorf("flat form: got %q, want Alpha", got)
+	}
+}
+
+func TestExtractPrincipalTag_NestedString(t *testing.T) {
+	claims := jwt.Claims{
+		"https://aws.amazon.com/tags": map[string]interface{}{
+			"principal_tags": map[string]interface{}{
+				"Project": "Beta",
+			},
+			"transitive_tag_keys": []interface{}{"Project"},
+		},
+	}
+	if got := ExtractPrincipalTag(claims, "Project"); got != "Beta" {
+		t.Errorf("nested-string: got %q, want Beta", got)
+	}
+}
+
+func TestExtractPrincipalTag_NestedArray(t *testing.T) {
+	claims := jwt.Claims{
+		"https://aws.amazon.com/tags": map[string]interface{}{
+			"principal_tags": map[string]interface{}{
+				"Project": []interface{}{"Gamma"},
+			},
+		},
+	}
+	if got := ExtractPrincipalTag(claims, "Project"); got != "Gamma" {
+		t.Errorf("nested-array: got %q, want Gamma", got)
+	}
+}
+
+func TestExtractPrincipalTag_Absent(t *testing.T) {
+	claims := jwt.Claims{"email": "user@example.com"}
+	if got := ExtractPrincipalTag(claims, "Project"); got != "" {
+		t.Errorf("absent: got %q, want empty string", got)
+	}
+}
+
+func TestExtractPrincipalTag_Malformed(t *testing.T) {
+	cases := []jwt.Claims{
+		{"https://aws.amazon.com/tags": "not-an-object"},
+		{"https://aws.amazon.com/tags": map[string]interface{}{"principal_tags": "not-an-object"}},
+		{"https://aws.amazon.com/tags": map[string]interface{}{"principal_tags": map[string]interface{}{"Project": 42}}},
+		{"https://aws.amazon.com/tags": map[string]interface{}{"principal_tags": map[string]interface{}{"Project": []interface{}{}}}},
+		{"https://aws.amazon.com/tags": map[string]interface{}{"principal_tags": map[string]interface{}{"Project": []interface{}{42}}}},
+		{"https://aws.amazon.com/tags/principal_tags/Project": 99},
+	}
+	for i, c := range cases {
+		if got := ExtractPrincipalTag(c, "Project"); got != "" {
+			t.Errorf("malformed case %d: got %q, want empty string", i, got)
+		}
+	}
+}
+
+func TestExtractPrincipalTag_FlatWinsOverNested(t *testing.T) {
+	// If an IdP emits both shapes, flat (the Okta convention) is preferred.
+	claims := jwt.Claims{
+		"https://aws.amazon.com/tags/principal_tags/Project": "flat-wins",
+		"https://aws.amazon.com/tags": map[string]interface{}{
+			"principal_tags": map[string]interface{}{
+				"Project": "nested-loses",
+			},
+		},
+	}
+	if got := ExtractPrincipalTag(claims, "Project"); got != "flat-wins" {
+		t.Errorf("flat-vs-nested: got %q, want flat-wins", got)
+	}
+}
+
+func TestExtractUserInfo_ProjectFromFlatClaim(t *testing.T) {
+	claims := jwt.Claims{
+		"email": "user@example.com",
+		"https://aws.amazon.com/tags/principal_tags/Project": "Delta",
+	}
+	info := ExtractUserInfo(claims)
+	if info.Project != "Delta" {
+		t.Errorf("Project = %q, want Delta", info.Project)
+	}
+}
+
+func TestExtractUserInfo_ProjectFromNestedClaim(t *testing.T) {
+	claims := jwt.Claims{
+		"email": "user@example.com",
+		"https://aws.amazon.com/tags": map[string]interface{}{
+			"principal_tags": map[string]interface{}{
+				"Project": []interface{}{"Epsilon"},
+			},
+		},
+	}
+	info := ExtractUserInfo(claims)
+	if info.Project != "Epsilon" {
+		t.Errorf("Project = %q, want Epsilon", info.Project)
+	}
+}
+
+func TestExtractUserInfo_ProjectEmptyWhenAbsent(t *testing.T) {
+	// Customers who haven't configured the IdP claim get empty string,
+	// which is the signal to FormatHeaders to omit x-project entirely.
+	claims := jwt.Claims{"email": "user@example.com"}
+	info := ExtractUserInfo(claims)
+	if info.Project != "" {
+		t.Errorf("Project = %q, want empty string", info.Project)
+	}
+}

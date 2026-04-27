@@ -353,6 +353,13 @@ Resources:
               - key: manager
                 from_context: metadata.x-manager
                 action: upsert
+              # Project — populated by otel-helper from the AWS session-tag
+              # claim in the IdP-signed JWT (flat or nested form). Customers
+              # who don't configure that claim fall back to the resource
+              # attribute `project=default` from OTEL_RESOURCE_ATTRIBUTES.
+              - key: project
+                from_context: metadata.x-project
+                action: upsert
           # Add AWS account ID to all metrics
           resource:
             attributes:
