@@ -102,3 +102,11 @@ ccwb-*-test.json
 # Ad-hoc developer fix scripts at repo root.
 /apply-fix*.sh
 /ccwb-fix*.sh
+
+# Customer-facing deliverables generated per engagement -- contain specific
+# tenant names, CAS IDs, stack names, etc. Never commit; hand directly to
+# the customer out-of-band instead.
+/CUSTOMER_PREREQUISITES.xlsx
+/prerequs-*.xlsx
+~$*.xlsx
+assets/docs/UPGRADE_*.md
