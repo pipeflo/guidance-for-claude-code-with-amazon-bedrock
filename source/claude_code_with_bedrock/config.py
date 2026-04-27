@@ -73,6 +73,21 @@ class Profile:
     federated_role_arn: str | None = None  # ARN for Direct STS federation
     max_session_duration: int = 28800  # 8 hours default, 43200 (12 hours) for Direct STS
 
+    # Per-project cost attribution (opt-in; off by default so existing profiles
+    # are unchanged on load). When True, the init wizard prints the IdP-side
+    # setup guidance and emits the AWS session-tag claim as the Project tag.
+    # If False, the binaries still run; the OTel "project" dimension falls
+    # back to the default literal string and no Cost Explorer tag appears.
+    project_attribution_enabled: bool = False
+
+    # Okta Custom Authorization Server id. Integrator / Developer tenants and
+    # most Workforce Identity deployments ship a CAS literally named "default".
+    # Customers who run a differently-named CAS override this at init time;
+    # the value is threaded through CloudFormation (OIDC Provider URL) and
+    # into config.json (Go OIDC endpoints) so nothing is hardcoded.
+    # Ignored when provider_type != "okta".
+    okta_auth_server_id: str = "default"
+
     # Claude Code settings configuration
     include_coauthored_by: bool = True  # Whether to include "co-authored-by Claude" in git commits
 

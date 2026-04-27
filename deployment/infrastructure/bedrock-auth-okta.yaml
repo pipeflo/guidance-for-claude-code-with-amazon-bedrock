@@ -22,6 +22,18 @@ Parameters:
     AllowedPattern: '^[a-zA-Z0-9]{20}$'
     ConstraintDescription: Must be a valid Okta client ID
 
+  OktaAuthServerId:
+    Type: String
+    Default: default
+    Description: >-
+      Okta Custom Authorization Server ID. Integrator / Developer tenants and most
+      Workforce Identity deployments ship a CAS literally named "default" — leave
+      this parameter alone unless your Okta admin created a differently-named CAS.
+      Changing this value on an existing stack replaces the OIDC provider (URL is
+      immutable); only set it at initial deploy time.
+    AllowedPattern: '^[A-Za-z0-9][A-Za-z0-9-]*$'
+    ConstraintDescription: Must be a valid Okta authorization server id (letters, digits, hyphens)
+
   IdentityPoolName:
     Type: String
     Default: claude-code-okta
@@ -66,22 +78,21 @@ Resources:
   OktaOIDCProvider:
     Type: AWS::IAM::OIDCProvider
     Properties:
-      # Register the Okta Custom Authorization Server "default" as the OIDC
-      # issuer. Tokens from that AS carry iss=https://<domain>/oauth2/default,
-      # and IAM's InvalidIdentityToken check compares that iss against this
-      # registered URL character-for-character. The Org AS (iss=https://
-      # <domain>) cannot host admin-defined custom claims and therefore
-      # cannot emit the https://aws.amazon.com/tags claim required for
-      # per-project cost attribution -- so we always use the CAS here.
+      # Register the Okta Custom Authorization Server as the OIDC issuer.
+      # Tokens from the CAS carry iss=https://<domain>/oauth2/<cas-id>, and
+      # IAM's InvalidIdentityToken check compares that iss against this URL
+      # character-for-character. The Org AS (iss=https://<domain>) cannot
+      # host admin-defined custom claims and therefore cannot emit the
+      # https://aws.amazon.com/tags claim required for per-project cost
+      # attribution -- so we always point at a CAS here, defaulting to the
+      # pre-provisioned "default" CAS.
       #
-      # NOTE: AWS::IAM::OIDCProvider.Url is immutable. Changing this value on
-      # an already-deployed stack will REPLACE the resource (delete the old
-      # provider, create a new one); expect a brief window during stack update
-      # when no provider exists. Custom CAS IDs (non-"default") aren't handled
-      # by this template yet -- customers running those need to either deploy
-      # this stack with the URL pre-edited or file a follow-up for an
-      # okta_auth_server_id parameter.
-      Url: !Sub 'https://${OktaDomain}/oauth2/default'
+      # NOTE: AWS::IAM::OIDCProvider.Url is immutable. Changing
+      # OktaAuthServerId on an already-deployed stack will REPLACE the
+      # resource (delete the old provider, create a new one); expect a
+      # brief window during stack update when no provider exists. In
+      # practice, set the CAS id once at initial deploy.
+      Url: !Sub 'https://${OktaDomain}/oauth2/${OktaAuthServerId}'
       ClientIdList:
         - !Ref OktaClientId
       ThumbprintList:

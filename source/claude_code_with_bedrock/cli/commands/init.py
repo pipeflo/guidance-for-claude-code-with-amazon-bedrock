@@ -221,40 +221,92 @@ class InitCommand(Command):
         )
         console.print("\n", success_panel)
 
-        # Print the per-tenant Okta Authorization Server claim expression so the
-        # admin can configure per-project cost attribution without hunting
-        # through COST_ATTRIBUTION.md. See docs section 4 for the full story.
-        if config.get("federation_type") == "direct":
-            self._print_okta_cost_attribution_hint(console, profile_name)
+        # Print per-tenant IdP-setup guidance ONLY when the admin opted in.
+        # Customers who said "no" above see zero mention of identity-provider
+        # configuration — we respect their choice and stay out of the way.
+        if config.get("project_attribution_enabled"):
+            self._print_cost_attribution_setup_hint(
+                console,
+                profile_name,
+                provider_type=config.get("provider_type") or "",
+                okta_cas_id=config.get("okta_auth_server_id") or "default",
+            )
 
         return 0
 
-    def _print_okta_cost_attribution_hint(self, console: Console, profile_name: str) -> None:
+    def _print_cost_attribution_setup_hint(
+        self,
+        console: Console,
+        profile_name: str,
+        provider_type: str,
+        okta_cas_id: str,
+    ) -> None:
+        """Print the IdP-side setup recipe the admin needs to run to start
+        emitting the Project session tag. Dispatches on provider_type:
+        Okta gets the detailed expression + Access Policy reminder; other
+        providers get a concise pointer to the docs, because their setup
+        (Auth0 Actions, Azure claim transforms, Cognito Pre-Token Lambda)
+        lives entirely in assets/docs/COST_ATTRIBUTION.md."""
+        if provider_type == "okta":
+            self._print_okta_cost_attribution_hint(console, profile_name, okta_cas_id)
+        else:
+            generic_panel = Panel.fit(
+                "[bold cyan]Per-project cost attribution — next steps[/bold cyan]\n\n"
+                f"You opted in for profile [white]{profile_name}[/white]. The binaries will\n"
+                "route a [white]Project[/white] session tag through STS and OTel automatically — but\n"
+                "only once your identity provider is emitting it.\n\n"
+                "Follow the recipe for your IdP in section 3 of\n"
+                "[cyan]assets/docs/COST_ATTRIBUTION.md[/cyan]:\n"
+                "  • Auth0  — Actions (Post-Login) to emit the tags claim\n"
+                "  • Azure AD / Entra ID  — optional claim + transformation\n"
+                "  • Cognito User Pool  — Pre-Token-Generation Lambda\n\n"
+                "If you skip the IdP step, Claude Code still works; spend simply\n"
+                "shows up untagged in Cost Explorer (and the OTel dashboard\n"
+                "'project' dimension stays on [white]default[/white]).",
+                border_style="cyan",
+                padding=(1, 2),
+            )
+            console.print("\n", generic_panel)
+
+    def _print_okta_cost_attribution_hint(
+        self, console: Console, profile_name: str, cas_id: str
+    ) -> None:
         """Show the admin the exact Okta claim config to set up project-based
         cost attribution for this profile. The expression strips the profile-
         name prefix from the user's first matching Okta group and emits the
-        remainder as the Project session tag."""
+        remainder as the Project session tag. The CAS id comes from the
+        profile so customers with named authorization servers see the correct
+        console path."""
         prefix = f"{profile_name}-"
         expression = (
             f'String.substringAfter(Groups.startsWith("OKTA", "{prefix}", 10).get(0), "{prefix}")'
         )
         okta_panel = Panel.fit(
-            "[bold cyan]Optional: per-project cost attribution (Okta setup)[/bold cyan]\n\n"
-            "If you want Bedrock spend grouped by project in Cost Explorer,\n"
-            "configure this one claim on your Okta Authorization Server\n"
-            "(Security -> API -> Authorization Servers -> default -> Claims -> Add Claim):\n\n"
+            "[bold cyan]Per-project cost attribution — Okta setup[/bold cyan]\n\n"
+            f"Two things to configure on your [white]{cas_id}[/white] Custom Authorization Server.\n\n"
+            "[bold]1. Access Policy[/bold] (required — Integrator / fresh Developer\n"
+            "tenants ship the CAS without one, and authentication fails with a\n"
+            "silent [yellow]400 Policy evaluation failed[/yellow] until this is added):\n\n"
+            f"  [dim]Path[/dim]:  Security → API → Authorization Servers → [white]{cas_id}[/white]\n"
+            "         → Access Policies → Add Policy\n"
+            "  [dim]Assign to[/dim]:  The Claude Code OIDC application\n"
+            "  [dim]Rule[/dim]:  Allow grant type [white]authorization_code[/white]\n"
+            "         + scopes [white]openid profile email[/white]\n\n"
+            "[bold]2. Claim[/bold] (emits the Project session tag):\n\n"
+            f"  [dim]Path[/dim]:  Security → API → Authorization Servers → [white]{cas_id}[/white]\n"
+            "         → Claims → Add Claim\n"
             "  [dim]Name[/dim]:         [white]https://aws.amazon.com/tags/principal_tags/Project[/white]\n"
             "  [dim]Token type[/dim]:   ID Token, Always\n"
             "  [dim]Value type[/dim]:   Expression\n"
             "  [dim]Value[/dim]:        [yellow]" + expression + "[/yellow]\n"
             "  [dim]Disable if[/dim]:   Empty string\n"
             "  [dim]Scopes[/dim]:       openid\n\n"
-            "Group-naming convention for your customer team:\n"
+            "[bold]Group-naming convention for your customer team:[/bold]\n"
             f"  Create Okta groups named [white]{prefix}<ProjectName>[/white]\n"
             f"    (e.g. [white]{prefix}Alpha[/white], [white]{prefix}WidgetProject[/white])\n"
-            "  Assign those groups to your Okta OIDC applications.\n\n"
-            "After the first Bedrock call lands, activate the Project tag\n"
-            "as a cost allocation tag in AWS Billing -> Cost Allocation Tags.\n"
+            "  Assign those groups to your Okta OIDC application.\n\n"
+            "After the first Bedrock call, activate [white]iamPrincipal/Project[/white] as a\n"
+            "cost allocation tag in AWS Billing → Cost Allocation Tags.\n\n"
             "Full walkthrough: [cyan]assets/docs/COST_ATTRIBUTION.md[/cyan]",
             border_style="cyan",
             padding=(1, 2),
@@ -486,6 +538,47 @@ class InitCommand(Command):
 
             config["federation_type"] = federation_type
             config["max_session_duration"] = 43200 if federation_type == "direct" else 28800
+
+            # Per-project cost attribution opt-in. Only offered for direct STS
+            # federation (the session-tag path described in COST_ATTRIBUTION.md);
+            # Cognito Identity-Pool customers skip this entirely and see no
+            # mention of identity-provider-side configuration.
+            if federation_type == "direct":
+                attribution_enabled = questionary.confirm(
+                    "Enable per-project cost attribution?",
+                    default=config.get("project_attribution_enabled", False),
+                    instruction=(
+                        "(Optional. Tags Bedrock spend with the user's project via IdP group, "
+                        "so costs can be grouped by project in Cost Explorer and the OTel "
+                        "dashboards. Safe to skip — it can be enabled later by re-running init.)"
+                    ),
+                ).ask()
+
+                if attribution_enabled is None:
+                    return None
+
+                config["project_attribution_enabled"] = bool(attribution_enabled)
+
+                # CAS ID only applies to Okta. Auth0/Azure/Cognito have their
+                # own claim-emission paths that don't use a CAS id.
+                if attribution_enabled and provider_type == "okta":
+                    cas_id = questionary.text(
+                        "Okta Custom Authorization Server ID:",
+                        default=config.get("okta_auth_server_id", "default"),
+                        instruction=(
+                            "(Press Enter for 'default' — correct for Integrator/Developer tenants "
+                            "and most Workforce Identity customers. Override only if your admin "
+                            "created a named CAS.)"
+                        ),
+                    ).ask()
+                    if cas_id is None:
+                        return None
+                    config["okta_auth_server_id"] = cas_id.strip() or "default"
+            else:
+                # Preserve any previously-saved values on re-run but do not
+                # prompt — cognito customers get zero noise about this feature.
+                config.setdefault("project_attribution_enabled", False)
+                config.setdefault("okta_auth_server_id", "default")
 
             # Save progress
             progress.save_step("oidc_complete", config)
@@ -1507,6 +1600,8 @@ class InitCommand(Command):
             cognito_user_pool_id=config_data.get("cognito_user_pool_id"),
             federation_type=config_data.get("federation_type", "cognito"),
             max_session_duration=config_data.get("max_session_duration", 28800),
+            project_attribution_enabled=config_data.get("project_attribution_enabled", False),
+            okta_auth_server_id=config_data.get("okta_auth_server_id", "default"),
             enable_codebuild=config_data.get("codebuild", {}).get("enabled", False),
             enable_distribution=config_data.get("distribution", {}).get("enabled", False),
             distribution_type=config_data.get("distribution", {}).get("type"),

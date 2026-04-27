@@ -1,5 +1,7 @@
 package provider
 
+import "strings"
+
 // Config holds OIDC endpoint paths and scopes for a provider.
 type Config struct {
 	Name              string
@@ -11,17 +13,18 @@ type Config struct {
 }
 
 // Configs maps provider type to its OIDC configuration.
+//
+// For Okta, the endpoints template in /oauth2/default/... points at the
+// pre-provisioned "default" Custom Authorization Server that every Okta
+// Developer / Integrator tenant ships with, and that every Workforce
+// Identity tenant has out of the box. Customers whose admin renamed the
+// CAS set okta_auth_server_id in their ccwb profile and ConfigFor() rewrites
+// the paths at runtime. Only a Custom AS can host admin-defined claims like
+// https://aws.amazon.com/tags/principal_tags/Project -- the Org AS cannot,
+// which is why we never point at it.
 var Configs = map[string]Config{
 	"okta": {
-		Name: "Okta",
-		// Use the "default" Custom Authorization Server rather than the Org
-		// Authorization Server. Only a Custom AS lets admins configure custom
-		// claims (e.g. https://aws.amazon.com/tags/principal_tags/Project),
-		// which are required for per-project cost attribution. Every Okta
-		// Developer / Integrator tenant has a pre-provisioned "default" CAS;
-		// Workforce Identity tenants ship one out of the box. Customers using
-		// a non-"default" CAS can work around this by pre-editing the
-		// generated config.json (future: profile field for the CAS id).
+		Name:              "Okta",
 		AuthorizeEndpoint: "/oauth2/default/v1/authorize",
 		TokenEndpoint:     "/oauth2/default/v1/token",
 		Scopes:            "openid profile email",
@@ -52,6 +55,32 @@ var Configs = map[string]Config{
 		ResponseType:      "code",
 		ResponseMode:      "query",
 	},
+}
+
+// ConfigFor returns the OIDC configuration for a provider, applying per-
+// profile customizations. Today the only customization is the Okta Custom
+// Authorization Server id: a non-empty value other than "default" rewrites
+// /oauth2/default/... to /oauth2/<id>/... for both the authorize and token
+// endpoints. Callers pass oktaAuthServerID unconditionally (from
+// config.json); non-Okta providers ignore it. Returns a zero-value Config
+// when providerType is unknown.
+func ConfigFor(providerType, oktaAuthServerID string) Config {
+	cfg, ok := Configs[providerType]
+	if !ok {
+		return Config{}
+	}
+	if providerType != "okta" {
+		return cfg
+	}
+	id := strings.TrimSpace(oktaAuthServerID)
+	if id == "" || id == "default" {
+		return cfg
+	}
+	const oldSeg = "/oauth2/default/"
+	newSeg := "/oauth2/" + id + "/"
+	cfg.AuthorizeEndpoint = strings.Replace(cfg.AuthorizeEndpoint, oldSeg, newSeg, 1)
+	cfg.TokenEndpoint = strings.Replace(cfg.TokenEndpoint, oldSeg, newSeg, 1)
+	return cfg
 }
 
 // IsKnown returns true if providerType is a recognized provider.

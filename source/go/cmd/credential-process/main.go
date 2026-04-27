@@ -11,6 +11,7 @@ import (
 	"github.com/bluedoors/ccwb-binaries/internal/federation"
 	"github.com/bluedoors/ccwb-binaries/internal/jwt"
 	"github.com/bluedoors/ccwb-binaries/internal/oidc"
+	"github.com/bluedoors/ccwb-binaries/internal/otel"
 	"github.com/bluedoors/ccwb-binaries/internal/portlock"
 	"github.com/bluedoors/ccwb-binaries/internal/provider"
 	"github.com/bluedoors/ccwb-binaries/internal/quota"
@@ -244,13 +245,37 @@ func (a *credentialApp) showTags() int {
 			authResult.IDToken, map[string]interface{}(claims))
 	}
 
-	tagsClaim, ok := claims["https://aws.amazon.com/tags"]
-	if !ok {
+	// Accept both claim shapes that STS itself accepts:
+	//   flat:   claims["https://aws.amazon.com/tags/principal_tags/<Key>"]
+	//   nested: claims["https://aws.amazon.com/tags"].principal_tags.<Key>
+	// Gather anything we can find, report nothing only when both shapes are absent.
+	summary := map[string]interface{}{}
+	if nested, ok := claims["https://aws.amazon.com/tags"]; ok {
+		summary["https://aws.amazon.com/tags"] = nested
+	}
+	flat := map[string]string{}
+	for k, v := range claims {
+		const prefix = "https://aws.amazon.com/tags/principal_tags/"
+		if len(k) > len(prefix) && k[:len(prefix)] == prefix {
+			if s, ok := v.(string); ok {
+				flat[k[len(prefix):]] = s
+			}
+		}
+	}
+	if len(flat) > 0 {
+		summary["principal_tags (flat)"] = flat
+	}
+	if len(summary) == 0 {
 		fmt.Fprintln(os.Stderr, "No `https://aws.amazon.com/tags` claim present in the ID token.")
 		fmt.Fprintln(os.Stderr, "Your IdP is not configured to emit session tags. See assets/docs/COST_ATTRIBUTION.md section 3.")
 		return 1
 	}
-	pretty, err := json.MarshalIndent(tagsClaim, "", "  ")
+	// Surface the value of the Project tag regardless of which shape produced it --
+	// this is the exact value the OTel pipeline emits as x-project.
+	if p := otel.ExtractPrincipalTag(claims, "Project"); p != "" {
+		summary["Project (resolved)"] = p
+	}
+	pretty, err := json.MarshalIndent(summary, "", "  ")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Could not format tags claim: %v\n", err)
 		return 1
@@ -341,7 +366,13 @@ func (a *credentialApp) run() int {
 }
 
 func (a *credentialApp) authenticate() (*oidc.AuthResult, error) {
-	return oidc.Authenticate(a.cfg.ProviderDomain, a.cfg.ClientID, a.providerType, a.redirectPort)
+	return oidc.Authenticate(
+		a.cfg.ProviderDomain,
+		a.cfg.ClientID,
+		a.providerType,
+		a.cfg.OktaAuthServerID, // "" or "default" -> default CAS; anything else rewrites endpoints
+		a.redirectPort,
+	)
 }
 
 func (a *credentialApp) getAWSCredentials(auth *oidc.AuthResult) (*federation.AWSCredentials, error) {

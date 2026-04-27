@@ -51,3 +51,62 @@ func TestDetect(t *testing.T) {
 		})
 	}
 }
+
+func TestConfigFor_OktaDefaultCAS(t *testing.T) {
+	// Empty string and "default" both mean the pre-provisioned CAS --
+	// endpoints must be bit-for-bit identical to the Configs map default.
+	want := Configs["okta"]
+	for _, casID := range []string{"", "default", "  default  "} {
+		got := ConfigFor("okta", casID)
+		if got.AuthorizeEndpoint != want.AuthorizeEndpoint || got.TokenEndpoint != want.TokenEndpoint {
+			t.Errorf("ConfigFor(okta, %q): endpoints diverged from default\nauthorize = %q\ntoken     = %q",
+				casID, got.AuthorizeEndpoint, got.TokenEndpoint)
+		}
+	}
+}
+
+func TestConfigFor_OktaCustomCAS(t *testing.T) {
+	got := ConfigFor("okta", "myCAS")
+	if got.AuthorizeEndpoint != "/oauth2/myCAS/v1/authorize" {
+		t.Errorf("authorize endpoint = %q, want /oauth2/myCAS/v1/authorize", got.AuthorizeEndpoint)
+	}
+	if got.TokenEndpoint != "/oauth2/myCAS/v1/token" {
+		t.Errorf("token endpoint = %q, want /oauth2/myCAS/v1/token", got.TokenEndpoint)
+	}
+	// Non-path fields are copied verbatim.
+	if got.Scopes != Configs["okta"].Scopes {
+		t.Errorf("scopes changed unexpectedly: %q", got.Scopes)
+	}
+}
+
+func TestConfigFor_NonOktaIgnoresCASID(t *testing.T) {
+	// Auth0 / Azure / Cognito have no CAS concept; the CAS id must be
+	// ignored (NOT substituted into their endpoints, which don't contain
+	// /oauth2/default/ anyway). Regression test against accidentally
+	// generic substitution.
+	for _, providerType := range []string{"auth0", "azure", "cognito"} {
+		want := Configs[providerType]
+		got := ConfigFor(providerType, "notUsed")
+		if got != want {
+			t.Errorf("ConfigFor(%q, ...) = %+v, want %+v (CAS id must be ignored for non-Okta)", providerType, got, want)
+		}
+	}
+}
+
+func TestConfigFor_UnknownProvider(t *testing.T) {
+	got := ConfigFor("saml", "default")
+	if got.Name != "" || got.AuthorizeEndpoint != "" {
+		t.Errorf("ConfigFor(unknown): expected zero-value Config, got %+v", got)
+	}
+}
+
+func TestConfigFor_DoesNotMutateConfigsMap(t *testing.T) {
+	// ConfigFor returns a value copy; the package-level map must remain
+	// pristine so concurrent calls with different CAS ids don't race.
+	before := Configs["okta"].AuthorizeEndpoint
+	_ = ConfigFor("okta", "somethingElse")
+	after := Configs["okta"].AuthorizeEndpoint
+	if before != after {
+		t.Errorf("Configs[okta] was mutated: before=%q after=%q", before, after)
+	}
+}

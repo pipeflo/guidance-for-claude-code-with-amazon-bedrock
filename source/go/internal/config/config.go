@@ -35,6 +35,16 @@ type ProfileConfig struct {
 	QuotaCheckInterval int    `json:"quota_check_interval"`
 	QuotaCheckTimeout  int    `json:"quota_check_timeout"`
 
+	// Okta Custom Authorization Server id. Absent / empty / "default" all
+	// mean "use the default CAS" -- the Go code normalizes these equivalently.
+	OktaAuthServerID string `json:"okta_auth_server_id"`
+
+	// Per-project cost-attribution opt-in marker. Not required by the binaries
+	// today (header emission is driven by the JWT claim alone), but kept in
+	// config.json so future dimensions like `ccwb test` can report adoption
+	// status without inferring it.
+	ProjectAttributionEnabled bool `json:"project_attribution_enabled"`
+
 	// Legacy field names
 	OktaDomain   string `json:"okta_domain"`
 	OktaClientID string `json:"okta_client_id"`

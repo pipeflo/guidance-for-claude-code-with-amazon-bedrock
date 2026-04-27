@@ -19,9 +19,12 @@ type AuthResult struct {
 }
 
 // Authenticate performs the full OIDC authorization code flow with PKCE.
-func Authenticate(providerDomain, clientID, providerType string, redirectPort int) (*AuthResult, error) {
-	provCfg, ok := provider.Configs[providerType]
-	if !ok {
+// oktaAuthServerID is the Okta Custom Authorization Server id for tenants
+// whose CAS isn't named "default". Pass "" (or "default") for every other
+// provider and for standard Okta deployments.
+func Authenticate(providerDomain, clientID, providerType, oktaAuthServerID string, redirectPort int) (*AuthResult, error) {
+	provCfg := provider.ConfigFor(providerType, oktaAuthServerID)
+	if provCfg.Name == "" {
 		return nil, fmt.Errorf("unknown provider type: %s", providerType)
 	}
 

@@ -197,7 +197,17 @@ Benefits:
 
 ### Okta: Authorization Server claim expression (recommended path)
 
-**Security → API → Authorization Servers → default → Claims → Add Claim**:
+**Custom Authorization Server ID.** Every Okta Developer, Integrator, and Workforce Identity tenant ships a pre-provisioned CAS literally named `default`. If your Okta admin hasn't renamed it, leave `okta_auth_server_id` as the default in your ccwb profile and skip the rest of this paragraph. If your admin created a differently-named CAS, set `okta_auth_server_id` to that name when running `ccwb init`; the value flows through CloudFormation (OIDC provider URL) and the Go OIDC endpoints automatically. The console paths below use `default` — substitute your CAS id wherever you see it.
+
+**Access Policy (required).** Fresh Integrator and Developer tenants ship the CAS **without** an Access Policy. If you skip this step, authentication fails with a silent `400 Policy evaluation failed` error that gives no useful signal at the CLI. One-time setup:
+
+1. **Security → API → Authorization Servers → default → Access Policies → Add Policy**.
+2. Name it anything (e.g. "Claude Code CCWB"). Assign to the Claude Code OIDC application.
+3. Add one rule allowing grant type **Authorization Code** with scopes **openid, profile, email**.
+
+Workforce Identity tenants usually ship a default rule already — verify it covers your app and grant type.
+
+**Claim (emits the Project session tag).** **Security → API → Authorization Servers → default → Claims → Add Claim**:
 
 | Field | Value |
 | --- | --- |
@@ -299,3 +309,15 @@ If developers legitimately split work across multiple projects within a single s
 3. **Emit all of the user's project groups into one `Project` session tag as a comma-joined value** (`Project=Alpha,Beta`). Cost Explorer will treat that literal string as one tag value — meaning "Alpha,Beta" is a distinct project from "Alpha" or "Beta" alone. Rarely what you want.
 
 None of these require changes to our Go binary, CloudFormation, or Python CLI — all live in IdP configuration.
+
+### OTel `project` dimension (automatic)
+
+The same signed JWT tag that drives CUR 2.0 cost attribution also drives the `project` dimension on the OTel telemetry pipeline — the CloudWatch dashboard widgets and the Athena `metrics` table. There is no extra step: once the IdP claim above is emitting `Project`, the per-repo `.claude/settings.json` no longer controls the dimension — the collector upserts the value from the `x-project` HTTP header that `otel-helper` derives from the cached ID token.
+
+Specifically:
+
+- **Binary side** — `otel-helper` decodes the cached monitoring token, reads the AWS session-tag claim in either flat (`https://aws.amazon.com/tags/principal_tags/Project`) or nested (`https://aws.amazon.com/tags` → `principal_tags.Project`) form, and emits `x-project: <value>` on OTLP exports. When the claim is absent, no header is sent.
+- **Collector side** — `deployment/infrastructure/otel-collector.yaml` maps `metadata.x-project` to the `project` metric attribute. When the header is absent, the exporter falls back to the `project=default` value in `OTEL_RESOURCE_ATTRIBUTES` — so existing customers who have not configured the IdP claim see no change in behavior.
+- **Analytics side** — the Athena `metrics` table already has a `project` column; no schema change is needed.
+
+In short: configuring the IdP claim once lights up Cost Explorer (via CUR 2.0 session tags) and the OTel dashboards (via the `project` dimension) simultaneously — one source of truth, two reporting surfaces.

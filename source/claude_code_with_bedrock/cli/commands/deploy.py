@@ -386,6 +386,11 @@ class DeployCommand(Command):
                         [
                             f"OktaDomain={profile.provider_domain}",
                             f"OktaClientId={profile.client_id}",
+                            # Defaults to "default" when the profile hasn't been
+                            # explicitly configured — matches the CF parameter's
+                            # own default so first-time adoption of this change
+                            # produces zero template diff.
+                            f"OktaAuthServerId={getattr(profile, 'okta_auth_server_id', None) or 'default'}",
                         ]
                     )
                 elif provider_type == "auth0":
