@@ -115,6 +115,16 @@ class InitCommand(Command):
             console.print("• Deploy infrastructure: [cyan]poetry run ccwb deploy[/cyan]")
             console.print("• Create package: [cyan]poetry run ccwb package[/cyan]")
             console.print("• Test authentication: [cyan]poetry run ccwb test[/cyan]")
+            if config.get("project_attribution_enabled"):
+                self._print_cost_attribution_setup_hint(
+                    console,
+                    profile_name,
+                    provider_type=config.get("provider_type") or "",
+                    okta_cas_id=config.get("okta_auth_server_id") or "default",
+                    isolation_enabled=bool(config.get("enforce_project_isolation")),
+                    zones=config.get("zones") or [],
+                    okta_group_prefix=config.get("okta_group_prefix") or profile_name,
+                )
             return 0
 
         # Otherwise, show the configuration summary and ask what to do
