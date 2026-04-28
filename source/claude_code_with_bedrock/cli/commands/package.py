@@ -2093,6 +2093,24 @@ RUN pyinstaller \
         if getattr(profile, "project_attribution_enabled", False):
             config[profile_name]["project_attribution_enabled"] = True
 
+        # GDPR per-zone isolation metadata. Emitted only when enforced --
+        # the installer's shell-function block reads this dict to generate
+        # the `case`/`switch` arms that route Claude Code to the right
+        # application inference profile based on the user's Zone session tag.
+        if getattr(profile, "enforce_project_isolation", False):
+            mapping = getattr(profile, "zone_inference_profiles", {}) or {}
+            if not mapping:
+                raise RuntimeError(
+                    "enforce_project_isolation=True but no zone_inference_profiles are "
+                    "recorded in the profile. Run `ccwb inference-profile create "
+                    "--zone <z> --model opus-4-6` once per zone, then retry `ccwb package`."
+                )
+            config[profile_name]["enforce_project_isolation"] = True
+            config[profile_name]["zone_inference_profiles"] = mapping
+            config[profile_name]["model_short_name"] = getattr(
+                profile, "model_short_name", "opus-4-6"
+            )
+
         config_path = output_dir / "config.json"
         with open(config_path, "w") as f:
             json.dump(config, f, indent=2)
@@ -2862,8 +2880,19 @@ Available metrics include:
             if profile.credential_storage == "session":
                 settings["awsAuthRefresh"] = f"__CREDENTIAL_PROCESS_PATH__ --profile {profile_name}"
 
-            # Add selected model as environment variable if available
-            if hasattr(profile, "selected_model") and profile.selected_model:
+            # Model selection. Two modes:
+            #
+            # * isolation OFF (today's default): pin ANTHROPIC_MODEL in settings.json
+            #   so Claude Code uses the cross-region id regardless of shell state.
+            # * isolation ON (GDPR): leave ANTHROPIC_MODEL OUT of settings.json so
+            #   the installer's shell function is the single authoritative source
+            #   for model selection, and IAM Deny is the backstop. A pinned
+            #   ANTHROPIC_MODEL here would silently win over the function's local
+            #   assignment on shells that invoke `claude` from a subshell where
+            #   the function isn't defined (cron, IDE helper process, etc.), which
+            #   is exactly the bypass path we need to close.
+            isolation_on = bool(getattr(profile, "enforce_project_isolation", False))
+            if not isolation_on and hasattr(profile, "selected_model") and profile.selected_model:
                 settings["env"]["ANTHROPIC_MODEL"] = profile.selected_model
 
                 # Determine and set small/fast model and default Haiku model
