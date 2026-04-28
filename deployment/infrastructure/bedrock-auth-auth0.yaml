@@ -197,27 +197,45 @@ Resources:
                   'aws:RequestedRegion': '${aws:PrincipalTag/Zone}-*'
             - !Ref 'AWS::NoValue'
 
-          - Sid: AllowBedrockListRegional
-            Effect: Allow
-            Action:
-              - 'bedrock:ListFoundationModels'
-              - 'bedrock:GetFoundationModel'
-              - 'bedrock:GetFoundationModelAvailability'
-              - 'bedrock:ListInferenceProfiles'
-              - 'bedrock:GetInferenceProfile'
-            Resource: '*'
-            Condition:
-              StringEquals:
-                'aws:RequestedRegion': !Ref AllowedBedrockRegions
-          - Sid: AllowBedrockListGlobal
-            Effect: Allow
-            Action:
-              - 'bedrock:ListFoundationModels'
-              - 'bedrock:GetFoundationModel'
-              - 'bedrock:GetFoundationModelAvailability'
-              - 'bedrock:ListInferenceProfiles'
-              - 'bedrock:GetInferenceProfile'
-            Resource: '*'
+          # See bedrock-auth-okta.yaml for the zone-prefix list rationale.
+          - !If
+            - IsolationEnforced
+            - Sid: AllowBedrockListInZone
+              Effect: Allow
+              Action:
+                - 'bedrock:ListFoundationModels'
+                - 'bedrock:GetFoundationModel'
+                - 'bedrock:GetFoundationModelAvailability'
+                - 'bedrock:ListInferenceProfiles'
+                - 'bedrock:GetInferenceProfile'
+              Resource: '*'
+              Condition:
+                StringLike:
+                  'aws:RequestedRegion': '${aws:PrincipalTag/Zone}-*'
+            - Sid: AllowBedrockListRegional
+              Effect: Allow
+              Action:
+                - 'bedrock:ListFoundationModels'
+                - 'bedrock:GetFoundationModel'
+                - 'bedrock:GetFoundationModelAvailability'
+                - 'bedrock:ListInferenceProfiles'
+                - 'bedrock:GetInferenceProfile'
+              Resource: '*'
+              Condition:
+                StringEquals:
+                  'aws:RequestedRegion': !Ref AllowedBedrockRegions
+          - !If
+            - IsolationEnforced
+            - !Ref 'AWS::NoValue'
+            - Sid: AllowBedrockListGlobal
+              Effect: Allow
+              Action:
+                - 'bedrock:ListFoundationModels'
+                - 'bedrock:GetFoundationModel'
+                - 'bedrock:GetFoundationModelAvailability'
+                - 'bedrock:ListInferenceProfiles'
+                - 'bedrock:GetInferenceProfile'
+              Resource: '*'
           - !If
             - MonitoringEnabled
             - Sid: AllowCloudWatchMetrics
