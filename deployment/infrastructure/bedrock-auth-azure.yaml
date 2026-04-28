@@ -49,10 +49,22 @@ Parameters:
       - 'false'
     Description: Enable CloudWatch monitoring for Bedrock usage
 
+  EnforceProjectIsolation:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: >-
+      When 'true', tightens the Bedrock access policy to enforce GDPR per-zone
+      isolation. See bedrock-auth-okta.yaml for the full contract. Default 'false'
+      preserves today's behavior.
+
 Conditions:
   UseDirectIAM: !Equals [!Ref FederationType, direct]
   UseCognitoIdentity: !Equals [!Ref FederationType, cognito]
   MonitoringEnabled: !Equals [!Ref EnableMonitoring, 'true']
+  IsolationEnforced: !Equals [!Ref EnforceProjectIsolation, 'true']
   # Partition-aware conditions for Cognito Identity service principals
   IsGovCloudWest: !Equals [!Ref 'AWS::Region', 'us-gov-west-1']
   IsGovCloudEast: !Equals [!Ref 'AWS::Region', 'us-gov-east-1']
@@ -89,32 +101,74 @@ Resources:
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
-          - Sid: AllowBedrockInvokeRegional
-            Effect: Allow
-            Action:
-              - 'bedrock:InvokeModel'
-              - 'bedrock:InvokeModelWithResponseStream'
-              - 'bedrock-runtime:InvokeModel'
-              - 'bedrock-runtime:InvokeModelWithResponseStream'
-              - 'bedrock-runtime:ConverseStream'
-              - 'bedrock-runtime:Converse'
-            Resource:
-              - !Sub 'arn:${AWS::Partition}:bedrock:*::foundation-model/*'
-              - !Sub 'arn:${AWS::Partition}:bedrock:*:*:inference-profile/*'
-            Condition:
-              StringEquals:
-                'aws:RequestedRegion': !Ref AllowedBedrockRegions
-          - Sid: AllowBedrockInvokeGlobal
-            Effect: Allow
-            Action:
-              - 'bedrock:InvokeModel'
-              - 'bedrock:InvokeModelWithResponseStream'
-              - 'bedrock-runtime:InvokeModel'
-              - 'bedrock-runtime:InvokeModelWithResponseStream'
-              - 'bedrock-runtime:ConverseStream'
-              - 'bedrock-runtime:Converse'
-            Resource:
-              - !Sub 'arn:${AWS::Partition}:bedrock:::foundation-model/*'
+          # --- Permissive Invoke statements (isolation OFF) ---
+          - !If
+            - IsolationEnforced
+            - !Ref 'AWS::NoValue'
+            - Sid: AllowBedrockInvokeRegional
+              Effect: Allow
+              Action:
+                - 'bedrock:InvokeModel'
+                - 'bedrock:InvokeModelWithResponseStream'
+                - 'bedrock-runtime:InvokeModel'
+                - 'bedrock-runtime:InvokeModelWithResponseStream'
+                - 'bedrock-runtime:ConverseStream'
+                - 'bedrock-runtime:Converse'
+              Resource:
+                - !Sub 'arn:${AWS::Partition}:bedrock:*::foundation-model/*'
+                - !Sub 'arn:${AWS::Partition}:bedrock:*:*:inference-profile/*'
+              Condition:
+                StringEquals:
+                  'aws:RequestedRegion': !Ref AllowedBedrockRegions
+          - !If
+            - IsolationEnforced
+            - !Ref 'AWS::NoValue'
+            - Sid: AllowBedrockInvokeGlobal
+              Effect: Allow
+              Action:
+                - 'bedrock:InvokeModel'
+                - 'bedrock:InvokeModelWithResponseStream'
+                - 'bedrock-runtime:InvokeModel'
+                - 'bedrock-runtime:InvokeModelWithResponseStream'
+                - 'bedrock-runtime:ConverseStream'
+                - 'bedrock-runtime:Converse'
+              Resource:
+                - !Sub 'arn:${AWS::Partition}:bedrock:::foundation-model/*'
+
+          # --- GDPR isolation statements (isolation ON) ---
+          - !If
+            - IsolationEnforced
+            - Sid: DenyBedrockInvokeWithoutProjectOrZone
+              Effect: Deny
+              Action:
+                - 'bedrock:InvokeModel*'
+                - 'bedrock-runtime:InvokeModel*'
+                - 'bedrock-runtime:Converse*'
+              Resource: '*'
+              Condition:
+                'Null':
+                  'aws:PrincipalTag/Project': 'true'
+                  'aws:PrincipalTag/Zone': 'true'
+            - !Ref 'AWS::NoValue'
+          - !If
+            - IsolationEnforced
+            - Sid: AllowBedrockInvokeInZone
+              Effect: Allow
+              Action:
+                - 'bedrock:InvokeModel'
+                - 'bedrock:InvokeModelWithResponseStream'
+                - 'bedrock-runtime:InvokeModel'
+                - 'bedrock-runtime:InvokeModelWithResponseStream'
+                - 'bedrock-runtime:ConverseStream'
+                - 'bedrock-runtime:Converse'
+              Resource:
+                - !Sub 'arn:${AWS::Partition}:bedrock:*:*:application-inference-profile/*'
+              Condition:
+                StringEquals:
+                  'aws:RequestedRegion': !Ref AllowedBedrockRegions
+                  'aws:ResourceTag/Zone': '${aws:PrincipalTag/Zone}'
+            - !Ref 'AWS::NoValue'
+
           - Sid: AllowBedrockListRegional
             Effect: Allow
             Action:

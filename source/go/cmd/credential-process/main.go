@@ -42,6 +42,7 @@ func main() {
 	checkExpiration := flag.Bool("check-expiration", false, "Check if credentials are expired")
 	refreshIfNeeded := flag.Bool("refresh-if-needed", false, "Refresh credentials if expired")
 	showTags := flag.Bool("show-tags", false, "Print the https://aws.amazon.com/tags claim from the cached ID token (debug)")
+	getTag := flag.String("get-tag", "", "Print the value of a single principal tag from the cached ID token (e.g. --get-tag Zone). Exit codes: 0 hit, 2 absent, 4 expired.")
 	flag.Parse()
 
 	if *versionFlag || *shortVersion {
@@ -85,6 +86,10 @@ func main() {
 
 	if *showTags {
 		os.Exit(app.showTags())
+	}
+
+	if *getTag != "" {
+		os.Exit(app.getTag(*getTag))
 	}
 
 	if *getMonitoring {
@@ -281,6 +286,38 @@ func (a *credentialApp) showTags() int {
 		return 1
 	}
 	fmt.Println(string(pretty))
+	return 0
+}
+
+// getTag prints a single principal-tag value from the cached ID token.
+// This backs the install-time shell function that sets ANTHROPIC_MODEL
+// from the user's Zone tag on every `claude` launch. It is purely local
+// (no OIDC flow, no network) so it's safe to call from a non-interactive
+// shell function; missing/expired tokens bubble up as distinct exit codes
+// the shell function can translate into a user-readable message.
+//
+// Exit codes:
+//
+//	0 -- tag present, value printed to stdout
+//	2 -- no cached token, or token has no such tag
+//	4 -- token is expired (user needs to re-auth)
+func (a *credentialApp) getTag(key string) int {
+	token, _ := storage.GetMonitoringToken(a.profile, a.cfg.CredentialStorage)
+	if token == "" {
+		return 2
+	}
+	claims, err := jwt.DecodePayload(token)
+	if err != nil {
+		return 2
+	}
+	if exp := claims.GetFloat("exp"); exp > 0 && int64(exp) < time.Now().Unix() {
+		return 4
+	}
+	value := otel.ExtractPrincipalTag(claims, key)
+	if value == "" {
+		return 2
+	}
+	fmt.Println(value)
 	return 0
 }
 
