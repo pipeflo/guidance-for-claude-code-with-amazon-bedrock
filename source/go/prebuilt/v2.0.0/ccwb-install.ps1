@@ -211,9 +211,19 @@ $switchBody
             return
         }
     }
+    # Find the actual claude binary on PATH, bypassing this function so we
+    # don't recurse. Claude Code installs as claude.exe on Windows (not
+    # claude.cmd); use Get-Command -CommandType Application to match any
+    # executable extension (.exe/.cmd/.bat) regardless of how the CLI was
+    # installed (Bun, npm global, scoop, winget, etc.).
+    `$claudeApp = Get-Command -CommandType Application -Name claude -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not `$claudeApp) {
+        Write-Error "Claude Code binary not found on PATH. Install Claude Code first (e.g. 'npm install -g @anthropic-ai/claude-code')."
+        return
+    }
     `$env:ANTHROPIC_MODEL = `$arn
     try {
-        & claude.cmd @Args
+        & `$claudeApp.Source @Args
     } finally {
         Remove-Item Env:ANTHROPIC_MODEL -ErrorAction SilentlyContinue
     }
