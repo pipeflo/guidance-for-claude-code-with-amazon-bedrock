@@ -321,34 +321,24 @@ class InitCommand(Command):
         zones = zones or []
         prefix_bare = (okta_group_prefix or profile_name).strip() or profile_name
         prefix = f"{prefix_bare}-"
-        prefix_has_hyphen = "-" in prefix_bare
 
-        def _okta_split_expr(index: int) -> str:
-            """Okta expression returning the token at `index` in the group name."""
-            if prefix_has_hyphen:
-                return (
-                    "String.split(String.substringAfter("
-                    f'Groups.startsWith("OKTA", "{prefix}", 10).get(0), '
-                    f'"{prefix}"), "-")[{index}]'
-                )
-            return (
-                "String.split("
-                f'Groups.startsWith("OKTA", "{prefix}", 10).get(0), '
-                f'"-")[{index}]'
-            )
+        # Okta Expression Language does NOT support bracket array indexing on
+        # String.split results (`arr[0]` silently returns null). The correct
+        # pattern is the substringAfter / substringBefore chain, which works
+        # uniformly regardless of how many hyphens the prefix itself contains
+        # because we strip the full prefix first and then slice the remainder.
+        group_head = f'Groups.startsWith("OKTA", "{prefix}", 10).get(0)'
+        remainder = f'String.substringAfter({group_head}, "{prefix}")'
 
         # Project claim value — different shape per mode
         if isolation_enabled:
-            # Prefix-split form gives zone at 1 (or 0 under substringAfter) and
-            # project at 2 (or 1). For a hyphen-free prefix, split yields
-            # [prefix, zone, project]; for a multi-token prefix we strip
-            # first, so the remainder splits into [zone, project].
-            project_expr = _okta_split_expr(2 if not prefix_has_hyphen else 1)
-            zone_expr = _okta_split_expr(1 if not prefix_has_hyphen else 0)
+            # <prefix>-<zone>-<project>. After stripping prefix, remainder is
+            # "<zone>-<project>"; take before/after the first "-" in remainder.
+            zone_expr = f'String.substringBefore({remainder}, "-")'
+            project_expr = f'String.substringAfter({remainder}, "-")'
         else:
-            project_expr = (
-                f'String.substringAfter(Groups.startsWith("OKTA", "{prefix}", 10).get(0), "{prefix}")'
-            )
+            # <prefix>-<project> (no zone token). Whole remainder is the project.
+            project_expr = remainder
             zone_expr = None
 
         group_example_project = (
