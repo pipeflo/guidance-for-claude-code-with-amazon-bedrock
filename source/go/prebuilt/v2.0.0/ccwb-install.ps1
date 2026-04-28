@@ -164,7 +164,12 @@ foreach ($p in $profiles) {
 # block entirely and nothing touches the user's $PROFILE.
 $firstProfileName = $profiles | Select-Object -First 1
 $firstProfileCfg = $configJson.$firstProfileName
-if ($firstProfileCfg.PSObject.Properties.Match('enforce_project_isolation').Count -gt 0 -and $firstProfileCfg.enforce_project_isolation) {
+# Simple truthiness: missing property -> $null (falsy), false -> falsy,
+# true -> truthy. Avoids the PSObject.Properties.Match quirk that returns
+# zero on PSCustomObjects from ConvertFrom-Json in some PS versions.
+Write-Host ''
+Write-Host ('[debug] first profile: ' + $firstProfileName + '; enforce_project_isolation: ' + $firstProfileCfg.enforce_project_isolation)
+if ($firstProfileCfg.enforce_project_isolation) {
     Write-Host ''
     Write-Host 'Installing Claude Code wrapper for per-zone inference profile isolation...'
 
