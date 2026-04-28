@@ -2160,7 +2160,22 @@ RUN pyinstaller \
             return "auto"  # Let credential_provider auto-detect from domain at runtime
 
     def _create_installer(self, output_dir: Path, profile, built_executables, built_otel_helpers=None) -> Path:
-        """Create simple installer script."""
+        """Create simple installer script.
+
+        When the bundle was built via --prebuilt, both install.sh and
+        ccwb-install.ps1 have already been copied from source/go/prebuilt/
+        latest/. Those prebuilt scripts are the source of truth going
+        forward (they include all features such as per-zone isolation
+        wrapper generation). The inline templates below are a legacy
+        fallback for non-prebuilt builds (--go, PyInstaller, CodeBuild)
+        that don't copy installer scripts; we skip them whenever the
+        prebuilt pair is already in place.
+        """
+        installer_path = output_dir / "install.sh"
+        prebuilt_ps1 = output_dir / "ccwb-install.ps1"
+        if installer_path.exists() and prebuilt_ps1.exists():
+            self.line("  <info>Using prebuilt installer scripts (install.sh, ccwb-install.ps1)</info>")
+            return installer_path
 
         # Determine which binaries were built
         platforms_built = [platform for platform, _ in built_executables]
