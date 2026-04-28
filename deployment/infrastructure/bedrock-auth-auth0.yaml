@@ -176,6 +176,27 @@ Resources:
                   'aws:RequestedRegion': !Ref AllowedBedrockRegions
                   'aws:ResourceTag/Zone': '${aws:PrincipalTag/Zone}'
             - !Ref 'AWS::NoValue'
+          # See bedrock-auth-okta.yaml for the rationale — inference profiles
+          # evaluate IAM against both the profile ARN and the foundation-model
+          # backend. The Deny-if-no-tag statement above still guards entry.
+          - !If
+            - IsolationEnforced
+            - Sid: AllowBedrockInvokeFoundationModelBackend
+              Effect: Allow
+              Action:
+                - 'bedrock:InvokeModel'
+                - 'bedrock:InvokeModelWithResponseStream'
+                - 'bedrock-runtime:InvokeModel'
+                - 'bedrock-runtime:InvokeModelWithResponseStream'
+                - 'bedrock-runtime:ConverseStream'
+                - 'bedrock-runtime:Converse'
+              Resource:
+                - !Sub 'arn:${AWS::Partition}:bedrock:*::foundation-model/*'
+                - !Sub 'arn:${AWS::Partition}:bedrock:::foundation-model/*'
+              Condition:
+                StringEquals:
+                  'aws:RequestedRegion': !Ref AllowedBedrockRegions
+            - !Ref 'AWS::NoValue'
 
           - Sid: AllowBedrockListRegional
             Effect: Allow

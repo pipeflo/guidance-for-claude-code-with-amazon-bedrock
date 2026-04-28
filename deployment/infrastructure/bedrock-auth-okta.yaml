@@ -207,6 +207,32 @@ Resources:
                   'aws:RequestedRegion': !Ref AllowedBedrockRegions
                   'aws:ResourceTag/Zone': '${aws:PrincipalTag/Zone}'
             - !Ref 'AWS::NoValue'
+          # Application inference profiles resolve to an underlying foundation
+          # model at invocation time, and IAM evaluates permissions on BOTH the
+          # profile ARN and the foundation-model ARN. Without this allow, the
+          # happy-path call through a correctly-tagged profile fails with a
+          # foundation-model 403. The DenyBedrockInvokeWithoutProjectOrZone
+          # statement above still catches any caller with no Project/Zone
+          # session tag — so this allow is only reached by authenticated,
+          # tagged principals, not anonymous-tag bypass attempts.
+          - !If
+            - IsolationEnforced
+            - Sid: AllowBedrockInvokeFoundationModelBackend
+              Effect: Allow
+              Action:
+                - 'bedrock:InvokeModel'
+                - 'bedrock:InvokeModelWithResponseStream'
+                - 'bedrock-runtime:InvokeModel'
+                - 'bedrock-runtime:InvokeModelWithResponseStream'
+                - 'bedrock-runtime:ConverseStream'
+                - 'bedrock-runtime:Converse'
+              Resource:
+                - !Sub 'arn:${AWS::Partition}:bedrock:*::foundation-model/*'
+                - !Sub 'arn:${AWS::Partition}:bedrock:::foundation-model/*'
+              Condition:
+                StringEquals:
+                  'aws:RequestedRegion': !Ref AllowedBedrockRegions
+            - !Ref 'AWS::NoValue'
 
           # --- List / discovery permissions (always) ---
           - Sid: AllowBedrockListRegional
