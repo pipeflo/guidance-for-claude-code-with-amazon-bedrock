@@ -158,6 +158,7 @@ Resources:
                   'aws:PrincipalTag/Project': 'true'
                   'aws:PrincipalTag/Zone': 'true'
             - !Ref 'AWS::NoValue'
+          # See bedrock-auth-okta.yaml for the zone-prefix region rationale.
           - !If
             - IsolationEnforced
             - Sid: AllowBedrockInvokeInZone
@@ -172,13 +173,11 @@ Resources:
               Resource:
                 - !Sub 'arn:${AWS::Partition}:bedrock:*:*:application-inference-profile/*'
               Condition:
+                StringLike:
+                  'aws:RequestedRegion': '${aws:PrincipalTag/Zone}-*'
                 StringEquals:
-                  'aws:RequestedRegion': !Ref AllowedBedrockRegions
                   'aws:ResourceTag/Zone': '${aws:PrincipalTag/Zone}'
             - !Ref 'AWS::NoValue'
-          # See bedrock-auth-okta.yaml for the rationale — inference profiles
-          # evaluate IAM against both the profile ARN and the foundation-model
-          # backend. The Deny-if-no-tag statement above still guards entry.
           - !If
             - IsolationEnforced
             - Sid: AllowBedrockInvokeFoundationModelBackend
@@ -194,8 +193,8 @@ Resources:
                 - !Sub 'arn:${AWS::Partition}:bedrock:*::foundation-model/*'
                 - !Sub 'arn:${AWS::Partition}:bedrock:::foundation-model/*'
               Condition:
-                StringEquals:
-                  'aws:RequestedRegion': !Ref AllowedBedrockRegions
+                StringLike:
+                  'aws:RequestedRegion': '${aws:PrincipalTag/Zone}-*'
             - !Ref 'AWS::NoValue'
 
           - Sid: AllowBedrockListRegional

@@ -189,6 +189,15 @@ Resources:
           # resource tag matches the caller's Zone session tag. The
           # ${!aws:PrincipalTag/Zone} escape keeps CFN from substituting --
           # AWS evaluates the policy variable at request time.
+          # Allow application-inference-profile invocations only when:
+          #   1. the invoked profile's Zone resource tag matches the caller's
+          #      Zone session tag (primary GDPR boundary), AND
+          #   2. aws:RequestedRegion starts with "<zone>-" so Zone=eu callers
+          #      can only hit eu-* regions, Zone=us only us-* regions, etc.
+          #      This binds data-residency to the physical Bedrock endpoint,
+          #      independent of the resource-level check, and drops the need
+          #      to maintain a static AllowedBedrockRegions list under
+          #      isolation (which couldn't express "EU users only in EU").
           - !If
             - IsolationEnforced
             - Sid: AllowBedrockInvokeInZone
@@ -203,18 +212,19 @@ Resources:
               Resource:
                 - !Sub 'arn:${AWS::Partition}:bedrock:*:*:application-inference-profile/*'
               Condition:
+                StringLike:
+                  'aws:RequestedRegion': '${aws:PrincipalTag/Zone}-*'
                 StringEquals:
-                  'aws:RequestedRegion': !Ref AllowedBedrockRegions
                   'aws:ResourceTag/Zone': '${aws:PrincipalTag/Zone}'
             - !Ref 'AWS::NoValue'
           # Application inference profiles resolve to an underlying foundation
           # model at invocation time, and IAM evaluates permissions on BOTH the
           # profile ARN and the foundation-model ARN. Without this allow, the
           # happy-path call through a correctly-tagged profile fails with a
-          # foundation-model 403. The DenyBedrockInvokeWithoutProjectOrZone
-          # statement above still catches any caller with no Project/Zone
-          # session tag — so this allow is only reached by authenticated,
-          # tagged principals, not anonymous-tag bypass attempts.
+          # foundation-model 403. Pinned to the caller's zone-prefixed region
+          # for the same data-residency reason as AllowBedrockInvokeInZone.
+          # The DenyBedrockInvokeWithoutProjectOrZone statement above still
+          # catches any caller with no Project/Zone session tag.
           - !If
             - IsolationEnforced
             - Sid: AllowBedrockInvokeFoundationModelBackend
@@ -230,8 +240,8 @@ Resources:
                 - !Sub 'arn:${AWS::Partition}:bedrock:*::foundation-model/*'
                 - !Sub 'arn:${AWS::Partition}:bedrock:::foundation-model/*'
               Condition:
-                StringEquals:
-                  'aws:RequestedRegion': !Ref AllowedBedrockRegions
+                StringLike:
+                  'aws:RequestedRegion': '${aws:PrincipalTag/Zone}-*'
             - !Ref 'AWS::NoValue'
 
           # --- List / discovery permissions (always) ---
