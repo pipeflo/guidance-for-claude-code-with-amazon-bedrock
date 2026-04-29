@@ -596,13 +596,23 @@ class PackageCommand(Command):
 
                 self.line(f"  Copied <comment>{src_name}</comment>")
 
-        # Copy generic install scripts
+        # Copy generic install scripts. install.sh must be written with Unix
+        # line endings regardless of the host OS that runs `ccwb package`:
+        # end users on Linux/macOS will see `/bin/bash^M: bad interpreter`
+        # if the file carries CR characters (which happens when the repo is
+        # cloned on Windows with core.autocrlf=true or edited in a tool that
+        # saves CRLF). Normalize explicitly so the bundle is always correct.
         for script in ["install.sh", "install.bat", "ccwb-install.ps1"]:
             src = prebuilt_dir / script
-            if src.exists():
-                shutil.copy2(src, output_dir / script)
-                if script == "install.sh":
-                    (output_dir / script).chmod(0o755)
+            if not src.exists():
+                continue
+            dst = output_dir / script
+            if script == "install.sh":
+                # Read bytes, strip CRs, write back with LF-only line endings.
+                dst.write_bytes(src.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n"))
+                dst.chmod(0o755)
+            else:
+                shutil.copy2(src, dst)
 
         self.line(f"  <info>Copied {len(executables) + len(otel_helpers)} binaries + install scripts</info>")
         return {"executables": executables, "otel_helpers": otel_helpers}
