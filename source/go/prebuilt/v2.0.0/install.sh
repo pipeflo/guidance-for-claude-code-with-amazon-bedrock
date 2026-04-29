@@ -224,10 +224,14 @@ print('')
 print('unset ANTHROPIC_MODEL ANTHROPIC_SMALL_FAST_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL')
 print('')
 print('claude() {')
-print('  local zone arn rc')
+# IMPORTANT: do NOT combine `local` with command-substitution assignment.
+# `local x="$(cmd)"` returns local's exit code (always 0), hiding cmd's
+# real exit status. Declare locals first, then assign separately, and
+# always quote the variable in the test (otherwise an empty expansion
+# produces `[ -ne 0 ]` which bash rejects with "unary operator expected").
+print('  local zone arn')
 print('  zone="$("$HOME/claude-code-with-bedrock/credential-process" --profile ' + prof_name + ' --get-tag Zone 2>/dev/null)"')
-print('  rc=$?')
-print('  if [ $rc -ne 0 ] || [ -z "$zone" ]; then')
+print('  if [ -z "$zone" ]; then')
 print('    echo "Claude Code: no Zone assignment found on your Okta token." >&2')
 print('    echo "Ask your administrator to add you to a ' + prof_name + '-<zone>-<project> group," >&2')
 print('    echo "or run \\\`aws sts get-caller-identity\\\` to trigger a fresh login." >&2')
