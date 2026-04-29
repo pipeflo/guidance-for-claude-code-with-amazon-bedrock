@@ -177,6 +177,8 @@ if ($firstProfileCfg.enforce_project_isolation) {
     $credExePs = (Join-Path $installDir 'credential-process.exe')
     $modelShort = $firstProfileCfg.model_short_name
     if (-not $modelShort) { $modelShort = 'opus-4-6' }
+    $awsRegion = $firstProfileCfg.aws_region
+    if (-not $awsRegion) { $awsRegion = 'us-east-1' }
     $zmap = $firstProfileCfg.zone_inference_profiles
 
     # Build the `switch` arms from the zone -> ARN map at install time.
@@ -221,11 +223,27 @@ $switchBody
         Write-Error "Claude Code binary not found on PATH. Install Claude Code first (e.g. 'npm install -g @anthropic-ai/claude-code')."
         return
     }
+    # CLAUDE_CODE_USE_BEDROCK, AWS_REGION, and AWS_PROFILE must be in the
+    # process env at the moment Claude Code starts, not only in settings.json.
+    # Claude Code decides Bedrock-vs-API mode from its own env at init time;
+    # settings.json.env is applied after that decision and only to child
+    # processes Claude Code spawns. Without these explicit exports, the
+    # Linux/Mac banner shows "API Usage Billing" mode and Bedrock routing
+    # never engages — ANTHROPIC_MODEL from the wrapper becomes dead code.
+    `$previousUseBedrock = `$env:CLAUDE_CODE_USE_BEDROCK
+    `$previousRegion     = `$env:AWS_REGION
+    `$previousProfile    = `$env:AWS_PROFILE
+    `$env:CLAUDE_CODE_USE_BEDROCK = '1'
+    `$env:AWS_REGION = '$awsRegion'
+    `$env:AWS_PROFILE = '$firstProfileName'
     `$env:ANTHROPIC_MODEL = `$arn
     try {
         & `$claudeApp.Source @Args
     } finally {
         Remove-Item Env:ANTHROPIC_MODEL -ErrorAction SilentlyContinue
+        if (`$null -ne `$previousUseBedrock) { `$env:CLAUDE_CODE_USE_BEDROCK = `$previousUseBedrock } else { Remove-Item Env:CLAUDE_CODE_USE_BEDROCK -ErrorAction SilentlyContinue }
+        if (`$null -ne `$previousRegion)     { `$env:AWS_REGION = `$previousRegion }             else { Remove-Item Env:AWS_REGION -ErrorAction SilentlyContinue }
+        if (`$null -ne `$previousProfile)    { `$env:AWS_PROFILE = `$previousProfile }           else { Remove-Item Env:AWS_PROFILE -ErrorAction SilentlyContinue }
     }
 }
 "@
