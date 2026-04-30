@@ -185,21 +185,27 @@ if ($firstProfileCfg.enforce_project_isolation) {
         }
     }
 
+    # IMPORTANT: these Write-Host lines use SINGLE quotes so PowerShell does
+    # NOT interpolate `$env:AWS_REGION` / `$env:ANTHROPIC_MODEL` at install
+    # time. We want the literal text to land in the user's terminal so they
+    # know which commands to run; double-quoting would expand the vars to
+    # whatever is already in the installer's environment (often empty or
+    # stale), producing misleading output like "eu-west-3 = '<region ...>'".
     Write-Host ''
     Write-Host '=========================================================================='
     Write-Host 'Next step: configure your model + region'
     Write-Host '=========================================================================='
     Write-Host ''
-    Write-Host "Before running 'claude', set BOTH the AWS region and the model ARN"
-    Write-Host '(your admin will give you both — they are paired per zone):'
+    Write-Host 'Before running claude, set BOTH the AWS region and the model ARN'
+    Write-Host '(your admin will give you both - they are paired per zone):'
     Write-Host ''
-    Write-Host "    $env:AWS_REGION = '<region provided by your team>'     # e.g. eu-west-3"
-    Write-Host "    $env:ANTHROPIC_MODEL = '<arn provided by your team>'"
+    Write-Host '    $env:AWS_REGION = ''<region provided by your team>''     # e.g. eu-west-3'
+    Write-Host '    $env:ANTHROPIC_MODEL = ''<arn provided by your team>'''
     Write-Host ''
     Write-Host 'Add those two lines to $PROFILE to persist across PowerShell sessions.'
     Write-Host ''
     Write-Host 'Both must be set together. If only ANTHROPIC_MODEL is set, the AWS SDK'
-    Write-Host "defaults to a different region and rejects the call with 'invalid ARN'."
+    Write-Host 'defaults to a different region and rejects the call with "invalid ARN".'
     Write-Host '=========================================================================='
 }
 
