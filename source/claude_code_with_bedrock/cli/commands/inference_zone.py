@@ -504,6 +504,26 @@ def discover_bedrock_regions(candidate_regions: list[str] | None = None) -> list
 # --------------------------------------------------------------------------- #
 
 
+def _rewrite_arn_region(arn: str, new_region: str) -> str:
+    """Return an ARN with its region segment replaced.
+
+    ARN format: ``arn:<partition>:<service>:<region>:<account>:<resource>``.
+    We only touch the fourth segment. All other segments pass through.
+
+    Used for CRIS source ARNs: bedrock:ListInferenceProfiles surfaces
+    the profile ARN in whichever region we queried, but CreateApplication
+    InferenceProfile requires the copyFrom source to be in the SAME
+    region as the call. A system-defined CRIS profile is routable from
+    any region in its coverage set — we just need the caller's region
+    in the ARN string for the API check.
+    """
+    parts = arn.split(":", 5)
+    if len(parts) < 6:
+        return arn  # not an ARN we recognize; return as-is
+    parts[3] = new_region
+    return ":".join(parts)
+
+
 def _save_zone_mapping(
     config: Config,
     profile: Profile,
@@ -725,7 +745,13 @@ class InferenceZoneCreateCommand(Command):
                     (short, f"No {cris_prefix}.{short} CRIS profile found")
                 )
                 continue
-            copy_from = cris.profile_arn
+            # CRIS ARNs are region-partitioned: the discovered ARN reflects
+            # whichever probe region surfaced the profile (often eu-west-1 for
+            # the eu.* CRIS). AWS requires the `copyFrom` source ARN to be in
+            # the SAME region as the CreateApplicationInferenceProfile call,
+            # or we get `ResourceNotFoundException: Inference profile not found`.
+            # Rewrite the ARN's region segment to match region_for_create.
+            copy_from = _rewrite_arn_region(cris.profile_arn, region_for_create)
 
             inf_name = f"{zone}-{short}"
             tags = [
