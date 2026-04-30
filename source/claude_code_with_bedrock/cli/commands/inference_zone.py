@@ -287,8 +287,29 @@ class CrisProfile:
     model_short: str       # "opus-4-6"
 
 
-def discover_cris_profiles(region: str) -> list[CrisProfile]:
-    """Return all Anthropic CRIS profiles visible to the account in region."""
+# Representative region per CRIS zone — AWS's ListInferenceProfiles is
+# region-scoped and only returns system-defined profiles whose coverage
+# includes the calling region. To see all CRIS zones (us, eu, apac, au,
+# global, ...), we query from a region within each. Querying a single
+# region (e.g. us-west-2) returns only `us.*` and `global.*`, missing
+# the EU / APAC / AU profiles entirely.
+#
+# Values chosen for broad Bedrock coverage; any reachable region from
+# the CRIS's set would work. Listed in discovery preference order —
+# the first reachable region per CRIS is the one we probe.
+_CRIS_DISCOVERY_REGIONS = [
+    ("us",     ["us-east-1", "us-west-2"]),
+    ("eu",     ["eu-west-1", "eu-central-1", "eu-west-3"]),
+    ("apac",   ["ap-northeast-1", "ap-southeast-1", "ap-southeast-2"]),
+    ("au",     ["ap-southeast-2", "ap-southeast-4"]),
+    # "global" typically surfaces from any region but we include it so
+    # it's never missed.
+    ("global", ["us-east-1", "us-west-2", "eu-west-1"]),
+]
+
+
+def _list_cris_in_region(region: str) -> list[CrisProfile]:
+    """Query SYSTEM_DEFINED inference profiles from one region."""
     try:
         client = boto3.client("bedrock", region_name=region)
         resp = client.list_inference_profiles(typeEquals="SYSTEM_DEFINED")
@@ -318,6 +339,44 @@ def discover_cris_profiles(region: str) -> list[CrisProfile]:
             )
         )
     return out
+
+
+def discover_cris_profiles(primary_region: str) -> list[CrisProfile]:
+    """Enumerate CRIS profiles across multiple region probes and merge.
+
+    AWS's `ListInferenceProfiles SYSTEM_DEFINED` is region-scoped: a
+    single call from `us-west-2` returns only `us.*` and `global.*`,
+    missing `eu.*`, `apac.*`, and `au.*` entirely. We probe one region
+    per CRIS zone and deduplicate by profile ARN.
+
+    ``primary_region`` is used as a first-pass optimization: if the
+    admin is already calling from a Bedrock-enabled region, we try it
+    first for whichever CRIS it covers before probing the others.
+    """
+    seen_arns: set[str] = set()
+    merged: list[CrisProfile] = []
+
+    # Build the probe sequence — primary_region first, then one region
+    # per CRIS zone. Skip regions we already probed.
+    probes: list[str] = []
+    if primary_region:
+        probes.append(primary_region)
+    for _zone, regions in _CRIS_DISCOVERY_REGIONS:
+        for r in regions:
+            if r not in probes:
+                probes.append(r)
+                break  # one region per CRIS is enough
+
+    for r in probes:
+        try:
+            for cp in _list_cris_in_region(r):
+                if cp.profile_arn in seen_arns:
+                    continue
+                seen_arns.add(cp.profile_arn)
+                merged.append(cp)
+        except Exception:
+            continue
+    return merged
 
 
 # --------------------------------------------------------------------------- #
@@ -374,6 +433,9 @@ _CRIS_REGION_SETS: dict[str, list[str]] = {
         "ap-southeast-1", "ap-southeast-2", "ap-southeast-4",
         "ap-south-1", "ap-south-2",
         "ap-east-1",
+    ],
+    "au": [
+        "ap-southeast-2", "ap-southeast-4",
     ],
     "global": [
         # The "global" CRIS spans every commercial region Bedrock supports.
