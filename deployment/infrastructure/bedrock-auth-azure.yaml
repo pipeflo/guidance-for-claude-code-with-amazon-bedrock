@@ -150,7 +150,7 @@ Resources:
                   'aws:PrincipalTag/Project': 'true'
                   'aws:PrincipalTag/Zone': 'true'
             - !Ref 'AWS::NoValue'
-          # See bedrock-auth-okta.yaml for the zone-prefix region rationale.
+          # See bedrock-auth-okta.yaml for the tag-match + ccwb:Region rationale.
           - !If
             - IsolationEnforced
             - Sid: AllowBedrockInvokeInZone
@@ -165,10 +165,9 @@ Resources:
               Resource:
                 - !Sub 'arn:${AWS::Partition}:bedrock:*:*:application-inference-profile/*'
               Condition:
-                StringLike:
-                  'aws:RequestedRegion': '${aws:PrincipalTag/Zone}-*'
                 StringEquals:
                   'aws:ResourceTag/Zone': '${aws:PrincipalTag/Zone}'
+                  'aws:ResourceTag/ccwb:Region': '${aws:RequestedRegion}'
             - !Ref 'AWS::NoValue'
           - !If
             - IsolationEnforced
@@ -184,15 +183,12 @@ Resources:
               Resource:
                 - !Sub 'arn:${AWS::Partition}:bedrock:*::foundation-model/*'
                 - !Sub 'arn:${AWS::Partition}:bedrock:::foundation-model/*'
-              Condition:
-                StringLike:
-                  'aws:RequestedRegion': '${aws:PrincipalTag/Zone}-*'
             - !Ref 'AWS::NoValue'
 
-          # See bedrock-auth-okta.yaml for the zone-prefix list rationale.
+          # See bedrock-auth-okta.yaml for the catalog-listing rationale.
           - !If
             - IsolationEnforced
-            - Sid: AllowBedrockListInZone
+            - Sid: AllowBedrockList
               Effect: Allow
               Action:
                 - 'bedrock:ListFoundationModels'
@@ -201,9 +197,6 @@ Resources:
                 - 'bedrock:ListInferenceProfiles'
                 - 'bedrock:GetInferenceProfile'
               Resource: '*'
-              Condition:
-                StringLike:
-                  'aws:RequestedRegion': '${aws:PrincipalTag/Zone}-*'
             - Sid: AllowBedrockListRegional
               Effect: Allow
               Action:

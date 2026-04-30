@@ -192,12 +192,15 @@ Resources:
           # Allow application-inference-profile invocations only when:
           #   1. the invoked profile's Zone resource tag matches the caller's
           #      Zone session tag (primary GDPR boundary), AND
-          #   2. aws:RequestedRegion starts with "<zone>-" so Zone=eu callers
-          #      can only hit eu-* regions, Zone=us only us-* regions, etc.
-          #      This binds data-residency to the physical Bedrock endpoint,
-          #      independent of the resource-level check, and drops the need
-          #      to maintain a static AllowedBedrockRegions list under
-          #      isolation (which couldn't express "EU users only in EU").
+          #   2. the invoked profile's ccwb:Region resource tag matches the
+          #      request's aws:RequestedRegion (data-residency lock). The
+          #      ccwb:Region tag is set at profile creation time by
+          #      `ccwb inference-zone create --region <r>` and cannot be
+          #      changed without full audit trail on the resource.
+          #
+          # Together these two conditions enforce arbitrary zone naming —
+          # admins can name zones "france", "mco", "restricted", anything —
+          # without the policy needing to know AWS region prefixes.
           - !If
             - IsolationEnforced
             - Sid: AllowBedrockInvokeInZone
@@ -212,19 +215,17 @@ Resources:
               Resource:
                 - !Sub 'arn:${AWS::Partition}:bedrock:*:*:application-inference-profile/*'
               Condition:
-                StringLike:
-                  'aws:RequestedRegion': '${aws:PrincipalTag/Zone}-*'
                 StringEquals:
                   'aws:ResourceTag/Zone': '${aws:PrincipalTag/Zone}'
+                  'aws:ResourceTag/ccwb:Region': '${aws:RequestedRegion}'
             - !Ref 'AWS::NoValue'
           # Application inference profiles resolve to an underlying foundation
           # model at invocation time, and IAM evaluates permissions on BOTH the
-          # profile ARN and the foundation-model ARN. Without this allow, the
-          # happy-path call through a correctly-tagged profile fails with a
-          # foundation-model 403. Pinned to the caller's zone-prefixed region
-          # for the same data-residency reason as AllowBedrockInvokeInZone.
-          # The DenyBedrockInvokeWithoutProjectOrZone statement above still
-          # catches any caller with no Project/Zone session tag.
+          # profile ARN and the foundation-model ARN. This allow covers the
+          # backend leg of the routing. The DenyBedrockInvokeWithoutProjectOrZone
+          # statement above gates access before this allow can fire, so only
+          # callers with both Project and Zone tags reach the foundation-model
+          # model ARN.
           - !If
             - IsolationEnforced
             - Sid: AllowBedrockInvokeFoundationModelBackend
@@ -239,19 +240,19 @@ Resources:
               Resource:
                 - !Sub 'arn:${AWS::Partition}:bedrock:*::foundation-model/*'
                 - !Sub 'arn:${AWS::Partition}:bedrock:::foundation-model/*'
-              Condition:
-                StringLike:
-                  'aws:RequestedRegion': '${aws:PrincipalTag/Zone}-*'
             - !Ref 'AWS::NoValue'
 
           # --- List / discovery permissions ---
-          # Under isolation: zone-prefix region match, and no global (no-region)
-          # variant so a caller cannot enumerate catalog outside their zone.
-          # Under the permissive default: static region list + a global
-          # fallback, as in the original policy.
+          # Read-only catalog enumeration. Under isolation, we permit any
+          # authenticated caller to list foundation models and inference
+          # profiles from any region — cross-zone catalog visibility is
+          # not a data-egress boundary, and the tag-match conditions above
+          # still prevent cross-zone invocation. Under the permissive
+          # default, we keep the upstream policy's region-bounded list +
+          # global fallback pair.
           - !If
             - IsolationEnforced
-            - Sid: AllowBedrockListInZone
+            - Sid: AllowBedrockList
               Effect: Allow
               Action:
                 - 'bedrock:ListFoundationModels'
@@ -260,9 +261,6 @@ Resources:
                 - 'bedrock:ListInferenceProfiles'
                 - 'bedrock:GetInferenceProfile'
               Resource: '*'
-              Condition:
-                StringLike:
-                  'aws:RequestedRegion': '${aws:PrincipalTag/Zone}-*'
             - Sid: AllowBedrockListRegional
               Effect: Allow
               Action:

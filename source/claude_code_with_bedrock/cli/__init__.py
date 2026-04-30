@@ -19,10 +19,10 @@ from .commands.context import (
 from .commands.deploy import DeployCommand
 from .commands.destroy import DestroyCommand
 from .commands.distribute import DistributeCommand
-from .commands.inference_profile import (
-    InferenceProfileCreateCommand,
-    InferenceProfileDeleteCommand,
-    InferenceProfileListCommand,
+from .commands.inference_zone import (
+    InferenceZoneCreateCommand,
+    InferenceZoneDeleteCommand,
+    InferenceZoneListCommand,
 )
 from .commands.init import InitCommand
 from .commands.package import PackageCommand
@@ -73,10 +73,10 @@ def create_application() -> Application:
     application.add(ConfigExportCommand())
     application.add(ConfigImportCommand())
 
-    # Inference profile management (GDPR zone isolation)
-    application.add(InferenceProfileCreateCommand())
-    application.add(InferenceProfileListCommand())
-    application.add(InferenceProfileDeleteCommand())
+    # Inference zone management (GDPR per-zone isolation)
+    application.add(InferenceZoneCreateCommand())
+    application.add(InferenceZoneListCommand())
+    application.add(InferenceZoneDeleteCommand())
 
     # Quota management commands
     application.add(QuotaSetUserCommand())
