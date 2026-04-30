@@ -324,11 +324,110 @@ def discover_cris_profiles(region: str) -> list[CrisProfile]:
 # Region discovery
 # --------------------------------------------------------------------------- #
 
+# Every AWS commercial region where Amazon Bedrock is available as of 2026-04.
+# Used as the candidate list for region probing — not a strict allow-list.
+# Keeping this explicit instead of calling ec2:DescribeRegions because
+# Bedrock availability lags behind regional launches and a probe-per-region
+# is the most reliable signal anyway.
+_BEDROCK_CANDIDATE_REGIONS = [
+    # North America
+    "us-east-1", "us-east-2", "us-west-1", "us-west-2",
+    "ca-central-1", "ca-west-1",
+    # South America
+    "sa-east-1",
+    # Europe
+    "eu-west-1", "eu-west-2", "eu-west-3",
+    "eu-central-1", "eu-central-2",
+    "eu-north-1", "eu-south-1", "eu-south-2",
+    # Asia Pacific
+    "ap-northeast-1", "ap-northeast-2", "ap-northeast-3",
+    "ap-southeast-1", "ap-southeast-2", "ap-southeast-3", "ap-southeast-4",
+    "ap-south-1", "ap-south-2",
+    "ap-east-1", "ap-east-2",
+    # Middle East
+    "me-central-1", "me-south-1",
+    # Africa
+    "af-south-1",
+    # GovCloud (partition-separate; admin can pick if their account is in GC)
+    "us-gov-east-1", "us-gov-west-1",
+]
 
-def discover_bedrock_regions(candidate_regions: list[str]) -> list[str]:
-    """Return regions from ``candidate_regions`` that answer Bedrock calls."""
+
+# AWS cross-region inference profile (CRIS) region sets as of 2026-04.
+# The CRIS zones are AWS-defined: each system-defined inference profile
+# carries the caller's request to one of the regions in its set. New
+# regions get added to these sets over time; the values here are the
+# current published coverage and are only used for informational hints
+# and for the "which region to tag this profile with" picker.
+_CRIS_REGION_SETS: dict[str, list[str]] = {
+    "us": [
+        "us-east-1", "us-east-2", "us-west-1", "us-west-2",
+        "ca-central-1", "ca-west-1",
+    ],
+    "eu": [
+        "eu-central-1", "eu-central-2",
+        "eu-north-1", "eu-south-1", "eu-south-2",
+        "eu-west-1", "eu-west-2", "eu-west-3",
+    ],
+    "apac": [
+        "ap-northeast-1", "ap-northeast-2", "ap-northeast-3",
+        "ap-southeast-1", "ap-southeast-2", "ap-southeast-4",
+        "ap-south-1", "ap-south-2",
+        "ap-east-1",
+    ],
+    "global": [
+        # The "global" CRIS spans every commercial region Bedrock supports.
+        # Users invoke it from any region; AWS routes to whichever endpoint
+        # has capacity. We list a representative US entry here as the
+        # tag-region default; the admin can pick any reachable region.
+        "us-east-1", "us-east-2", "us-west-1", "us-west-2",
+        "ca-central-1", "ca-west-1",
+        "eu-central-1", "eu-central-2",
+        "eu-north-1", "eu-south-1", "eu-south-2",
+        "eu-west-1", "eu-west-2", "eu-west-3",
+        "ap-northeast-1", "ap-northeast-2", "ap-northeast-3",
+        "ap-southeast-1", "ap-southeast-2", "ap-southeast-4",
+        "ap-south-1", "ap-south-2",
+    ],
+}
+
+
+def _cris_region_list(zone_prefix: str) -> list[str]:
+    """Return the canonical list of regions covered by a CRIS zone prefix.
+
+    Falls back to the commercial candidate list if the prefix is unknown
+    (e.g. a new AWS zone we don't yet track — the caller will still have
+    the region probing narrow it down).
+    """
+    return _CRIS_REGION_SETS.get(zone_prefix, list(_BEDROCK_CANDIDATE_REGIONS))
+
+
+def _cris_regions_hint(zone_prefix: str) -> str:
+    """One-line human summary of a CRIS zone's region set for the picker."""
+    regions = _CRIS_REGION_SETS.get(zone_prefix, [])
+    if not regions:
+        return "regions unknown"
+    if len(regions) <= 3:
+        return ", ".join(regions)
+    return f"{regions[0]}, {regions[1]}, ... ({len(regions)} regions)"
+
+
+def discover_bedrock_regions(candidate_regions: list[str] | None = None) -> list[str]:
+    """Return regions from ``candidate_regions`` that answer Bedrock calls.
+
+    If ``candidate_regions`` is None or empty, the full commercial+GovCloud
+    Bedrock region list is probed. The admin's profile-level
+    ``allowed_bedrock_regions`` list is intentionally NOT used as a filter
+    here — zone creation should be independent of which CRIS the admin
+    picked at ``ccwb init`` time. A customer who wants an EU zone shouldn't
+    have to re-init their profile just because they originally picked a
+    US cross-region inference profile as their default.
+
+    Probing is sequential because the calls are cheap (a single bedrock:
+    ListFoundationModels each) and the number of regions is under 30.
+    """
     ok: list[str] = []
-    for r in candidate_regions:
+    for r in (candidate_regions if candidate_regions else _BEDROCK_CANDIDATE_REGIONS):
         try:
             client = boto3.client("bedrock", region_name=r)
             client.list_foundation_models(byProvider="anthropic")
@@ -430,93 +529,101 @@ class InferenceZoneCreateCommand(Command):
                 return 1
             zone = answer.strip().lower()
 
-        # ---- Backing style: specific region or cross-region ----
+        # ---- Pick the cross-region inference (CRIS) zone ----
+        # Modern Claude models (4.5+) do NOT support on-demand invocation
+        # against bare foundation-model ARNs — CreateApplicationInferenceProfile
+        # must copyFrom a CRIS profile. So the admin's real choice is which
+        # CRIS zone backs this ccwb zone: us (6 US+Canada regions), eu (7 EU
+        # regions), apac (multiple APAC regions), or global (all).
+        #
+        # The admin's ccwb zone name (e.g. "france") is a ccwb concept; it's
+        # separate from the AWS CRIS zone prefix. One ccwb zone "france" is
+        # typically backed by the "eu" CRIS, one ccwb zone "us" typically
+        # backed by the "us" CRIS — but nothing prevents an admin from
+        # backing a ccwb zone "sandbox" with the "global" CRIS if they want.
+        console.print(f"\n[bold cyan]Configuration for zone '{zone}'[/bold cyan]")
+
+        # CRIS discovery region: use the profile's primary region as the
+        # control-plane endpoint. CRIS profile ARNs are region-partitioned,
+        # so we need a reachable region to query.
+        discovery_region = profile.aws_region
         console.print(
-            f"\n[bold cyan]Configuration for zone '{zone}'[/bold cyan]"
+            f"[dim]Discovering cross-region inference profiles via {discovery_region}...[/dim]"
         )
-        style = questionary.select(
-            "Model backing for this zone:",
+        all_cris = discover_cris_profiles(discovery_region)
+        if not all_cris:
+            console.print(
+                "[red]No cross-region inference profiles visible from "
+                f"{discovery_region}. Check that your admin credentials have "
+                "bedrock:ListInferenceProfiles and the region is Bedrock-enabled.[/red]"
+            )
+            return 1
+
+        zone_prefixes = sorted({c.zone_prefix for c in all_cris})
+        console.print(
+            "[dim]Modern Claude models (4.5+) require a cross-region inference "
+            "profile as the backing — bare foundation-model invocation is not "
+            "supported. Pick the AWS CRIS zone that covers the regions your "
+            f"ccwb zone '{zone}' should serve:[/dim]"
+        )
+        cris_prefix = questionary.select(
+            "AWS cross-region inference zone:",
             choices=[
                 questionary.Choice(
-                    "Specific AWS region  (single region, direct routing)",
-                    value="region",
-                ),
-                questionary.Choice(
-                    "AWS cross-region inference profile  (multi-region routing, higher availability)",
-                    value="cris",
-                ),
+                    f"{p}  ({_cris_regions_hint(p)})",
+                    value=p,
+                )
+                for p in zone_prefixes
             ],
+            default=zone_prefixes[0],
         ).ask()
-        if style is None:
+        if cris_prefix is None:
             console.print("[yellow]Cancelled.[/yellow]")
             return 1
 
-        region_for_create: str
-        cris_filter_prefix: str | None = None
-
-        if style == "region":
-            # Offer the profile's allowed_bedrock_regions; verify reachability.
-            candidates = list(profile.allowed_bedrock_regions or [])
-            if not candidates:
-                candidates = [profile.aws_region]
-            console.print("[dim]Checking which Bedrock regions your account can reach...[/dim]")
-            reachable = discover_bedrock_regions(candidates)
-            if not reachable:
-                console.print(
-                    "[red]No reachable Bedrock regions found for this profile. "
-                    f"Candidates: {', '.join(candidates)}[/red]"
-                )
-                return 1
-            chosen_region = questionary.select(
-                "Pick a region for this zone:",
-                choices=reachable,
-                default=reachable[0],
-            ).ask()
-            if chosen_region is None:
-                console.print("[yellow]Cancelled.[/yellow]")
-                return 1
-            region_for_create = chosen_region
-
-        else:  # cris
-            # Discover CRIS profiles from the profile's primary region, then
-            # let the admin pick which zone-prefix to use.
-            discovery_region = profile.aws_region
+        # ---- Pick the authoritative region for the ccwb:Region tag ----
+        # The app-inference-profile itself lives in one region (the region
+        # where we call CreateApplicationInferenceProfile). The CRIS it
+        # copyFroms routes across multiple regions, but the profile resource
+        # itself is regional. We tag it with ccwb:Region=<that region> so
+        # IAM can enforce aws:ResourceTag/ccwb:Region == aws:RequestedRegion
+        # and pin residency.
+        cris_regions = _cris_region_list(cris_prefix)
+        console.print(
+            f"[dim]Checking which {cris_prefix}.* regions your account can reach for Bedrock...[/dim]"
+        )
+        reachable = discover_bedrock_regions(cris_regions)
+        if not reachable:
             console.print(
-                f"[dim]Discovering cross-region inference profiles in {discovery_region}...[/dim]"
+                f"[red]None of the {cris_prefix}.* CRIS regions is reachable from your account. "
+                f"Requested: {', '.join(cris_regions)}[/red]"
             )
-            all_cris = discover_cris_profiles(discovery_region)
-            if not all_cris:
-                console.print(
-                    "[red]No cross-region inference profiles found. "
-                    "Try the 'Specific AWS region' option instead.[/red]"
-                )
-                return 1
-            zone_prefixes = sorted({c.zone_prefix for c in all_cris})
-            cris_filter_prefix = questionary.select(
-                "Cross-region zone:",
-                choices=zone_prefixes,
-                default=zone_prefixes[0],
-            ).ask()
-            if cris_filter_prefix is None:
-                console.print("[yellow]Cancelled.[/yellow]")
-                return 1
-            region_for_create = discovery_region
+            return 1
+        region_for_create = questionary.select(
+            f"Region where the '{zone}' inference profiles will be created:",
+            choices=reachable,
+            default=reachable[0],
+            instruction="(determines the ccwb:Region tag IAM uses for residency enforcement)",
+        ).ask()
+        if region_for_create is None:
+            console.print("[yellow]Cancelled.[/yellow]")
+            return 1
 
         # ---- Model selection (multi-select) ----
-        console.print(f"\n[dim]Discovering Claude models in {region_for_create}...[/dim]")
-        models, source = discover_models(region_for_create)
-
-        # If cross-region mode, filter to models that have a CRIS profile under
-        # the selected prefix.
-        if style == "cris" and cris_filter_prefix:
-            cris_model_shorts = {
-                c.model_short for c in all_cris if c.zone_prefix == cris_filter_prefix
-            }
-            models = [m for m in models if m.short_name in cris_model_shorts]
+        # Filter models to those that have a CRIS profile under the chosen
+        # prefix — we can't back a zone with a model whose CRIS doesn't exist.
+        console.print(
+            f"\n[dim]Discovering Claude models in {cris_prefix}.* CRIS...[/dim]"
+        )
+        models, source = discover_models(discovery_region)
+        cris_model_shorts = {
+            c.model_short for c in all_cris if c.zone_prefix == cris_prefix
+        }
+        models = [m for m in models if m.short_name in cris_model_shorts]
 
         if not models:
             console.print(
-                "[red]No Claude models available to enable for this zone.[/red]"
+                f"[red]No Claude models available in the '{cris_prefix}' CRIS.[/red]"
             )
             return 1
         if source == "fallback":
@@ -544,32 +651,19 @@ class InferenceZoneCreateCommand(Command):
         for short in selected_shorts:
             mc = next(m for m in models if m.short_name == short)
 
-            # Resolve copyFrom source ARN.
-            if style == "cris":
-                # Find the CRIS ARN for this model under the admin's chosen prefix.
-                cris = next(
-                    (
-                        c
-                        for c in all_cris
-                        if c.zone_prefix == cris_filter_prefix and c.model_short == short
-                    ),
-                    None,
+            # Always copyFrom the chosen CRIS profile. AWS routes invocations
+            # across the CRIS's region set; our app-inference-profile adds
+            # the Zone / ccwb:Region tags that gate access via IAM.
+            cris = next(
+                (c for c in all_cris if c.zone_prefix == cris_prefix and c.model_short == short),
+                None,
+            )
+            if not cris:
+                failures.append(
+                    (short, f"No {cris_prefix}.{short} CRIS profile found")
                 )
-                if not cris:
-                    failures.append(
-                        (short, f"No {cris_filter_prefix}.{short} CRIS profile found")
-                    )
-                    continue
-                copy_from = cris.profile_arn
-            else:
-                # Specific region: copyFrom the foundation-model ARN.
-                sts = boto3.client("sts", region_name=region_for_create)
-                account = sts.get_caller_identity()["Account"]
-                copy_from = (
-                    f"arn:aws:bedrock:{region_for_create}::foundation-model/"
-                    f"{mc.foundation_arn_template}"
-                )
-                _ = account  # account unused for foundation-model ARNs (double-colon)
+                continue
+            copy_from = cris.profile_arn
 
             inf_name = f"{zone}-{short}"
             tags = [
@@ -577,6 +671,7 @@ class InferenceZoneCreateCommand(Command):
                 {"key": "ccwb:Region", "value": region_for_create},
                 {"key": "ccwb:Profile", "value": profile.name},
                 {"key": "ccwb:Model", "value": short},
+                {"key": "ccwb:CrisZone", "value": cris_prefix},
             ]
             try:
                 resp = bedrock.create_inference_profile(
