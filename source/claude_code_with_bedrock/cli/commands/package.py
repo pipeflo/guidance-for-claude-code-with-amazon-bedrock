@@ -2907,15 +2907,15 @@ Available metrics include:
 
             # Model selection. Two modes:
             #
-            # * isolation OFF (today's default): pin ANTHROPIC_MODEL in settings.json
-            #   so Claude Code uses the cross-region id regardless of shell state.
-            # * isolation ON (GDPR): leave ANTHROPIC_MODEL OUT of settings.json so
-            #   the installer's shell function is the single authoritative source
-            #   for model selection, and IAM Deny is the backstop. A pinned
-            #   ANTHROPIC_MODEL here would silently win over the function's local
-            #   assignment on shells that invoke `claude` from a subshell where
-            #   the function isn't defined (cron, IDE helper process, etc.), which
-            #   is exactly the bypass path we need to close.
+            # * isolation OFF (default): pin ANTHROPIC_MODEL in settings.json
+            #   so Claude Code uses the cross-region id without further user
+            #   configuration — identical to upstream behavior.
+            # * isolation ON (GDPR): leave ANTHROPIC_MODEL OUT of settings.json.
+            #   The user must explicitly set it to the application-inference-profile
+            #   ARN for their zone (the installer prints the per-zone ARN table).
+            #   IAM is the actual security boundary: a cross-region foundation-model
+            #   ARN does not carry a Zone tag, so invocation is denied under
+            #   isolation regardless of what the user sets in ANTHROPIC_MODEL.
             isolation_on = bool(getattr(profile, "enforce_project_isolation", False))
             if not isolation_on and hasattr(profile, "selected_model") and profile.selected_model:
                 settings["env"]["ANTHROPIC_MODEL"] = profile.selected_model
