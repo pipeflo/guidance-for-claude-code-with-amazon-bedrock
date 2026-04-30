@@ -227,15 +227,20 @@ STRIPPY
 
     echo
     echo "=========================================================================="
-    echo "Next step: configure your model"
+    echo "Next step: configure your model + region"
     echo "=========================================================================="
     echo
-    echo "After you run 'claude' and complete authentication, set your model"
-    echo "inside Claude Code by running:"
+    echo "Before running 'claude', set BOTH the model ARN and the AWS region"
+    echo "that matches it (your admin will give you both):"
     echo
-    echo "    /model <model arn provided by your team>"
+    echo "    export AWS_REGION='<region provided by your team>'     # e.g. eu-west-3"
+    echo "    export ANTHROPIC_MODEL='<arn provided by your team>'"
     echo
-    echo "Your administrator will provide the ARN for your assigned zone."
+    echo "Add those two lines to ~/.bashrc or ~/.zshrc to persist."
+    echo
+    echo "Both must be set together — the ARN and the region are paired."
+    echo "If only ANTHROPIC_MODEL is set, the AWS SDK defaults to a different"
+    echo "region and rejects the call with 'invalid ARN'."
     echo "=========================================================================="
 fi
 

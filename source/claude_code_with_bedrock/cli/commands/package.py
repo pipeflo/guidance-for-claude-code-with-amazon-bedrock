@@ -2885,16 +2885,25 @@ Available metrics include:
             claude_dir = output_dir / "claude-settings"
             claude_dir.mkdir(exist_ok=True)
 
-            # Start with basic settings required for Bedrock
-            settings = {
-                "env": {
-                    # Set AWS_REGION based on cross-region profile for correct Bedrock endpoint
-                    "AWS_REGION": self._get_bedrock_region_for_profile(profile),
-                    "CLAUDE_CODE_USE_BEDROCK": "1",
-                    # AWS_PROFILE is used by both AWS SDK and otel-helper
-                    "AWS_PROFILE": profile_name,
-                }
+            # Start with basic settings required for Bedrock. Under per-zone
+            # isolation, we deliberately OMIT AWS_REGION from settings.json.
+            # Reason: users pick their zone's inference-profile ARN at
+            # runtime via `/model <arn>`, and the ARN's region is specific
+            # to their zone (eu-west-3 for France, us-east-1 for US, etc.).
+            # Pinning AWS_REGION to the ccwb init-time default (commonly
+            # us-west-2) forces the AWS SDK to route EU ARN calls to a US
+            # endpoint, returning "invalid ARN" / region-mismatch errors.
+            # Without AWS_REGION pinned, the SDK reads it from the user's
+            # shell env, which admins can pair with ANTHROPIC_MODEL per zone.
+            isolation_on_for_settings = bool(getattr(profile, "enforce_project_isolation", False))
+            settings_env: dict[str, str] = {
+                "CLAUDE_CODE_USE_BEDROCK": "1",
+                # AWS_PROFILE is used by both AWS SDK and otel-helper
+                "AWS_PROFILE": profile_name,
             }
+            if not isolation_on_for_settings:
+                settings_env["AWS_REGION"] = self._get_bedrock_region_for_profile(profile)
+            settings = {"env": settings_env}
 
             # Add includeCoAuthoredBy setting if user wants to disable it (Claude Code defaults to true)
             # Only add the field if the user wants it disabled

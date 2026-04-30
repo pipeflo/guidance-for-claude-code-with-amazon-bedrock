@@ -187,15 +187,19 @@ if ($firstProfileCfg.enforce_project_isolation) {
 
     Write-Host ''
     Write-Host '=========================================================================='
-    Write-Host 'Next step: configure your model'
+    Write-Host 'Next step: configure your model + region'
     Write-Host '=========================================================================='
     Write-Host ''
-    Write-Host "After you run 'claude' and complete authentication, set your model"
-    Write-Host 'inside Claude Code by running:'
+    Write-Host "Before running 'claude', set BOTH the AWS region and the model ARN"
+    Write-Host '(your admin will give you both — they are paired per zone):'
     Write-Host ''
-    Write-Host '    /model <model arn provided by your team>'
+    Write-Host "    $env:AWS_REGION = '<region provided by your team>'     # e.g. eu-west-3"
+    Write-Host "    $env:ANTHROPIC_MODEL = '<arn provided by your team>'"
     Write-Host ''
-    Write-Host 'Your administrator will provide the ARN for your assigned zone.'
+    Write-Host 'Add those two lines to $PROFILE to persist across PowerShell sessions.'
+    Write-Host ''
+    Write-Host 'Both must be set together. If only ANTHROPIC_MODEL is set, the AWS SDK'
+    Write-Host "defaults to a different region and rejects the call with 'invalid ARN'."
     Write-Host '=========================================================================='
 }
 

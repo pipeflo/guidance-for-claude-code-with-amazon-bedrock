@@ -784,14 +784,27 @@ class InferenceZoneCreateCommand(Command):
                 box=box.ROUNDED,
             )
             table.add_column("Model", style="magenta")
+            table.add_column("Region", style="cyan")
             table.add_column("ARN")
             for short, arn in created:
-                table.add_row(short, arn)
+                table.add_row(short, region_for_create, arn)
             console.print(table)
             console.print(
-                "\n[dim]Share this list with users in your Okta "
-                f"'{zone}' project groups. They will set their model "
-                "inside Claude Code with:[/dim]\n"
+                f"\n[bold]How end users in zone '{zone}' configure their environment:[/bold]\n"
+                f"Claude Code needs BOTH the model ARN and the matching AWS region.\n"
+                f"Pair them when setting up the shell (example for PowerShell):\n\n"
+                f"  [cyan]$env:ANTHROPIC_MODEL = '<one of the ARNs above>'[/cyan]\n"
+                f"  [cyan]$env:AWS_REGION = '{region_for_create}'[/cyan]\n\n"
+                f"Or on macOS/Linux:\n\n"
+                f"  [cyan]export ANTHROPIC_MODEL='<arn>'[/cyan]\n"
+                f"  [cyan]export AWS_REGION='{region_for_create}'[/cyan]\n\n"
+                f"Or inside Claude Code after auth, set the model with:\n\n"
+                f"  [cyan]/model <arn>[/cyan]\n\n"
+                f"[yellow]Important:[/yellow] AWS_REGION must be [bold]{region_for_create}[/bold] "
+                f"to match the profile's resource region — without it the AWS SDK "
+                f"routes the request to the wrong endpoint and returns 'invalid ARN'.\n"
+                f"Share the ARN + region table above with your users.\n"
+                f"\n[dim]Users inside Claude Code can also use:[/dim]"
                 "  [cyan]/model <arn>[/cyan]"
             )
         if failures:
@@ -845,10 +858,23 @@ class InferenceZoneListCommand(Command):
             models = zones_to_show[zone]
             table = Table(title=f"Zone '{zone}'", box=box.ROUNDED)
             table.add_column("Model", style="magenta")
+            table.add_column("Region", style="cyan")
             table.add_column("ARN")
             for short in sorted(models):
-                table.add_row(short, models[short])
+                arn = models[short]
+                # Extract region from the ARN: arn:aws:bedrock:<region>:...
+                parts = arn.split(":", 5)
+                region = parts[3] if len(parts) >= 4 else "?"
+                table.add_row(short, region, arn)
             console.print(table)
+
+        # Print the exact env-var commands so the admin can copy directly
+        # into an email to zone users. Region is extracted from each ARN.
+        if not zone_filter and len(zones_to_show) > 0:
+            console.print(
+                "\n[dim]End users need BOTH ANTHROPIC_MODEL and AWS_REGION set "
+                "together (the region must match the ARN's region segment).[/dim]"
+            )
         return 0
 
 
