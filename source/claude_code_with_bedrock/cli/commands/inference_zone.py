@@ -83,17 +83,26 @@ def _zone_name_prompt_validator(value: str) -> bool | str:
 # Model discovery
 # --------------------------------------------------------------------------- #
 
-# Anthropic foundation-model-ID pattern:
-#   anthropic.claude-<family>-<major>-<minor>-<YYYYMMDD>-v<rev>
-# e.g. anthropic.claude-opus-4-6-v1, anthropic.claude-sonnet-4-5-20250929-v1
+# Anthropic foundation-model-ID pattern. The suffix shape varies across
+# model releases and we've seen all of these in the wild:
+#   anthropic.claude-opus-4-7                            (newest format, no date, no -v)
+#   anthropic.claude-sonnet-4-6                          (newest format)
+#   anthropic.claude-opus-4-6-v1                         (has -v but no date)
+#   anthropic.claude-opus-4-5-20251101-v1:0              (has date + -v + :N)
+#   anthropic.claude-sonnet-4-5-20250929-v1:0            (date + -v + :N)
+#   anthropic.claude-haiku-4-5-20251001-v1:0             (date + -v + :N)
+# Cross-region (CRIS) ids add a zone prefix: us.anthropic..., eu.anthropic...
+# We accept all variants so future Anthropic releases with new suffix
+# shapes keep working without requiring code changes.
 _ANTHROPIC_MODEL_RE = re.compile(
     r"^(?:[a-z]{2,6}\.)?"                        # optional zone prefix "us.", "eu.", "apac.", "global."
     r"anthropic\."
     r"claude-(?P<family>opus|sonnet|haiku)"
-    r"-(?P<major>\d+)"
-    r"-(?P<minor>\d+)"
-    r"(?:-\d{8})?"                                # optional date stamp on some models
-    r"-v(?P<rev>\d+)"
+    r"-(?P<major>\d)"                            # single-digit major (4, 5, ...)
+    r"-(?P<minor>\d{1,2})"                       # 1-2 digit minor (1-99). Excludes 8-digit date
+    r"(?![\d])"                                   # boundary: next char must not be a digit
+    r"(?:-\d{8})?"                                # optional date stamp
+    r"(?:-v\d+)?"                                 # optional -v<rev>
     r"(?::\d+)?$"                                 # optional :N suffix on inference profile IDs
 )
 
@@ -206,11 +215,22 @@ def _discover_models_live(region: str) -> list[ModelChoice]:
 
 
 def _discover_models_from_models_py() -> list[ModelChoice]:
-    """Fallback: enumerate from the repo's CLAUDE_MODELS dict."""
+    """Fallback: enumerate from the repo's CLAUDE_MODELS dict.
+
+    This only runs when live Bedrock API discovery fails — typically
+    missing credentials, throttling, or a region with no Bedrock
+    endpoint. The hardcoded list in ``claude_code_with_bedrock/models.py``
+    is maintained alongside releases but always lags by days to weeks,
+    so admins should treat fallback output as a degraded experience and
+    rerun when their AWS credentials are valid.
+    """
     out: list[ModelChoice] = []
     for short, meta in CLAUDE_MODELS.items():
-        # Parse short name ("opus-4-6" -> family=opus, major=4, minor=6)
-        m = re.match(r"^(opus|sonnet|haiku)-(\d+)-(\d+)(?:-.*)?$", short)
+        # Skip variants that aren't straightforward (govcloud, etc.).
+        # The models.py dict includes govcloud overlays with suffixes
+        # like "sonnet-4-5-govcloud" that should never surface in a
+        # generic model picker — they belong in specialized govcloud flows.
+        m = re.match(r"^(opus|sonnet|haiku)-(\d)-(\d{1,2})$", short)
         if not m:
             continue
         family, major, minor = m.group(1), int(m.group(2)), int(m.group(3))
