@@ -398,7 +398,9 @@ class DeployCommand(Command):
                         f"Must match [A-Za-z0-9_-]+.[/red]"
                     )
                     return 1
-                template_body = template.read_text()
+                # Force UTF-8: Python on Windows defaults to cp1252 for text
+                # reads, which fails on the em-dashes used in template comments.
+                template_body = template.read_text(encoding="utf-8")
                 if "__CCWB_COST_TAG_KEY__" in template_body:
                     rendered = template_body.replace("__CCWB_COST_TAG_KEY__", cost_tag_key)
                     tmp = tempfile.NamedTemporaryFile(
