@@ -131,6 +131,18 @@ Resources:
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
+          # Defense in depth: explicit Deny for any request to a region
+          # outside the approved list. Applies to every action on the role;
+          # stricter than relying on positive region conditions in the
+          # Allow statements, and survives future edits to those Allows.
+          - Sid: DenyBedrockOutsideApprovedRegions
+            Effect: Deny
+            Action: '*'
+            Resource: '*'
+            Condition:
+              StringNotEquals:
+                'aws:RequestedRegion': !Ref AllowedBedrockRegions
+
           # --- Permissive Invoke statements (isolation OFF — today's behavior) ---
           - !If
             - IsolationEnforced
@@ -166,14 +178,13 @@ Resources:
                 - !Sub 'arn:${AWS::Partition}:bedrock:::foundation-model/*'
 
           # --- GDPR isolation statements (isolation ON) ---
-          # Explicit Deny catches any caller whose Okta token didn't populate
-          # both Project and Zone session tags (e.g. authenticated user who
-          # is not in an Okta project group). Explicit Deny wins over any
-          # Allow, so this is the airtight GDPR boundary regardless of what
-          # the client-side shell function does.
+          # Two independent Deny statements — either missing session tag
+          # triggers AccessDenied. Split from a single Null-with-two-keys
+          # statement because IAM combines multiple keys under one operator
+          # with AND, not OR (see AWS IAM docs on multi-key conditions).
           - !If
             - IsolationEnforced
-            - Sid: DenyBedrockInvokeWithoutProjectOrZone
+            - Sid: DenyBedrockInvokeWithoutProject
               Effect: Deny
               Action:
                 - 'bedrock:InvokeModel*'
@@ -183,6 +194,18 @@ Resources:
               Condition:
                 'Null':
                   'aws:PrincipalTag/Project': 'true'
+            - !Ref 'AWS::NoValue'
+          - !If
+            - IsolationEnforced
+            - Sid: DenyBedrockInvokeWithoutZone
+              Effect: Deny
+              Action:
+                - 'bedrock:InvokeModel*'
+                - 'bedrock-runtime:InvokeModel*'
+                - 'bedrock-runtime:Converse*'
+              Resource: '*'
+              Condition:
+                'Null':
                   'aws:PrincipalTag/Zone': 'true'
             - !Ref 'AWS::NoValue'
           # Allow only application-inference-profile invocations whose Zone
@@ -222,10 +245,10 @@ Resources:
           # Application inference profiles resolve to an underlying foundation
           # model at invocation time, and IAM evaluates permissions on BOTH the
           # profile ARN and the foundation-model ARN. This allow covers the
-          # backend leg of the routing. The DenyBedrockInvokeWithoutProjectOrZone
-          # statement above gates access before this allow can fire, so only
-          # callers with both Project and Zone tags reach the foundation-model
-          # model ARN.
+          # backend leg of the routing, scoped to the approved Anthropic
+          # families (Opus / Sonnet / Haiku). Other model providers
+          # (Meta, Mistral, etc.) are implicitly denied. The split Deny
+          # statements above gate access before this allow can fire.
           - !If
             - IsolationEnforced
             - Sid: AllowBedrockInvokeFoundationModelBackend
@@ -238,8 +261,12 @@ Resources:
                 - 'bedrock-runtime:ConverseStream'
                 - 'bedrock-runtime:Converse'
               Resource:
-                - !Sub 'arn:${AWS::Partition}:bedrock:*::foundation-model/*'
-                - !Sub 'arn:${AWS::Partition}:bedrock:::foundation-model/*'
+                - !Sub 'arn:${AWS::Partition}:bedrock:*::foundation-model/anthropic.claude-opus-*'
+                - !Sub 'arn:${AWS::Partition}:bedrock:*::foundation-model/anthropic.claude-sonnet-*'
+                - !Sub 'arn:${AWS::Partition}:bedrock:*::foundation-model/anthropic.claude-haiku-*'
+                - !Sub 'arn:${AWS::Partition}:bedrock:::foundation-model/anthropic.claude-opus-*'
+                - !Sub 'arn:${AWS::Partition}:bedrock:::foundation-model/anthropic.claude-sonnet-*'
+                - !Sub 'arn:${AWS::Partition}:bedrock:::foundation-model/anthropic.claude-haiku-*'
             - !Ref 'AWS::NoValue'
 
           # --- List / discovery permissions ---

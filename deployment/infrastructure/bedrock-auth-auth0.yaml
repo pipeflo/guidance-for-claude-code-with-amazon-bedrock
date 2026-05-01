@@ -109,6 +109,15 @@ Resources:
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
+          # Defense in depth: explicit Deny for any non-approved region.
+          - Sid: DenyBedrockOutsideApprovedRegions
+            Effect: Deny
+            Action: '*'
+            Resource: '*'
+            Condition:
+              StringNotEquals:
+                'aws:RequestedRegion': !Ref AllowedBedrockRegions
+
           # --- Permissive Invoke statements (isolation OFF) ---
           - !If
             - IsolationEnforced
@@ -144,9 +153,12 @@ Resources:
                 - !Sub 'arn:${AWS::Partition}:bedrock:::foundation-model/*'
 
           # --- GDPR isolation statements (isolation ON) ---
+          # Two independent Deny statements — either missing session tag
+          # triggers AccessDenied. Split because IAM combines multiple keys
+          # under one operator with AND, not OR.
           - !If
             - IsolationEnforced
-            - Sid: DenyBedrockInvokeWithoutProjectOrZone
+            - Sid: DenyBedrockInvokeWithoutProject
               Effect: Deny
               Action:
                 - 'bedrock:InvokeModel*'
@@ -156,6 +168,18 @@ Resources:
               Condition:
                 'Null':
                   'aws:PrincipalTag/Project': 'true'
+            - !Ref 'AWS::NoValue'
+          - !If
+            - IsolationEnforced
+            - Sid: DenyBedrockInvokeWithoutZone
+              Effect: Deny
+              Action:
+                - 'bedrock:InvokeModel*'
+                - 'bedrock-runtime:InvokeModel*'
+                - 'bedrock-runtime:Converse*'
+              Resource: '*'
+              Condition:
+                'Null':
                   'aws:PrincipalTag/Zone': 'true'
             - !Ref 'AWS::NoValue'
           # See bedrock-auth-okta.yaml for the tag-match + ccwb:Region rationale.
@@ -177,6 +201,7 @@ Resources:
                   'aws:ResourceTag/Zone': '${aws:PrincipalTag/Zone}'
                   'aws:ResourceTag/ccwb:Region': '${aws:RequestedRegion}'
             - !Ref 'AWS::NoValue'
+          # Scoped to approved Anthropic families (Opus / Sonnet / Haiku).
           - !If
             - IsolationEnforced
             - Sid: AllowBedrockInvokeFoundationModelBackend
@@ -189,8 +214,12 @@ Resources:
                 - 'bedrock-runtime:ConverseStream'
                 - 'bedrock-runtime:Converse'
               Resource:
-                - !Sub 'arn:${AWS::Partition}:bedrock:*::foundation-model/*'
-                - !Sub 'arn:${AWS::Partition}:bedrock:::foundation-model/*'
+                - !Sub 'arn:${AWS::Partition}:bedrock:*::foundation-model/anthropic.claude-opus-*'
+                - !Sub 'arn:${AWS::Partition}:bedrock:*::foundation-model/anthropic.claude-sonnet-*'
+                - !Sub 'arn:${AWS::Partition}:bedrock:*::foundation-model/anthropic.claude-haiku-*'
+                - !Sub 'arn:${AWS::Partition}:bedrock:::foundation-model/anthropic.claude-opus-*'
+                - !Sub 'arn:${AWS::Partition}:bedrock:::foundation-model/anthropic.claude-sonnet-*'
+                - !Sub 'arn:${AWS::Partition}:bedrock:::foundation-model/anthropic.claude-haiku-*'
             - !Ref 'AWS::NoValue'
 
           # See bedrock-auth-okta.yaml for the catalog-listing rationale.
