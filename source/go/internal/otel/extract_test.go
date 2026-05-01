@@ -283,3 +283,43 @@ func TestExtractUserInfo_ProjectEmptyWhenAbsent(t *testing.T) {
 		t.Errorf("Project = %q, want empty string", info.Project)
 	}
 }
+
+func TestExtractUserInfoWithTagKey_CostCenter(t *testing.T) {
+	// Customer renames the cost-attribution tag to CostCenter. The JWT
+	// carries the value under the CostCenter claim URL; the default key
+	// "Project" would miss it. ExtractUserInfoWithTagKey honors the override.
+	claims := jwt.Claims{
+		"email": "user@example.com",
+		"https://aws.amazon.com/tags/principal_tags/CostCenter": "CC-123",
+	}
+	info := ExtractUserInfoWithTagKey(claims, "CostCenter")
+	if info.Project != "CC-123" {
+		t.Errorf("Project (from CostCenter claim) = %q, want CC-123", info.Project)
+	}
+}
+
+func TestExtractUserInfoWithTagKey_EmptyFallsBackToProject(t *testing.T) {
+	// Older bundles that predate the configurable key leave
+	// CostAttributionTagKey empty; the function must treat "" as "Project".
+	claims := jwt.Claims{
+		"email": "user@example.com",
+		"https://aws.amazon.com/tags/principal_tags/Project": "Zeta",
+	}
+	info := ExtractUserInfoWithTagKey(claims, "")
+	if info.Project != "Zeta" {
+		t.Errorf("Project = %q, want Zeta (empty tagKey should fall back)", info.Project)
+	}
+}
+
+func TestExtractUserInfoWithTagKey_CustomKeyIgnoresDefaultClaim(t *testing.T) {
+	// When the customer sets a custom key, we should NOT accidentally
+	// pick up a stale "Project" claim from an old IdP config.
+	claims := jwt.Claims{
+		"email": "user@example.com",
+		"https://aws.amazon.com/tags/principal_tags/Project": "should-be-ignored",
+	}
+	info := ExtractUserInfoWithTagKey(claims, "BillingCode")
+	if info.Project != "" {
+		t.Errorf("Project = %q, want empty (custom key misses should NOT fall back to Project)", info.Project)
+	}
+}

@@ -148,9 +148,12 @@ Resources:
           # Two independent Deny statements — either missing session tag
           # triggers AccessDenied. Split because IAM combines multiple keys
           # under one operator with AND, not OR.
+          # __CCWB_COST_TAG_KEY__ is replaced at deploy time by ccwb with the
+          # profile's cost_attribution_tag_key (default "Project"). YAML map
+          # keys cannot be dynamic via CF intrinsic functions.
           - !If
             - IsolationEnforced
-            - Sid: DenyBedrockInvokeWithoutProject
+            - Sid: DenyBedrockInvokeWithoutCostAttribution
               Effect: Deny
               Action:
                 - 'bedrock:InvokeModel*'
@@ -159,7 +162,7 @@ Resources:
               Resource: '*'
               Condition:
                 'Null':
-                  'aws:PrincipalTag/Project': 'true'
+                  'aws:PrincipalTag/__CCWB_COST_TAG_KEY__': 'true'
             - !Ref 'AWS::NoValue'
           - !If
             - IsolationEnforced

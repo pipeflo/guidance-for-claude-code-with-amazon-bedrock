@@ -28,7 +28,29 @@ type UserInfo struct {
 }
 
 // ExtractUserInfo extracts user attributes from JWT claims with fallback chains.
+// Kept as a default-key shim so callers that don't need the configurable
+// cost-attribution key can stay unchanged; threads "Project" through to
+// ExtractUserInfoWithTagKey.
 func ExtractUserInfo(claims jwt.Claims) UserInfo {
+	return ExtractUserInfoWithTagKey(claims, "Project")
+}
+
+// ExtractUserInfoWithTagKey is the same as ExtractUserInfo but reads the
+// cost-attribution session tag under an arbitrary key name (e.g. "CostCenter").
+// Callers that load config.json pass cfg.CostAttributionTagKey here, falling
+// back to "Project" when that field is empty (older bundles predating the
+// configurable key).
+//
+// Note: the AWS session-tag key is an IAM-level construct. The OTel header
+// name (x-project) and collector dimension (project) remain unchanged and are
+// independent of this key — they're our internal cost-attribution convention,
+// not AWS state. A customer who sets CostAttributionTagKey="CostCenter" still
+// sees the metric dimension labeled "project" in CloudWatch, with the value
+// pulled from the CostCenter session tag.
+func ExtractUserInfoWithTagKey(claims jwt.Claims, tagKey string) UserInfo {
+	if tagKey == "" {
+		tagKey = "Project"
+	}
 	info := UserInfo{}
 
 	// Email
@@ -131,10 +153,15 @@ func ExtractUserInfo(claims jwt.Claims) UserInfo {
 		info.Role = "user"
 	}
 
-	// Project — from the AWS session-tag claim shipped by the IdP.
-	// Intentionally left empty when absent so FormatHeaders omits x-project
-	// and the collector falls back to the resource attribute `project=default`.
-	info.Project = ExtractPrincipalTag(claims, "Project")
+	// Cost-attribution — from the AWS session-tag claim shipped by the IdP.
+	// The claim key name comes from the profile config (default "Project",
+	// override via cost_attribution_tag_key for customers using CostCenter /
+	// BillingCode / etc). We still store the value in info.Project because
+	// the downstream OTel header / dashboard dimension is "project" — that's
+	// our internal convention, not AWS state. Intentionally left empty when
+	// absent so FormatHeaders omits x-project and the collector falls back
+	// to the resource attribute `project=default`.
+	info.Project = ExtractPrincipalTag(claims, tagKey)
 
 	// Technical fields
 	info.AccountUUID = claims.GetString("aud")

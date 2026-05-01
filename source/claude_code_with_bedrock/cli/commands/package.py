@@ -2102,6 +2102,13 @@ RUN pyinstaller \
         # unchanged deployments keep their current config.json verbatim.
         if getattr(profile, "project_attribution_enabled", False):
             config[profile_name]["project_attribution_enabled"] = True
+            # Only emit the tag-key override when it differs from the default
+            # "Project". This keeps every bundle produced for a default-key
+            # customer byte-identical to what ccwb produced before this field
+            # existed, and lets older Go binaries ignore the field safely.
+            cost_tag_key = getattr(profile, "cost_attribution_tag_key", None) or "Project"
+            if cost_tag_key != "Project":
+                config[profile_name]["cost_attribution_tag_key"] = cost_tag_key
 
         # GDPR per-zone isolation metadata. Emitted only when enforced --
         # the installer's shell-function block reads this dict to generate

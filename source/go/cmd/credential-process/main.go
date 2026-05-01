@@ -275,10 +275,16 @@ func (a *credentialApp) showTags() int {
 		fmt.Fprintln(os.Stderr, "Your IdP is not configured to emit session tags. See assets/docs/COST_ATTRIBUTION.md section 3.")
 		return 1
 	}
-	// Surface the value of the Project tag regardless of which shape produced it --
-	// this is the exact value the OTel pipeline emits as x-project.
-	if p := otel.ExtractPrincipalTag(claims, "Project"); p != "" {
-		summary["Project (resolved)"] = p
+	// Surface the resolved value of the cost-attribution tag regardless of
+	// which shape produced it -- this is the exact value the OTel pipeline
+	// emits as x-project. Key name comes from config (default "Project") so
+	// customers using CostCenter/BillingCode see the same diagnostic.
+	costTagKey := a.cfg.CostAttributionTagKey
+	if costTagKey == "" {
+		costTagKey = "Project"
+	}
+	if p := otel.ExtractPrincipalTag(claims, costTagKey); p != "" {
+		summary[fmt.Sprintf("%s (resolved)", costTagKey)] = p
 	}
 	pretty, err := json.MarshalIndent(summary, "", "  ")
 	if err != nil {

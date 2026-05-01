@@ -80,6 +80,15 @@ class Profile:
     # back to the default literal string and no Cost Explorer tag appears.
     project_attribution_enabled: bool = False
 
+    # AWS session-tag key used for cost attribution. Default "Project" matches
+    # the historical behavior and all upstream guidance. Customers whose
+    # finance/security teams standardize on a different convention (e.g.
+    # "CostCenter", "BillingCode") override this so the Okta claim URL, the
+    # IAM Deny condition, and the otel-helper extraction all agree on the
+    # same key. The activation step in AWS Billing becomes
+    # `aws:iamPrincipal/<cost_attribution_tag_key>`.
+    cost_attribution_tag_key: str = "Project"
+
     # Okta Custom Authorization Server id. Integrator / Developer tenants and
     # most Workforce Identity deployments ship a CAS literally named "default".
     # Customers who run a differently-named CAS override this at init time;

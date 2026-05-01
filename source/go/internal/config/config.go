@@ -45,6 +45,12 @@ type ProfileConfig struct {
 	// status without inferring it.
 	ProjectAttributionEnabled bool `json:"project_attribution_enabled"`
 
+	// AWS session-tag key used for cost attribution. Default "Project" matches
+	// the historical behavior; customers who standardize on a different name
+	// (CostCenter, BillingCode, etc.) override here. Callers resolve absent or
+	// empty to "Project" so older bundles that predate this field keep working.
+	CostAttributionTagKey string `json:"cost_attribution_tag_key,omitempty"`
+
 	// Legacy field names
 	OktaDomain   string `json:"okta_domain"`
 	OktaClientID string `json:"okta_client_id"`

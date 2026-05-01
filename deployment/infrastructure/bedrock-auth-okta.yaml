@@ -182,9 +182,16 @@ Resources:
           # triggers AccessDenied. Split from a single Null-with-two-keys
           # statement because IAM combines multiple keys under one operator
           # with AND, not OR (see AWS IAM docs on multi-key conditions).
+          # NOTE: __CCWB_COST_TAG_KEY__ is replaced at deploy time by
+          # ccwb (source/claude_code_with_bedrock/cli/commands/deploy.py)
+          # with the profile's cost_attribution_tag_key (default "Project").
+          # YAML map keys cannot be dynamic via CF intrinsic functions,
+          # so we do the substitution in Python before submitting the
+          # template. The value "Project" keeps the rendered policy
+          # byte-identical for existing deployments.
           - !If
             - IsolationEnforced
-            - Sid: DenyBedrockInvokeWithoutProject
+            - Sid: DenyBedrockInvokeWithoutCostAttribution
               Effect: Deny
               Action:
                 - 'bedrock:InvokeModel*'
@@ -193,7 +200,7 @@ Resources:
               Resource: '*'
               Condition:
                 'Null':
-                  'aws:PrincipalTag/Project': 'true'
+                  'aws:PrincipalTag/__CCWB_COST_TAG_KEY__': 'true'
             - !Ref 'AWS::NoValue'
           - !If
             - IsolationEnforced

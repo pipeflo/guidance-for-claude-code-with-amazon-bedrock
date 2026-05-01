@@ -81,7 +81,17 @@ func run(testMode bool) int {
 		return 1
 	}
 
-	userInfo := otel.ExtractUserInfo(claims)
+	// Resolve the cost-attribution tag key from config.json. Absent / empty
+	// means "Project" (the historical default) — ExtractUserInfoWithTagKey
+	// handles the fallback, but we also gracefully tolerate a missing config
+	// file here so this binary keeps working in dev/test where config.json
+	// isn't always wired up.
+	costTagKey := "Project"
+	if cfg, cfgErr := config.LoadProfile(profile); cfgErr == nil && cfg.CostAttributionTagKey != "" {
+		costTagKey = cfg.CostAttributionTagKey
+	}
+
+	userInfo := otel.ExtractUserInfoWithTagKey(claims, costTagKey)
 	headers := otel.FormatHeaders(userInfo)
 
 	if testMode {

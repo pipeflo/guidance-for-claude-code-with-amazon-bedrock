@@ -124,6 +124,7 @@ class InitCommand(Command):
                     isolation_enabled=bool(config.get("enforce_project_isolation")),
                     zones=config.get("zones") or [],
                     okta_group_prefix=config.get("okta_group_prefix") or profile_name,
+                    cost_tag_key=config.get("cost_attribution_tag_key") or "Project",
                 )
             return 0
 
@@ -243,6 +244,7 @@ class InitCommand(Command):
                 isolation_enabled=bool(config.get("enforce_project_isolation")),
                 zones=config.get("zones") or [],
                 okta_group_prefix=config.get("okta_group_prefix") or profile_name,
+                cost_tag_key=config.get("cost_attribution_tag_key") or "Project",
             )
 
         return 0
@@ -256,6 +258,7 @@ class InitCommand(Command):
         isolation_enabled: bool = False,
         zones: list[str] | None = None,
         okta_group_prefix: str | None = None,
+        cost_tag_key: str = "Project",
     ) -> None:
         """Print the IdP-side setup recipe the admin needs to run to start
         emitting the Project session tag. Dispatches on provider_type:
@@ -277,12 +280,13 @@ class InitCommand(Command):
                 isolation_enabled=isolation_enabled,
                 zones=zones or [],
                 okta_group_prefix=okta_group_prefix or profile_name,
+                cost_tag_key=cost_tag_key,
             )
         else:
             generic_panel = Panel.fit(
                 "[bold cyan]Per-project cost attribution — next steps[/bold cyan]\n\n"
                 f"You opted in for profile [white]{profile_name}[/white]. The binaries will\n"
-                "route a [white]Project[/white] session tag through STS and OTel automatically — but\n"
+                f"route a [white]{cost_tag_key}[/white] session tag through STS and OTel automatically — but\n"
                 "only once your identity provider is emitting it.\n\n"
                 "Follow the recipe for your IdP in section 3 of\n"
                 "[cyan]assets/docs/COST_ATTRIBUTION.md[/cyan]:\n"
@@ -305,6 +309,7 @@ class InitCommand(Command):
         isolation_enabled: bool = False,
         zones: list[str] | None = None,
         okta_group_prefix: str | None = None,
+        cost_tag_key: str = "Project",
     ) -> None:
         """Show the admin the exact Okta claim config for this profile.
 
@@ -361,10 +366,10 @@ class InitCommand(Command):
             "  [dim]Assign to[/dim]:  The Claude Code OIDC application",
             "  [dim]Rule[/dim]:  Allow grant type [white]authorization_code[/white]",
             "         + scopes [white]openid profile email[/white]\n",
-            "[bold]2. Project claim[/bold] (emits the Project session tag):\n",
+            f"[bold]2. {cost_tag_key} claim[/bold] (emits the {cost_tag_key} session tag):\n",
             f"  [dim]Path[/dim]:  Security → API → Authorization Servers → [white]{cas_id}[/white]\n"
             "         → Claims → Add Claim",
-            "  [dim]Name[/dim]:         [white]https://aws.amazon.com/tags/principal_tags/Project[/white]",
+            f"  [dim]Name[/dim]:         [white]https://aws.amazon.com/tags/principal_tags/{cost_tag_key}[/white]",
             "  [dim]Token type[/dim]:   ID Token, Always",
             "  [dim]Value type[/dim]:   Expression",
             f"  [dim]Value[/dim]:        [yellow]{project_expr}[/yellow]",
@@ -416,7 +421,7 @@ class InitCommand(Command):
             )
 
         body_lines.append(
-            "After the first Bedrock call, activate [white]iamPrincipal/Project[/white] as a\n"
+            f"After the first Bedrock call, activate [white]iamPrincipal/{cost_tag_key}[/white] as a\n"
             "cost allocation tag in AWS Billing → Cost Allocation Tags."
         )
         if isolation_enabled:
@@ -691,6 +696,33 @@ class InitCommand(Command):
 
                 config["project_attribution_enabled"] = bool(attribution_enabled)
 
+                # Cost-attribution session-tag key. Default "Project" matches
+                # every upstream doc and existing deployment. Customers whose
+                # finance/security teams standardize on a different name
+                # (CostCenter, BillingCode, etc.) override here so the Okta
+                # claim URL, the IAM Deny condition, and the otel-helper
+                # extraction all key on the same string.
+                if attribution_enabled:
+                    cost_tag_key = questionary.text(
+                        "Cost-attribution session-tag key:",
+                        default=config.get("cost_attribution_tag_key", "Project"),
+                        instruction=(
+                            "(Press Enter for 'Project' — matches upstream and historical docs. "
+                            "Override to 'CostCenter', 'BillingCode', or any other alphanumeric key "
+                            "your security team configured in the IdP.)"
+                        ),
+                    ).ask()
+                    if cost_tag_key is None:
+                        return None
+                    cost_tag_key = (cost_tag_key or "").strip() or "Project"
+                    if not re.fullmatch(r"[A-Za-z0-9_-]+", cost_tag_key):
+                        console.print(
+                            f"[red]Invalid tag key {cost_tag_key!r}. "
+                            f"Must match [A-Za-z0-9_-]+ (no spaces or special chars).[/red]"
+                        )
+                        return None
+                    config["cost_attribution_tag_key"] = cost_tag_key
+
                 # CAS ID only applies to Okta. Auth0/Azure/Cognito have their
                 # own claim-emission paths that don't use a CAS id.
                 if attribution_enabled and provider_type == "okta":
@@ -764,6 +796,7 @@ class InitCommand(Command):
                 # Preserve any previously-saved values on re-run but do not
                 # prompt — cognito customers get zero noise about this feature.
                 config.setdefault("project_attribution_enabled", False)
+                config.setdefault("cost_attribution_tag_key", "Project")
                 config.setdefault("okta_auth_server_id", "default")
                 config.setdefault("enforce_project_isolation", False)
                 config.setdefault("zones", [])
@@ -1790,6 +1823,7 @@ class InitCommand(Command):
             federation_type=config_data.get("federation_type", "cognito"),
             max_session_duration=config_data.get("max_session_duration", 28800),
             project_attribution_enabled=config_data.get("project_attribution_enabled", False),
+            cost_attribution_tag_key=config_data.get("cost_attribution_tag_key", "Project"),
             okta_auth_server_id=config_data.get("okta_auth_server_id", "default"),
             enforce_project_isolation=config_data.get("enforce_project_isolation", False),
             zones=config_data.get("zones", []) or [],

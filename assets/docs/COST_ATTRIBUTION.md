@@ -167,6 +167,10 @@ A common variant of section 3: the customer team creates one IdP group per proje
 
 This is section 3 applied to a single `Project` tag whose value comes from the user's IdP group membership. The filter that decides "which of this user's groups is the project" lives inside the IdP's expression engine — no code change needed in this tool.
 
+> **Choosing a different tag key**
+>
+> This guide uses `Project` everywhere because it matches the historical default. If your security team has standardized on a different name — `CostCenter`, `BillingCode`, etc. — set `cost_attribution_tag_key: "CostCenter"` on the ccwb profile. That threads the chosen key through the Okta claim URL (`https://aws.amazon.com/tags/principal_tags/CostCenter`), the IAM Deny condition (`aws:PrincipalTag/CostCenter`), the `credential-process --show-tags` diagnostic, and the `otel-helper` extraction. The CloudWatch metric dimension stays labelled `project` regardless (it's our internal OTel convention, not AWS state), so dashboards don't rename. The AWS-Billing activation step becomes `aws:iamPrincipal/<your-key>`.
+
 ### Recommended convention: group name = `<ccwb-profile-name>-<ProjectName>`
 
 Reuse your ccwb profile name as the Okta group prefix. Example — if your ccwb profile is `acme-prod`:
