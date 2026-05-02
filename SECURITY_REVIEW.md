@@ -2,7 +2,7 @@
 
 This document captures a baseline security review of the two Go binaries this guidance ships to end-user endpoints. It is intended as a starting artifact for any organization adopting the solution — run the same tools against any future revision to regenerate this exact artifact set.
 
-**Code scanned:** Go source tree under `source/go/`, HEAD `8f261cd` of `main` at scan time.
+**Code scanned:** Go source tree under `source/go/`, HEAD `2f64a6f` of `main` at scan time.
 **Scope:** the two Go binaries deployed to end-user endpoints (`credential-process` and `otel-helper`) and their transitive dependencies.
 **Out of scope:** the `ccwb` Python CLI (deployed only to admin workstations), CloudFormation templates, Claude Code itself (maintained by Anthropic), AWS SDK internals (maintained by AWS).
 **Scan date:** 2026-05-02.
@@ -52,7 +52,7 @@ Separation of concerns. `credential-process` is the auth critical path (must run
 
 ## 2. Binary provenance
 
-**Source.** All code is in this repository. Current HEAD at scan time: `8f261cd`.
+**Source.** All code is in this repository. Current HEAD at scan time: `2f64a6f`.
 
 **Build command.** Reproducible from source:
 
@@ -75,7 +75,7 @@ PE version info embedded via `go-winres` `.syso` files committed at `source/go/c
 
 **Go version at scan time.** `go 1.26.2`. Module declares `go 1.24` minimum.
 
-**SHA-256 of each shipped binary** (commit `8f261cd`):
+**SHA-256 of each shipped binary** (commit `2f64a6f`):
 
 ```
 c14f952093cbe3087ded08690389adb733b15e7cab730fdebcdf05dcccd68bee  credential-process-linux-arm64
