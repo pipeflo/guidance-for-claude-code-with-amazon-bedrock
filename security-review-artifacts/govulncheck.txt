@@ -1,0 +1,27 @@
+=== Symbol Results ===
+
+Vulnerability #1: GO-2025-4123
+    Denial-of-Service (DoS) via crafted JSON Web Encryption (JWE) token high
+    compression ratio in github.com/dvsekhvalnov/jose2go
+  More info: https://pkg.go.dev/vuln/GO-2025-4123
+  Module: github.com/dvsekhvalnov/jose2go
+    Found in: github.com/dvsekhvalnov/jose2go@v1.5.0
+    Fixed in: github.com/dvsekhvalnov/jose2go@v1.7.0
+    Example traces found:
+      #1: internal/storage/keyring.go:90:21: storage.ReadMonitoringTokenFromKeyring calls keyring.fileKeyring.Get, which calls jose2go.Decode
+
+Vulnerability #2: GO-2023-2409
+    Denial of service when decrypting attacker controlled input in
+    github.com/dvsekhvalnov/jose2go
+  More info: https://pkg.go.dev/vuln/GO-2023-2409
+  Module: github.com/dvsekhvalnov/jose2go
+    Found in: github.com/dvsekhvalnov/jose2go@v1.5.0
+    Fixed in: github.com/dvsekhvalnov/jose2go@v1.5.1-0.20231206184617-48ba0b76bc88
+    Example traces found:
+      #1: internal/storage/keyring.go:90:21: storage.ReadMonitoringTokenFromKeyring calls keyring.fileKeyring.Get, which calls jose2go.Decode
+      #2: internal/storage/keyring.go:114:15: storage.SaveMonitoringTokenToKeyring calls keyring.fileKeyring.Set, which calls jose2go.Encrypt
+
+Your code is affected by 2 vulnerabilities from 1 module.
+This scan found no other vulnerabilities in packages you import or modules you
+require.
+Use '-show verbose' for more details.

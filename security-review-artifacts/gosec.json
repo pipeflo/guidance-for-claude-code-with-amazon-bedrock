@@ -1,0 +1,416 @@
+{
+	"Golang errors": {},
+	"Issues": [
+		{
+			"severity": "HIGH",
+			"confidence": "MEDIUM",
+			"cwe": {
+				"id": "190",
+				"url": "https://cwe.mitre.org/data/definitions/190.html"
+			},
+			"rule_id": "G115",
+			"details": "integer overflow conversion int -\u003e int32",
+			"file": "<repo>/source/go/internal/federation/sts.go",
+			"code": "52: \t\tWebIdentityToken: aws.String(idToken),\n53: \t\tDurationSeconds:  aws.Int32(int32(maxDuration)),\n54: \t}\n",
+			"line": "53",
+			"column": "36",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "LOW",
+			"cwe": {
+				"id": "798",
+				"url": "https://cwe.mitre.org/data/definitions/798.html"
+			},
+			"rule_id": "G101",
+			"details": "Potential hardcoded credentials",
+			"file": "<repo>/source/go/internal/provider/endpoints.go",
+			"code": "49: \t},\n50: \t\"cognito\": {\n51: \t\tName:              \"AWS Cognito User Pool\",\n52: \t\tAuthorizeEndpoint: \"/oauth2/authorize\",\n53: \t\tTokenEndpoint:     \"/oauth2/token\",\n54: \t\tScopes:            \"openid email\",\n55: \t\tResponseType:      \"code\",\n56: \t\tResponseMode:      \"query\",\n57: \t},\n58: }\n",
+			"line": "50-57",
+			"column": "13",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "LOW",
+			"cwe": {
+				"id": "798",
+				"url": "https://cwe.mitre.org/data/definitions/798.html"
+			},
+			"rule_id": "G101",
+			"details": "Potential hardcoded credentials",
+			"file": "<repo>/source/go/internal/provider/endpoints.go",
+			"code": "41: \t},\n42: \t\"azure\": {\n43: \t\tName:              \"Azure AD\",\n44: \t\tAuthorizeEndpoint: \"/oauth2/v2.0/authorize\",\n45: \t\tTokenEndpoint:     \"/oauth2/v2.0/token\",\n46: \t\tScopes:            \"openid profile email\",\n47: \t\tResponseType:      \"code\",\n48: \t\tResponseMode:      \"query\",\n49: \t},\n50: \t\"cognito\": {\n",
+			"line": "42-49",
+			"column": "11",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "LOW",
+			"cwe": {
+				"id": "798",
+				"url": "https://cwe.mitre.org/data/definitions/798.html"
+			},
+			"rule_id": "G101",
+			"details": "Potential hardcoded credentials",
+			"file": "<repo>/source/go/internal/provider/endpoints.go",
+			"code": "33: \t},\n34: \t\"auth0\": {\n35: \t\tName:              \"Auth0\",\n36: \t\tAuthorizeEndpoint: \"/authorize\",\n37: \t\tTokenEndpoint:     \"/oauth/token\",\n38: \t\tScopes:            \"openid profile email\",\n39: \t\tResponseType:      \"code\",\n40: \t\tResponseMode:      \"query\",\n41: \t},\n42: \t\"azure\": {\n",
+			"line": "34-41",
+			"column": "11",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "LOW",
+			"cwe": {
+				"id": "798",
+				"url": "https://cwe.mitre.org/data/definitions/798.html"
+			},
+			"rule_id": "G101",
+			"details": "Potential hardcoded credentials",
+			"file": "<repo>/source/go/internal/provider/endpoints.go",
+			"code": "25: var Configs = map[string]Config{\n26: \t\"okta\": {\n27: \t\tName:              \"Okta\",\n28: \t\tAuthorizeEndpoint: \"/oauth2/default/v1/authorize\",\n29: \t\tTokenEndpoint:     \"/oauth2/default/v1/token\",\n30: \t\tScopes:            \"openid profile email\",\n31: \t\tResponseType:      \"code\",\n32: \t\tResponseMode:      \"query\",\n33: \t},\n34: \t\"auth0\": {\n",
+			"line": "26-33",
+			"column": "10",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "HIGH",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "78",
+				"url": "https://cwe.mitre.org/data/definitions/78.html"
+			},
+			"rule_id": "G702",
+			"details": "Command injection via taint analysis",
+			"file": "<repo>/source/go/cmd/otel-helper/main.go",
+			"code": "123: \tdebugPrint(\"Getting token via credential-process...\")\n124: \tcmd := exec.Command(cpPath, \"--profile\", profile, \"--get-monitoring-token\")\n125: \tout, err := cmd.Output()\n",
+			"line": "124",
+			"column": "21",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "78",
+				"url": "https://cwe.mitre.org/data/definitions/78.html"
+			},
+			"rule_id": "G204",
+			"details": "Subprocess launched with variable",
+			"file": "<repo>/source/go/cmd/otel-helper/main.go",
+			"code": "123: \tdebugPrint(\"Getting token via credential-process...\")\n124: \tcmd := exec.Command(cpPath, \"--profile\", profile, \"--get-monitoring-token\")\n125: \tout, err := cmd.Output()\n",
+			"line": "124",
+			"column": "9",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "<repo>/source/go/internal/storage/monitoring.go",
+			"code": "67: \tpath := filepath.Join(home, \".claude-code-session\", profile+\"-monitoring.json\")\n68: \traw, err := os.ReadFile(path)\n69: \tif err != nil {\n",
+			"line": "68",
+			"column": "14",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "<repo>/source/go/internal/otel/cache.go",
+			"code": "51: \n52: \tdata, err := os.ReadFile(filepath.Join(dir, profile+\"-otel-headers.json\"))\n53: \tif err != nil {\n",
+			"line": "52",
+			"column": "15",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "<repo>/source/go/internal/config/config.go",
+			"code": "204: \tp := filepath.Join(home, \"claude-code-with-bedrock\", \"config.json\")\n205: \tdata, err := os.ReadFile(p)\n206: \tif err != nil {\n",
+			"line": "205",
+			"column": "15",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "22",
+				"url": "https://cwe.mitre.org/data/definitions/22.html"
+			},
+			"rule_id": "G304",
+			"details": "Potential file inclusion via variable",
+			"file": "<repo>/source/go/internal/config/config.go",
+			"code": "193: \t\tp := filepath.Join(filepath.Dir(exePath), \"config.json\")\n194: \t\tif data, err := os.ReadFile(p); err == nil {\n195: \t\t\treturn data, nil\n",
+			"line": "194",
+			"column": "19",
+			"nosec": false,
+			"suppressions": null,
+			"autofix": "Consider using os.Root to scope file access under a fixed root (Go \u003e=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal."
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "LOW",
+			"cwe": {
+				"id": "400",
+				"url": "https://cwe.mitre.org/data/definitions/400.html"
+			},
+			"rule_id": "G112",
+			"details": "Potential Slowloris Attack because ReadHeaderTimeout is not configured in the http.Server",
+			"file": "<repo>/source/go/internal/oidc/callback.go",
+			"code": "49: \n50: \tsrv := \u0026http.Server{\n51: \t\tAddr:    fmt.Sprintf(\"127.0.0.1:%d\", port),\n52: \t\tHandler: mux,\n53: \t}\n54: \n",
+			"line": "50-53",
+			"column": "10",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "MEDIUM",
+			"confidence": "MEDIUM",
+			"cwe": {
+				"id": "499",
+				"url": "https://cwe.mitre.org/data/definitions/499.html"
+			},
+			"rule_id": "G117",
+			"details": "Marshaled struct field \"SessionToken\" (JSON key \"SessionToken\") matches secret pattern",
+			"file": "<repo>/source/go/internal/storage/keyring.go",
+			"code": "59: \n60: \tdata, err := json.Marshal(creds)\n61: \tif err != nil {\n",
+			"line": "60",
+			"column": "15",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "<repo>/source/go/internal/storage/session.go",
+			"code": "96: \tif err := os.Rename(tmpPath, credPath); err != nil {\n97: \t\tos.Remove(tmpPath)\n98: \t\treturn err\n",
+			"line": "97",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "<repo>/source/go/internal/storage/session.go",
+			"code": "92: \tif err := os.Chmod(tmpPath, 0600); err != nil {\n93: \t\tos.Remove(tmpPath)\n94: \t\treturn err\n",
+			"line": "93",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "<repo>/source/go/internal/portlock/lock.go",
+			"code": "27: \t\tif err == nil {\n28: \t\t\tln.Close()\n29: \t\t\treturn true\n",
+			"line": "28",
+			"column": "4",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "<repo>/source/go/internal/otel/cache.go",
+			"code": "127: \tif err := os.Rename(tmpPath, path); err != nil {\n128: \t\tos.Remove(tmpPath)\n129: \t\treturn err\n",
+			"line": "128",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "<repo>/source/go/internal/otel/cache.go",
+			"code": "123: \tif err := os.Chmod(tmpPath, 0600); err != nil {\n124: \t\tos.Remove(tmpPath)\n125: \t\treturn err\n",
+			"line": "124",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "<repo>/source/go/internal/otel/cache.go",
+			"code": "119: \tif err := f.Close(); err != nil {\n120: \t\tos.Remove(tmpPath)\n121: \t\treturn err\n",
+			"line": "120",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "<repo>/source/go/internal/otel/cache.go",
+			"code": "115: \t\tf.Close()\n116: \t\tos.Remove(tmpPath)\n117: \t\treturn err\n",
+			"line": "116",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "<repo>/source/go/internal/otel/cache.go",
+			"code": "114: \tif _, err := f.Write(data); err != nil {\n115: \t\tf.Close()\n116: \t\tos.Remove(tmpPath)\n",
+			"line": "115",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "<repo>/source/go/internal/oidc/callback.go",
+			"code": "102: \u003c/html\u003e`, message)\n103: \tw.Write([]byte(html))\n104: }\n",
+			"line": "103",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "<repo>/source/go/internal/federation/sts.go",
+			"code": "118: \tfor k, v := range saved {\n119: \t\tos.Setenv(k, v)\n120: \t}\n",
+			"line": "119",
+			"column": "3",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "<repo>/source/go/internal/federation/cognito.go",
+			"code": "120: \t\tfor k, v := range saved {\n121: \t\t\tos.Setenv(k, v)\n122: \t\t}\n",
+			"line": "121",
+			"column": "4",
+			"nosec": false,
+			"suppressions": null
+		},
+		{
+			"severity": "LOW",
+			"confidence": "HIGH",
+			"cwe": {
+				"id": "703",
+				"url": "https://cwe.mitre.org/data/definitions/703.html"
+			},
+			"rule_id": "G104",
+			"details": "Errors unhandled",
+			"file": "<repo>/source/go/cmd/credential-process/main.go",
+			"code": "359: \t// Release the port lock so the callback server can use it\n360: \tln.Close()\n361: \n",
+			"line": "360",
+			"column": "2",
+			"nosec": false,
+			"suppressions": null
+		}
+	],
+	"Stats": {
+		"files": 23,
+		"lines": 2617,
+		"nosec": 0,
+		"found": 25
+	},
+	"GosecVersion": "2.26.1"
+}

@@ -1,0 +1,269 @@
+[gosec] 2026/05/02 16:51:32 Including rules: default
+[gosec] 2026/05/02 16:51:32 Excluding rules: default
+[gosec] 2026/05/02 16:51:32 Including analyzers: default
+[gosec] 2026/05/02 16:51:32 Excluding analyzers: default
+[gosec] 2026/05/02 16:51:32 Import directory: <repo>/source/go/cmd/credential-process
+[gosec] 2026/05/02 16:51:32 Import directory: <repo>/source/go/internal/config
+[gosec] 2026/05/02 16:51:32 Import directory: <repo>/source/go/internal/portlock
+[gosec] 2026/05/02 16:51:32 Import directory: <repo>/source/go/internal/otel
+[gosec] 2026/05/02 16:51:32 Import directory: <repo>/source/go/internal/provider
+[gosec] 2026/05/02 16:51:32 Import directory: <repo>/source/go/internal/browser
+[gosec] 2026/05/02 16:51:32 Import directory: <repo>/source/go/internal/oidc
+[gosec] 2026/05/02 16:51:32 Import directory: <repo>/source/go/internal/federation
+[gosec] 2026/05/02 16:51:32 Import directory: <repo>/source/go/cmd/otel-helper
+[gosec] 2026/05/02 16:51:32 Import directory: <repo>/source/go/internal/jwt
+[gosec] 2026/05/02 16:51:35 Checking package: jwt
+[gosec] 2026/05/02 16:51:35 Checking file: <repo>/source/go/internal/jwt/decode.go
+[gosec] 2026/05/02 16:51:35 Import directory: <repo>/source/go/internal/quota
+[gosec] 2026/05/02 16:51:35 Checking package: browser
+[gosec] 2026/05/02 16:51:35 Checking file: <repo>/source/go/internal/browser/open.go
+[gosec] 2026/05/02 16:51:35 Import directory: <repo>/source/go/internal/storage
+[gosec] 2026/05/02 16:51:35 Checking package: config
+[gosec] 2026/05/02 16:51:35 Checking file: <repo>/source/go/internal/config/config.go
+[gosec] 2026/05/02 16:51:35 Checking package: portlock
+[gosec] 2026/05/02 16:51:35 Checking file: <repo>/source/go/internal/portlock/lock.go
+[gosec] 2026/05/02 16:51:35 Import directory: <repo>/source/go/internal/version
+[gosec] 2026/05/02 16:51:35 Checking package: provider
+[gosec] 2026/05/02 16:51:35 Checking file: <repo>/source/go/internal/provider/endpoints.go
+[gosec] 2026/05/02 16:51:35 Checking file: <repo>/source/go/internal/provider/provider.go
+[gosec] 2026/05/02 16:51:35 Checking package: version
+[gosec] 2026/05/02 16:51:35 Checking file: <repo>/source/go/internal/version/version.go
+[gosec] 2026/05/02 16:51:35 Checking package: main
+[gosec] 2026/05/02 16:51:35 Checking file: <repo>/source/go/cmd/otel-helper/main.go
+[gosec] 2026/05/02 16:51:35 Checking package: otel
+[gosec] 2026/05/02 16:51:35 Checking file: <repo>/source/go/internal/otel/cache.go
+[gosec] 2026/05/02 16:51:35 Checking file: <repo>/source/go/internal/otel/extract.go
+[gosec] 2026/05/02 16:51:35 Checking file: <repo>/source/go/internal/otel/headers.go
+[gosec] 2026/05/02 16:51:35 Checking package: oidc
+[gosec] 2026/05/02 16:51:35 Checking file: <repo>/source/go/internal/oidc/callback.go
+[gosec] 2026/05/02 16:51:35 Checking file: <repo>/source/go/internal/oidc/flow.go
+[gosec] 2026/05/02 16:51:35 Checking file: <repo>/source/go/internal/oidc/pkce.go
+[gosec] 2026/05/02 16:51:35 Checking file: <repo>/source/go/internal/oidc/token.go
+[gosec] 2026/05/02 16:51:35 Checking package: federation
+[gosec] 2026/05/02 16:51:35 Checking file: <repo>/source/go/internal/federation/cognito.go
+[gosec] 2026/05/02 16:51:35 Checking file: <repo>/source/go/internal/federation/sts.go
+[gosec] 2026/05/02 16:51:36 Checking package: quota
+[gosec] 2026/05/02 16:51:36 Checking file: <repo>/source/go/internal/quota/quota.go
+[gosec] 2026/05/02 16:53:33 Checking package: main
+[gosec] 2026/05/02 16:53:33 Checking file: <repo>/source/go/cmd/credential-process/main.go
+[gosec] 2026/05/02 16:53:35 Checking package: storage
+[gosec] 2026/05/02 16:53:35 Checking file: <repo>/source/go/internal/storage/keyring.go
+[gosec] 2026/05/02 16:53:35 Checking file: <repo>/source/go/internal/storage/keyring_split.go
+[gosec] 2026/05/02 16:53:35 Checking file: <repo>/source/go/internal/storage/monitoring.go
+[gosec] 2026/05/02 16:53:35 Checking file: <repo>/source/go/internal/storage/session.go
+Results:
+
+
+[[97;41m<repo>/source/go/internal/federation/sts.go:53[0m] - G115 (CWE-190): integer overflow conversion int -> int32 (Confidence: MEDIUM, Severity: HIGH)
+    52: 		WebIdentityToken: aws.String(idToken),
+  > 53: 		DurationSeconds:  aws.Int32(int32(maxDuration)),
+    54: 	}
+
+Autofix: 
+
+[[97;41m<repo>/source/go/internal/provider/endpoints.go:50-57[0m] - G101 (CWE-798): Potential hardcoded credentials (Confidence: LOW, Severity: HIGH)
+    49: 	},
+  > 50: 	"cognito": {
+  > 51: 		Name:              "AWS Cognito User Pool",
+  > 52: 		AuthorizeEndpoint: "/oauth2/authorize",
+  > 53: 		TokenEndpoint:     "/oauth2/token",
+  > 54: 		Scopes:            "openid email",
+  > 55: 		ResponseType:      "code",
+  > 56: 		ResponseMode:      "query",
+  > 57: 	},
+    58: }
+
+Autofix: 
+
+[[97;41m<repo>/source/go/internal/provider/endpoints.go:42-49[0m] - G101 (CWE-798): Potential hardcoded credentials (Confidence: LOW, Severity: HIGH)
+    41: 	},
+  > 42: 	"azure": {
+  > 43: 		Name:              "Azure AD",
+  > 44: 		AuthorizeEndpoint: "/oauth2/v2.0/authorize",
+  > 45: 		TokenEndpoint:     "/oauth2/v2.0/token",
+  > 46: 		Scopes:            "openid profile email",
+  > 47: 		ResponseType:      "code",
+  > 48: 		ResponseMode:      "query",
+  > 49: 	},
+    50: 	"cognito": {
+
+Autofix: 
+
+[[97;41m<repo>/source/go/internal/provider/endpoints.go:34-41[0m] - G101 (CWE-798): Potential hardcoded credentials (Confidence: LOW, Severity: HIGH)
+    33: 	},
+  > 34: 	"auth0": {
+  > 35: 		Name:              "Auth0",
+  > 36: 		AuthorizeEndpoint: "/authorize",
+  > 37: 		TokenEndpoint:     "/oauth/token",
+  > 38: 		Scopes:            "openid profile email",
+  > 39: 		ResponseType:      "code",
+  > 40: 		ResponseMode:      "query",
+  > 41: 	},
+    42: 	"azure": {
+
+Autofix: 
+
+[[97;41m<repo>/source/go/internal/provider/endpoints.go:26-33[0m] - G101 (CWE-798): Potential hardcoded credentials (Confidence: LOW, Severity: HIGH)
+    25: var Configs = map[string]Config{
+  > 26: 	"okta": {
+  > 27: 		Name:              "Okta",
+  > 28: 		AuthorizeEndpoint: "/oauth2/default/v1/authorize",
+  > 29: 		TokenEndpoint:     "/oauth2/default/v1/token",
+  > 30: 		Scopes:            "openid profile email",
+  > 31: 		ResponseType:      "code",
+  > 32: 		ResponseMode:      "query",
+  > 33: 	},
+    34: 	"auth0": {
+
+Autofix: 
+
+[[97;41m<repo>/source/go/cmd/otel-helper/main.go:124[0m] - G702 (CWE-78): Command injection via taint analysis (Confidence: HIGH, Severity: HIGH)
+    123: 	debugPrint("Getting token via credential-process...")
+  > 124: 	cmd := exec.Command(cpPath, "--profile", profile, "--get-monitoring-token")
+    125: 	out, err := cmd.Output()
+
+Autofix: 
+
+[[30;43m<repo>/source/go/cmd/otel-helper/main.go:124[0m] - G204 (CWE-78): Subprocess launched with variable (Confidence: HIGH, Severity: MEDIUM)
+    123: 	debugPrint("Getting token via credential-process...")
+  > 124: 	cmd := exec.Command(cpPath, "--profile", profile, "--get-monitoring-token")
+    125: 	out, err := cmd.Output()
+
+Autofix: 
+
+[[30;43m<repo>/source/go/internal/storage/monitoring.go:68[0m] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    67: 	path := filepath.Join(home, ".claude-code-session", profile+"-monitoring.json")
+  > 68: 	raw, err := os.ReadFile(path)
+    69: 	if err != nil {
+
+Autofix: Consider using os.Root to scope file access under a fixed root (Go >=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal.
+
+[[30;43m<repo>/source/go/internal/otel/cache.go:52[0m] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    51: 
+  > 52: 	data, err := os.ReadFile(filepath.Join(dir, profile+"-otel-headers.json"))
+    53: 	if err != nil {
+
+Autofix: Consider using os.Root to scope file access under a fixed root (Go >=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal.
+
+[[30;43m<repo>/source/go/internal/config/config.go:205[0m] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    204: 	p := filepath.Join(home, "claude-code-with-bedrock", "config.json")
+  > 205: 	data, err := os.ReadFile(p)
+    206: 	if err != nil {
+
+Autofix: Consider using os.Root to scope file access under a fixed root (Go >=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal.
+
+[[30;43m<repo>/source/go/internal/config/config.go:194[0m] - G304 (CWE-22): Potential file inclusion via variable (Confidence: HIGH, Severity: MEDIUM)
+    193: 		p := filepath.Join(filepath.Dir(exePath), "config.json")
+  > 194: 		if data, err := os.ReadFile(p); err == nil {
+    195: 			return data, nil
+
+Autofix: Consider using os.Root to scope file access under a fixed root (Go >=1.24). Prefer root.Open/root.Stat over os.Open/os.Stat to prevent directory traversal.
+
+[[30;43m<repo>/source/go/internal/oidc/callback.go:50-53[0m] - G112 (CWE-400): Potential Slowloris Attack because ReadHeaderTimeout is not configured in the http.Server (Confidence: LOW, Severity: MEDIUM)
+    49: 
+  > 50: 	srv := &http.Server{
+  > 51: 		Addr:    fmt.Sprintf("127.0.0.1:%d", port),
+  > 52: 		Handler: mux,
+  > 53: 	}
+    54: 
+
+Autofix: 
+
+[[30;43m<repo>/source/go/internal/storage/keyring.go:60[0m] - G117 (CWE-499): Marshaled struct field "SessionToken" (JSON key "SessionToken") matches secret pattern (Confidence: MEDIUM, Severity: MEDIUM)
+    59: 
+  > 60: 	data, err := json.Marshal(creds)
+    61: 	if err != nil {
+
+Autofix: 
+
+[[37;40m<repo>/source/go/internal/storage/session.go:97[0m] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    96: 	if err := os.Rename(tmpPath, credPath); err != nil {
+  > 97: 		os.Remove(tmpPath)
+    98: 		return err
+
+Autofix: 
+
+[[37;40m<repo>/source/go/internal/storage/session.go:93[0m] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    92: 	if err := os.Chmod(tmpPath, 0600); err != nil {
+  > 93: 		os.Remove(tmpPath)
+    94: 		return err
+
+Autofix: 
+
+[[37;40m<repo>/source/go/internal/portlock/lock.go:28[0m] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    27: 		if err == nil {
+  > 28: 			ln.Close()
+    29: 			return true
+
+Autofix: 
+
+[[37;40m<repo>/source/go/internal/otel/cache.go:128[0m] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    127: 	if err := os.Rename(tmpPath, path); err != nil {
+  > 128: 		os.Remove(tmpPath)
+    129: 		return err
+
+Autofix: 
+
+[[37;40m<repo>/source/go/internal/otel/cache.go:124[0m] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    123: 	if err := os.Chmod(tmpPath, 0600); err != nil {
+  > 124: 		os.Remove(tmpPath)
+    125: 		return err
+
+Autofix: 
+
+[[37;40m<repo>/source/go/internal/otel/cache.go:120[0m] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    119: 	if err := f.Close(); err != nil {
+  > 120: 		os.Remove(tmpPath)
+    121: 		return err
+
+Autofix: 
+
+[[37;40m<repo>/source/go/internal/otel/cache.go:116[0m] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    115: 		f.Close()
+  > 116: 		os.Remove(tmpPath)
+    117: 		return err
+
+Autofix: 
+
+[[37;40m<repo>/source/go/internal/otel/cache.go:115[0m] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    114: 	if _, err := f.Write(data); err != nil {
+  > 115: 		f.Close()
+    116: 		os.Remove(tmpPath)
+
+Autofix: 
+
+[[37;40m<repo>/source/go/internal/oidc/callback.go:103[0m] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    102: </html>`, message)
+  > 103: 	w.Write([]byte(html))
+    104: }
+
+Autofix: 
+
+[[37;40m<repo>/source/go/internal/federation/sts.go:119[0m] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    118: 	for k, v := range saved {
+  > 119: 		os.Setenv(k, v)
+    120: 	}
+
+Autofix: 
+
+[[37;40m<repo>/source/go/internal/federation/cognito.go:121[0m] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    120: 		for k, v := range saved {
+  > 121: 			os.Setenv(k, v)
+    122: 		}
+
+Autofix: 
+
+[[37;40m<repo>/source/go/cmd/credential-process/main.go:360[0m] - G104 (CWE-703): Errors unhandled (Confidence: HIGH, Severity: LOW)
+    359: 	// Release the port lock so the callback server can use it
+  > 360: 	ln.Close()
+    361: 
+
+Autofix: 
+
+[1;36mSummary:[0m
+  Gosec  : 2.26.1
+  Files  : 23
+  Lines  : 2617
+  Nosec  : 0
+  Issues : [1;31m25[0m
+
