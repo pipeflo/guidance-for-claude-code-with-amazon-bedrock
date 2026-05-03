@@ -78,6 +78,45 @@ With `--prebuilt`, all 5 platforms (macOS ARM64/Intel, Linux x64/ARM64, Windows)
 
 This command reads federation configuration from the admin profile (saved during `ccwb deploy`), copies pre-built native Go binaries from the repo, and generates customer-specific `config.json` and `settings.json` files. No AWS access or build tools are needed for this step.
 
+**Legacy build mode (PyInstaller / Nuitka / Docker):**
+
+- **Windows**: Uses Nuitka via AWS CodeBuild
+  - Optimized for performance and minimal antivirus false positives
+- **macOS**: Uses PyInstaller with architecture-specific builds
+  - ARM64: Native build on Apple Silicon Macs only — cannot run on Intel Macs
+  - Intel: Runs natively on Intel Macs and on Apple Silicon via Rosetta — covers all Mac users with one binary
+  - Cross-arch: **Optional** — build the other architecture from your current Mac; requires a universal2 Python (see below)
+- **Linux x64/ARM64**: Uses PyInstaller in Docker containers (cross-compiled from macOS)
+  - Automatically builds both architectures when Docker is available
+  - Docker Desktop handles architecture emulation via Rosetta
+  - **Requires Docker Desktop installed and running** — if absent, Linux builds are skipped with a warning and all other platforms continue normally
+  - macOS and Windows builds have no dependency on Docker
+
+**Which macOS binary should you ship?**
+
+| Your developer fleet | Recommended binary | Notes |
+|---|---|---|
+| Apple Silicon only | `macos-arm64` | Native, no extra setup |
+| Intel only | `macos-intel` | Native, no extra setup |
+| Mixed (or unknown) | `macos-intel` | Covers everyone — runs natively on Intel, via Rosetta on Apple Silicon |
+| Performance-conscious mixed fleet | Both `macos-arm64` + `macos-intel` | Installer picks the right one per device |
+
+> **Rosetta translation:** Intel (`x86_64`) binaries run on Apple Silicon via Apple's Rosetta 2 translation layer — users don't need to do anything. ARM64 binaries cannot run on Intel Macs at all.
+
+**Optional: Cross-arch macOS Builds (legacy mode only)**
+
+By default, legacy-mode `ccwb package` builds only for your Mac's own architecture (arm64 on Apple Silicon, x86_64 on Intel). To build for the other architecture — for example, an Apple Silicon admin building the Intel binary to cover Intel Mac users — install a universal2 Python:
+
+1. Download the **macOS 64-bit universal2 installer** for Python 3.12 from [python.org/downloads/macos](https://www.python.org/downloads/macos/)
+2. Run the installer — it places Python at `/Library/Frameworks/Python.framework/`
+3. Re-run `ccwb package` — it detects the universal2 Python automatically and builds both architectures
+
+On first cross-arch build, `ccwb` creates an isolated build environment at `~/.ccwb/build-venvs/` (~30s). Subsequent runs reuse it.
+
+Without universal2 Python: `--target-platform=all` skips the cross-arch target with a note and continues normally. Explicitly requesting the cross-arch target (e.g. `--target-platform=macos-intel` on Apple Silicon) fails with a clear error pointing to the python.org installer.
+
+(Cross-arch builds are not needed with `--prebuilt` — all prebuilt binaries ship for every platform.)
+
 The resulting `dist/` folder contains everything users need:
 
 - Platform-specific executables (`credential-process-<platform>`) handle the OAuth2 authentication flow

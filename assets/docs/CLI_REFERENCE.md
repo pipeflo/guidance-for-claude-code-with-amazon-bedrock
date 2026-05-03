@@ -28,6 +28,8 @@ This document provides a complete reference for all `ccwb` (Claude Code with Bed
     - [`quota unblock` - Unblock User](#quota-unblock---unblock-user)
     - [`quota export` - Export Policies](#quota-export---export-policies)
     - [`quota import` - Import Policies](#quota-import---import-policies)
+  - [Claude Cowork 3P](#claude-cowork-3p)
+    - [`cowork generate` - Generate MDM Configuration](#cowork-generate---generate-mdm-configuration)
   - [Profile Management](#profile-management)
     - [`context list` - List All Profiles](#context-list---list-all-profiles)
     - [`context current` - Show Active Profile](#context-current---show-active-profile)
@@ -241,6 +243,8 @@ poetry run ccwb package [options]
   - `all` - All 5 platforms
 - `--prebuilt` - Use pre-built Go binaries (recommended, no build tools needed)
 - `--go` - Cross-compile Go binaries locally (requires Go installed)
+- `--distribute` - Upload package and generate distribution URL
+- `--expires-hours <hours>` - Distribution URL expiration in hours (with --distribute) [default: "48"]
 - `--profile <name>` - Configuration profile to use [default: active profile]
 - `--regenerate-installers` - Regenerate config and install scripts using existing binaries from latest dist
 
@@ -276,6 +280,56 @@ After running `ccwb deploy` once (which saves stack outputs to the profile), `cc
 - Pre-built binaries in the git repo (`source/go/prebuilt/latest/`)
 - Profile JSON (`~/.ccwb/profiles/{name}.json`) with federation config + OTel endpoint
 
+**Legacy mode platform details (PyInstaller / Nuitka / Docker):**
+
+- **macOS**: Uses PyInstaller with architecture-specific builds
+  - ARM64: Native build on Apple Silicon Macs only — cannot run on Intel Macs
+  - Intel: Runs natively on Intel Macs and on Apple Silicon via Rosetta — covers all Mac users with one binary
+  - Cross-arch: **Optional** — build the other architecture from your current Mac; requires a universal2 Python (see below)
+- **Linux**: Uses PyInstaller in Docker containers (cross-compiled from macOS host)
+  - x64: Uses linux/amd64 Docker platform
+  - ARM64: Uses linux/arm64 Docker platform
+  - Docker Desktop handles architecture emulation automatically
+  - **Requires Docker Desktop to be installed and running** — see Graceful Fallback Behavior below
+  - Not required for macOS or Windows builds
+- **Windows**: Uses Nuitka via AWS CodeBuild (if enabled during init)
+  - Automated builds take 12-15 minutes
+  - Requires CodeBuild to be enabled during `init`
+  - Will be skipped if CodeBuild is not enabled
+
+**Cross-arch macOS Build Setup (legacy mode only, optional):**
+
+By default, legacy-mode `ccwb package` builds a binary for your Mac's own architecture. The Intel (`macos-intel`) binary covers all Mac users — it runs natively on Intel Macs and via Rosetta on Apple Silicon — so an Apple Silicon admin who needs to support Intel Mac users should build the Intel binary using this setup.
+
+To build for the other architecture (e.g. Intel binary on Apple Silicon, or ARM64 binary on Intel), install a universal2 Python:
+
+1. Download the **macOS 64-bit universal2 installer** for Python 3.12 from [python.org/downloads/macos](https://www.python.org/downloads/macos/)
+2. Run the installer — it places Python at `/Library/Frameworks/Python.framework/`
+3. Re-run `ccwb package` — it detects the universal2 Python automatically
+
+`ccwb` creates an isolated per-arch build environment at `~/.ccwb/build-venvs/` on first cross-arch build (~30s). Subsequent runs reuse it.
+
+(With `--prebuilt`, cross-arch builds are unnecessary — all platforms ship prebuilt.)
+
+**Behavior when universal2 Python is not installed:**
+
+- For `--target-platform=all`: Skips the cross-arch target with a note, builds all other platforms normally
+- For an explicit cross-arch target (e.g. `--target-platform=macos-intel` on Apple Silicon): Fails with a clear error pointing to the python.org installer
+- The package process continues successfully without cross-arch binaries
+- Note: Intel (`macos-intel`) binaries run natively on Intel Macs and via Rosetta on Apple Silicon — they cover all Mac users. ARM64 binaries only run on Apple Silicon and cannot run on Intel Macs.
+
+**Graceful Fallback Behavior (legacy mode):**
+
+The package command is designed to handle missing optional components gracefully:
+
+- **Cross-arch macOS builds**: Skipped if universal2 Python is not installed (see Cross-arch macOS Build Setup above)
+- **Windows builds**: Skipped if CodeBuild was not enabled during `init`
+- **Linux builds (from macOS)**: Skipped with a warning in two cases:
+  - Docker is not installed (`docker` binary not found in `$PATH`) — install Docker Desktop from https://docs.docker.com/get-docker/
+  - Docker is installed but the daemon is not running — open Docker Desktop and wait for it to start, then retry
+  - macOS and Windows builds are **unaffected** by Docker availability
+- **At least one platform must build successfully** for the package command to succeed
+
 This ensures that packaging always works, even if some optional platforms are not available.
 
 **Output files:**
@@ -294,6 +348,49 @@ This ensures that packaging always works, even if some optional platforms are no
 - `README.md` - Installation instructions
 - Includes Claude Code telemetry settings (if monitoring enabled)
 - Configures environment variables for model selection (ANTHROPIC_MODEL, ANTHROPIC_SMALL_FAST_MODEL)
+
+**Credential process binary flags (for end users):**
+
+The distributed `credential-process` binary accepts the following flags directly:
+
+| Flag | Description |
+|---|---|
+| `--profile, -p <name>` | Profile to use (default: `ClaudeCode`, or `$CCWB_PROFILE`) |
+| `--clear-cache` | Clear cached credentials and force re-authentication |
+| `--check-expiration` | Exit 0 if credentials valid, 1 if expired |
+| `--refresh-if-needed` | Refresh credentials if expired (session storage mode only) |
+| `--get-monitoring-token` | Return cached OIDC monitoring token |
+| `--set-client-secret` | Store Azure AD client secret in OS secure storage. Uses an interactive prompt by default; set `CCWB_CLIENT_SECRET` env var for non-interactive use. Press Enter at the prompt (or set the env var to an empty string) to clear the stored secret. |
+
+**`--set-client-secret` usage examples:**
+
+```bash
+# Interactive (prompts for secret):
+~/claude-code-with-bedrock/credential-process --set-client-secret --profile ClaudeCode
+
+# Non-interactive (MDM/scripted deployment) — avoids secret appearing in shell history:
+CCWB_CLIENT_SECRET=<your-client-secret> ~/claude-code-with-bedrock/credential-process --set-client-secret --profile ClaudeCode
+
+# Clear a stored secret:
+~/claude-code-with-bedrock/credential-process --set-client-secret --profile ClaudeCode
+# (press Enter without typing a value)
+```
+
+**Certificate path environment variables (confidential client — certificate mode):**
+
+When certificate paths recorded in `config.json` are absolute, they may not resolve on end-user machines with a different install layout. Set these env vars to override the paths stored in `config.json` at runtime:
+
+| Environment variable | Description |
+|---|---|
+| `AZURE_CLIENT_CERTIFICATE_PATH` | Path to the PEM certificate file. Overrides `client_certificate_path` in `config.json`. |
+| `AZURE_CLIENT_CERTIFICATE_KEY_PATH` | Path to the PEM private key file. Overrides `client_certificate_key_path` in `config.json`. |
+
+```bash
+# Override certificate paths (e.g. via MDM launch agent environment):
+AZURE_CLIENT_CERTIFICATE_PATH=~/certs/cert.pem \
+AZURE_CLIENT_CERTIFICATE_KEY_PATH=~/certs/key.pem \
+~/claude-code-with-bedrock/credential-process --profile ClaudeCode
+```
 
 **Output structure:**
 
@@ -512,6 +609,60 @@ poetry run ccwb cleanup [options]
 - Clean up after testing
 - Remove failed installations
 - Start fresh with a new configuration
+
+## Claude Cowork 3P
+
+### `cowork generate` - Generate MDM Configuration
+
+Generate Claude Cowork 3P MDM configuration files for deploying Claude Desktop with Amazon Bedrock as the inference backend.
+
+This command reads your existing deployment profile (region, model, monitoring stack) and generates ready-to-deploy MDM configuration files.
+
+```bash
+# Generate all formats (JSON, macOS .mobileconfig, Windows .reg)
+poetry run ccwb cowork generate
+
+# Generate specific format
+poetry run ccwb cowork generate --format mobileconfig
+poetry run ccwb cowork generate --format reg
+poetry run ccwb cowork generate --format json
+
+# Custom model aliases
+poetry run ccwb cowork generate --models opus,sonnet,haiku
+
+# Custom output directory
+poetry run ccwb cowork generate -o ./my-mdm-configs/
+
+# Specific profile
+poetry run ccwb cowork generate --profile Production
+
+# Custom credential helper TTL
+poetry run ccwb cowork generate --credential-helper-ttl 7200
+```
+
+**Options:**
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--profile` | Configuration profile to use | Active profile |
+| `--output`, `-o` | Output directory | `dist/cowork-3p/` |
+| `--format`, `-f` | Output format: `all`, `json`, `mobileconfig`, `reg` | `all` |
+| `--models`, `-m` | Comma-separated model aliases | Auto-detected from profile |
+| `--credential-helper-ttl` | Credential helper cache TTL (seconds) | `3600` |
+
+**Generated files:**
+
+| File | Platform | Description |
+|------|----------|-------------|
+| `cowork-3p-config.json` | All | Raw MDM configuration JSON (for Claude Desktop Setup UI import) |
+| `cowork-3p.mobileconfig` | macOS | MDM configuration profile (deploy via Jamf, Kandji, Mosyle) |
+| `cowork-3p.reg` | Windows | Registry file (deploy via Group Policy, Intune, SCCM) |
+
+**Automatic integration with `ccwb package`:**
+
+CoWork 3P configs are also auto-generated during `ccwb package` when enabled via `ccwb init`. Both paths use the same shared configuration logic to ensure identical output.
+
+See [CoWork 3P Guide](COWORK_3P.md) for detailed setup and deployment instructions.
 
 ## Quota Management
 
