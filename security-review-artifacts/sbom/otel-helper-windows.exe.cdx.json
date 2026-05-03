@@ -1,1 +1,163 @@
-{"$schema":"http://cyclonedx.org/schema/bom-1.6.schema.json","bomFormat":"CycloneDX","specVersion":"1.6","serialNumber":"urn:uuid:0ac60940-c658-4d88-9151-017bdc263a83","version":1,"metadata":{"timestamp":"2026-05-02T16:56:03-05:00","tools":{"components":[{"type":"application","author":"anchore","name":"syft","version":"1.44.0"}]},"component":{"bom-ref":"34d4d69fc79d7ac2","type":"file","name":"otel-helper-windows.exe","version":"sha256:ddab3186f7dc5046c9cd5e9e69ee3ca06341f2523db4e4d11972442450f293db"}},"components":[{"bom-ref":"8eca7fb12ae477af","type":"application","name":"Claude Code with Amazon Bedrock","version":"2.0.0.0","cpe":"cpe:2.3:a:Claude_Code_with_Amazon_Bedrock:Claude_Code_with_Amazon_Bedrock:2.0.0.0:*:*:*:*:*:*:*","properties":[{"name":"syft:package:foundBy","value":"pe-binary-package-cataloger"},{"name":"syft:package:type","value":"binary"},{"name":"syft:package:metadataType","value":"pe-binary"},{"name":"syft:location:0:path","value":"/otel-helper-windows.exe"}]},{"bom-ref":"pkg:golang/github.com/bluedoors/ccwb-binaries@v2.2.0-88-g39c3d90-dirty?package-id=89d65e2215843666","type":"library","name":"github.com/bluedoors/ccwb-binaries","version":"v2.2.0-88-g39c3d90-dirty","cpe":"cpe:2.3:a:bluedoors:ccwb-binaries:v2.2.0-88-g39c3d90-dirty:*:*:*:*:*:*:*","purl":"pkg:golang/github.com/bluedoors/ccwb-binaries@v2.2.0-88-g39c3d90-dirty","properties":[{"name":"syft:package:foundBy","value":"go-module-binary-cataloger"},{"name":"syft:package:language","value":"go"},{"name":"syft:package:type","value":"go-module"},{"name":"syft:package:metadataType","value":"go-module-buildinfo-entry"},{"name":"syft:cpe23","value":"cpe:2.3:a:bluedoors:ccwb_binaries:v2.2.0-88-g39c3d90-dirty:*:*:*:*:*:*:*"},{"name":"syft:location:0:path","value":"/otel-helper-windows.exe"},{"name":"syft:metadata:architecture","value":"amd64"},{"name":"syft:metadata:goCompiledVersion","value":"go1.26.1"},{"name":"syft:metadata:mainModule","value":"github.com/bluedoors/ccwb-binaries"}]},{"bom-ref":"pkg:golang/stdlib@1.26.1?package-id=405ba4704eb839a7","type":"library","name":"stdlib","version":"go1.26.1","licenses":[{"license":{"id":"BSD-3-Clause"}}],"cpe":"cpe:2.3:a:golang:go:1.26.1:-:*:*:*:*:*:*","purl":"pkg:golang/stdlib@1.26.1","properties":[{"name":"syft:package:foundBy","value":"go-module-binary-cataloger"},{"name":"syft:package:language","value":"go"},{"name":"syft:package:type","value":"go-module"},{"name":"syft:package:metadataType","value":"go-module-buildinfo-entry"},{"name":"syft:location:0:path","value":"/otel-helper-windows.exe"},{"name":"syft:metadata:goCompiledVersion","value":"go1.26.1"}]},{"bom-ref":"4795d6a982e46690","type":"file","name":"<repo>/source/go/prebuilt/v2.0.0/otel-helper-windows.exe","hashes":[{"alg":"SHA-1","content":"1d2154b515083938b3a41e9bb5a440f519a30eb5"},{"alg":"SHA-256","content":"ddab3186f7dc5046c9cd5e9e69ee3ca06341f2523db4e4d11972442450f293db"}]}],"dependencies":[{"ref":"pkg:golang/github.com/bluedoors/ccwb-binaries@v2.2.0-88-g39c3d90-dirty?package-id=89d65e2215843666","dependsOn":["pkg:golang/stdlib@1.26.1?package-id=405ba4704eb839a7"]}]}
+{
+  "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:dfd0aed9-7efb-4fa7-9681-ca80e11d8c6f",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-05-02T19:00:00-05:00",
+    "tools": {
+      "components": [
+        {
+          "type": "application",
+          "author": "anchore",
+          "name": "syft",
+          "version": "1.44.0"
+        }
+      ]
+    },
+    "component": {
+      "bom-ref": "e6e8fea8c835ce3e",
+      "type": "file",
+      "name": "otel-helper-windows.exe",
+      "version": "sha256:36dcad8c7d78a78b7b3d56576b692ea7924f9eaf54cbd2103e639f4fa8eb9476"
+    }
+  },
+  "components": [
+    {
+      "bom-ref": "8eca7fb12ae477af",
+      "type": "application",
+      "name": "Claude Code with Amazon Bedrock",
+      "version": "2.0.0.0",
+      "cpe": "cpe:2.3:a:Claude_Code_with_Amazon_Bedrock:Claude_Code_with_Amazon_Bedrock:2.0.0.0:*:*:*:*:*:*:*",
+      "properties": [
+        {
+          "name": "syft:package:foundBy",
+          "value": "pe-binary-package-cataloger"
+        },
+        {
+          "name": "syft:package:type",
+          "value": "binary"
+        },
+        {
+          "name": "syft:package:metadataType",
+          "value": "pe-binary"
+        },
+        {
+          "name": "syft:location:0:path",
+          "value": "/otel-helper-windows.exe"
+        }
+      ]
+    },
+    {
+      "bom-ref": "pkg:golang/github.com/bluedoors/ccwb-binaries@v0.0.0-20260502231500-701b80986367?package-id=e96f9721f528baac",
+      "type": "library",
+      "name": "github.com/bluedoors/ccwb-binaries",
+      "version": "v0.0.0-20260502231500-701b80986367",
+      "cpe": "cpe:2.3:a:bluedoors:ccwb-binaries:v0.0.0-20260502231500-701b80986367:*:*:*:*:*:*:*",
+      "purl": "pkg:golang/github.com/bluedoors/ccwb-binaries@v0.0.0-20260502231500-701b80986367",
+      "properties": [
+        {
+          "name": "syft:package:foundBy",
+          "value": "go-module-binary-cataloger"
+        },
+        {
+          "name": "syft:package:language",
+          "value": "go"
+        },
+        {
+          "name": "syft:package:type",
+          "value": "go-module"
+        },
+        {
+          "name": "syft:package:metadataType",
+          "value": "go-module-buildinfo-entry"
+        },
+        {
+          "name": "syft:cpe23",
+          "value": "cpe:2.3:a:bluedoors:ccwb_binaries:v0.0.0-20260502231500-701b80986367:*:*:*:*:*:*:*"
+        },
+        {
+          "name": "syft:location:0:path",
+          "value": "/otel-helper-windows.exe"
+        },
+        {
+          "name": "syft:metadata:architecture",
+          "value": "amd64"
+        },
+        {
+          "name": "syft:metadata:goCompiledVersion",
+          "value": "go1.26.2"
+        },
+        {
+          "name": "syft:metadata:mainModule",
+          "value": "github.com/bluedoors/ccwb-binaries"
+        }
+      ]
+    },
+    {
+      "bom-ref": "pkg:golang/stdlib@1.26.2?package-id=8d86728275460c3d",
+      "type": "library",
+      "name": "stdlib",
+      "version": "go1.26.2",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "cpe": "cpe:2.3:a:golang:go:1.26.2:-:*:*:*:*:*:*",
+      "purl": "pkg:golang/stdlib@1.26.2",
+      "properties": [
+        {
+          "name": "syft:package:foundBy",
+          "value": "go-module-binary-cataloger"
+        },
+        {
+          "name": "syft:package:language",
+          "value": "go"
+        },
+        {
+          "name": "syft:package:type",
+          "value": "go-module"
+        },
+        {
+          "name": "syft:package:metadataType",
+          "value": "go-module-buildinfo-entry"
+        },
+        {
+          "name": "syft:location:0:path",
+          "value": "/otel-helper-windows.exe"
+        },
+        {
+          "name": "syft:metadata:goCompiledVersion",
+          "value": "go1.26.2"
+        }
+      ]
+    },
+    {
+      "bom-ref": "4795d6a982e46690",
+      "type": "file",
+      "name": "/source/go/prebuilt/v2.0.0/otel-helper-windows.exe",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "be23961e6e8350a0b8b8bb6333a085c087433f1e"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "36dcad8c7d78a78b7b3d56576b692ea7924f9eaf54cbd2103e639f4fa8eb9476"
+        }
+      ]
+    }
+  ],
+  "dependencies": [
+    {
+      "ref": "pkg:golang/github.com/bluedoors/ccwb-binaries@v0.0.0-20260502231500-701b80986367?package-id=e96f9721f528baac",
+      "dependsOn": [
+        "pkg:golang/stdlib@1.26.2?package-id=8d86728275460c3d"
+      ]
+    }
+  ]
+}

@@ -1,1 +1,138 @@
-{"$schema":"http://cyclonedx.org/schema/bom-1.6.schema.json","bomFormat":"CycloneDX","specVersion":"1.6","serialNumber":"urn:uuid:a6c31442-e65c-41b6-b614-016b4b6c19c2","version":1,"metadata":{"timestamp":"2026-05-02T16:56:02-05:00","tools":{"components":[{"type":"application","author":"anchore","name":"syft","version":"1.44.0"}]},"component":{"bom-ref":"1468f7bedbc5f7ff","type":"file","name":"otel-helper-macos-arm64","version":"sha256:6a73cc46b904eab98996a3a48e8e877b929b9930864cf963e7c969bbfc8aeecc"}},"components":[{"bom-ref":"pkg:golang/github.com/bluedoors/ccwb-binaries@v2.2.0-88-g39c3d90-dirty?package-id=ae9c84b9c2b90b5b","type":"library","name":"github.com/bluedoors/ccwb-binaries","version":"v2.2.0-88-g39c3d90-dirty","cpe":"cpe:2.3:a:bluedoors:ccwb-binaries:v2.2.0-88-g39c3d90-dirty:*:*:*:*:*:*:*","purl":"pkg:golang/github.com/bluedoors/ccwb-binaries@v2.2.0-88-g39c3d90-dirty","properties":[{"name":"syft:package:foundBy","value":"go-module-binary-cataloger"},{"name":"syft:package:language","value":"go"},{"name":"syft:package:type","value":"go-module"},{"name":"syft:package:metadataType","value":"go-module-buildinfo-entry"},{"name":"syft:cpe23","value":"cpe:2.3:a:bluedoors:ccwb_binaries:v2.2.0-88-g39c3d90-dirty:*:*:*:*:*:*:*"},{"name":"syft:location:0:path","value":"/otel-helper-macos-arm64"},{"name":"syft:metadata:architecture","value":"arm64"},{"name":"syft:metadata:goCompiledVersion","value":"go1.26.1"},{"name":"syft:metadata:mainModule","value":"github.com/bluedoors/ccwb-binaries"}]},{"bom-ref":"pkg:golang/stdlib@1.26.1?package-id=b25f2f89bebe0b15","type":"library","name":"stdlib","version":"go1.26.1","licenses":[{"license":{"id":"BSD-3-Clause"}}],"cpe":"cpe:2.3:a:golang:go:1.26.1:-:*:*:*:*:*:*","purl":"pkg:golang/stdlib@1.26.1","properties":[{"name":"syft:package:foundBy","value":"go-module-binary-cataloger"},{"name":"syft:package:language","value":"go"},{"name":"syft:package:type","value":"go-module"},{"name":"syft:package:metadataType","value":"go-module-buildinfo-entry"},{"name":"syft:location:0:path","value":"/otel-helper-macos-arm64"},{"name":"syft:metadata:goCompiledVersion","value":"go1.26.1"}]},{"bom-ref":"11ee107cdb356690","type":"file","name":"<repo>/source/go/prebuilt/v2.0.0/otel-helper-macos-arm64","hashes":[{"alg":"SHA-1","content":"394af5b532ea01467f5f2b8202206c71f7afa120"},{"alg":"SHA-256","content":"6a73cc46b904eab98996a3a48e8e877b929b9930864cf963e7c969bbfc8aeecc"}]}],"dependencies":[{"ref":"pkg:golang/github.com/bluedoors/ccwb-binaries@v2.2.0-88-g39c3d90-dirty?package-id=ae9c84b9c2b90b5b","dependsOn":["pkg:golang/stdlib@1.26.1?package-id=b25f2f89bebe0b15"]}]}
+{
+  "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:6bacf64a-5a60-48cf-8a6b-8c1afd073d3f",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-05-02T18:59:58-05:00",
+    "tools": {
+      "components": [
+        {
+          "type": "application",
+          "author": "anchore",
+          "name": "syft",
+          "version": "1.44.0"
+        }
+      ]
+    },
+    "component": {
+      "bom-ref": "13deeaf3d2f5e54b",
+      "type": "file",
+      "name": "otel-helper-macos-arm64",
+      "version": "sha256:e2683279a08687c9ee3eae9531aef3a7aba0c430fca37464fc782fc2d8a7babf"
+    }
+  },
+  "components": [
+    {
+      "bom-ref": "pkg:golang/github.com/bluedoors/ccwb-binaries@v0.0.0-20260502231500-701b80986367?package-id=3862c9951b6d6c89",
+      "type": "library",
+      "name": "github.com/bluedoors/ccwb-binaries",
+      "version": "v0.0.0-20260502231500-701b80986367",
+      "cpe": "cpe:2.3:a:bluedoors:ccwb-binaries:v0.0.0-20260502231500-701b80986367:*:*:*:*:*:*:*",
+      "purl": "pkg:golang/github.com/bluedoors/ccwb-binaries@v0.0.0-20260502231500-701b80986367",
+      "properties": [
+        {
+          "name": "syft:package:foundBy",
+          "value": "go-module-binary-cataloger"
+        },
+        {
+          "name": "syft:package:language",
+          "value": "go"
+        },
+        {
+          "name": "syft:package:type",
+          "value": "go-module"
+        },
+        {
+          "name": "syft:package:metadataType",
+          "value": "go-module-buildinfo-entry"
+        },
+        {
+          "name": "syft:cpe23",
+          "value": "cpe:2.3:a:bluedoors:ccwb_binaries:v0.0.0-20260502231500-701b80986367:*:*:*:*:*:*:*"
+        },
+        {
+          "name": "syft:location:0:path",
+          "value": "/otel-helper-macos-arm64"
+        },
+        {
+          "name": "syft:metadata:architecture",
+          "value": "arm64"
+        },
+        {
+          "name": "syft:metadata:goCompiledVersion",
+          "value": "go1.26.2"
+        },
+        {
+          "name": "syft:metadata:mainModule",
+          "value": "github.com/bluedoors/ccwb-binaries"
+        }
+      ]
+    },
+    {
+      "bom-ref": "pkg:golang/stdlib@1.26.2?package-id=4811ec45f4135a2c",
+      "type": "library",
+      "name": "stdlib",
+      "version": "go1.26.2",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "cpe": "cpe:2.3:a:golang:go:1.26.2:-:*:*:*:*:*:*",
+      "purl": "pkg:golang/stdlib@1.26.2",
+      "properties": [
+        {
+          "name": "syft:package:foundBy",
+          "value": "go-module-binary-cataloger"
+        },
+        {
+          "name": "syft:package:language",
+          "value": "go"
+        },
+        {
+          "name": "syft:package:type",
+          "value": "go-module"
+        },
+        {
+          "name": "syft:package:metadataType",
+          "value": "go-module-buildinfo-entry"
+        },
+        {
+          "name": "syft:location:0:path",
+          "value": "/otel-helper-macos-arm64"
+        },
+        {
+          "name": "syft:metadata:goCompiledVersion",
+          "value": "go1.26.2"
+        }
+      ]
+    },
+    {
+      "bom-ref": "11ee107cdb356690",
+      "type": "file",
+      "name": "/source/go/prebuilt/v2.0.0/otel-helper-macos-arm64",
+      "hashes": [
+        {
+          "alg": "SHA-1",
+          "content": "cb2e013d74fe01533c342e273ee2814e7230b217"
+        },
+        {
+          "alg": "SHA-256",
+          "content": "e2683279a08687c9ee3eae9531aef3a7aba0c430fca37464fc782fc2d8a7babf"
+        }
+      ]
+    }
+  ],
+  "dependencies": [
+    {
+      "ref": "pkg:golang/github.com/bluedoors/ccwb-binaries@v0.0.0-20260502231500-701b80986367?package-id=3862c9951b6d6c89",
+      "dependsOn": [
+        "pkg:golang/stdlib@1.26.2?package-id=4811ec45f4135a2c"
+      ]
+    }
+  ]
+}

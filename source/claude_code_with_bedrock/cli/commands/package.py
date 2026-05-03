@@ -676,6 +676,10 @@ class PackageCommand(Command):
                 env = {**os.environ, "GOOS": goos, "GOARCH": goarch, "CGO_ENABLED": "0"}
                 cmd = [
                     "go", "build",
+                    # -trimpath strips the builder's absolute module/source
+                    # paths from the resulting binary. Without it, `strings`
+                    # on the shipped binary reveals the builder's HOME path.
+                    "-trimpath",
                     "-ldflags", "-s -w",
                     "-o", str(output_path),
                     f"./cmd/{binary}/",
