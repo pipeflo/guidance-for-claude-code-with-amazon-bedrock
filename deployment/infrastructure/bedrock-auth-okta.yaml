@@ -95,21 +95,30 @@ Resources:
   OktaOIDCProvider:
     Type: AWS::IAM::OIDCProvider
     Properties:
-      # Register the Okta Custom Authorization Server as the OIDC issuer.
-      # Tokens from the CAS carry iss=https://<domain>/oauth2/<cas-id>, and
-      # IAM's InvalidIdentityToken check compares that iss against this URL
-      # character-for-character. The Org AS (iss=https://<domain>) cannot
-      # host admin-defined custom claims and therefore cannot emit the
-      # https://aws.amazon.com/tags claim required for per-project cost
-      # attribution -- so we always point at a CAS here, defaulting to the
-      # pre-provisioned "default" CAS.
+      # Two OIDC issuer shapes. Which one we register depends on whether
+      # GDPR zone isolation is enabled:
       #
-      # NOTE: AWS::IAM::OIDCProvider.Url is immutable. Changing
-      # OktaAuthServerId on an already-deployed stack will REPLACE the
-      # resource (delete the old provider, create a new one); expect a
-      # brief window during stack update when no provider exists. In
-      # practice, set the CAS id once at initial deploy.
-      Url: !Sub 'https://${OktaDomain}/oauth2/${OktaAuthServerId}'
+      #   - isolation OFF (default, matches upstream): register the Okta
+      #     Org AS -- `https://<domain>`. This is the historical shape and
+      #     does not trigger a resource replacement when an existing
+      #     upstream stack is updated to this template.
+      #
+      #   - isolation ON: register the Okta Custom Authorization Server --
+      #     `https://<domain>/oauth2/<cas-id>`. Zone isolation requires
+      #     the `https://aws.amazon.com/tags` claim to carry the Zone
+      #     session tag, and only the CAS (not the Org AS) can emit
+      #     admin-defined custom claims. IAM's InvalidIdentityToken check
+      #     compares the JWT iss against this URL character-for-character,
+      #     so the provider URL must match the CAS token's iss exactly.
+      #
+      # NOTE: AWS::IAM::OIDCProvider.Url is immutable -- toggling
+      # EnforceProjectIsolation on an already-deployed stack replaces the
+      # provider (delete + create). Pin the choice at initial deploy, or
+      # accept a brief window during stack update when no provider exists.
+      Url: !If
+        - IsolationEnforced
+        - !Sub 'https://${OktaDomain}/oauth2/${OktaAuthServerId}'
+        - !Sub 'https://${OktaDomain}'
       ClientIdList:
         - !Ref OktaClientId
       ThumbprintList:
