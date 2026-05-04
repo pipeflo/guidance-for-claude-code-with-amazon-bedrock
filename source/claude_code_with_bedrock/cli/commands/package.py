@@ -2579,7 +2579,7 @@ echo.
 REM Check prerequisites
 echo Checking prerequisites...
 
-where aws >/dev/null 2>&1
+where aws >nul 2>&1
 if %errorlevel% neq 0 (
     echo INFO: AWS CLI not found -- not required. The credential process binary handles authentication directly.
 ) else (
@@ -2595,7 +2595,7 @@ if not exist "%USERPROFILE%\\claude-code-with-bedrock" mkdir "%USERPROFILE%\\cla
 
 REM Copy credential process executable with renamed target
 echo Copying credential process...
-copy /Y "credential-process-windows.exe" "%USERPROFILE%\\claude-code-with-bedrock\\credential-process.exe" >/dev/null
+copy /Y "credential-process-windows.exe" "%USERPROFILE%\\claude-code-with-bedrock\\credential-process.exe" >nul
 if %errorlevel% neq 0 (
     echo ERROR: Failed to copy credential-process-windows.exe
     pause
@@ -2605,12 +2605,12 @@ if %errorlevel% neq 0 (
 REM Copy OTEL helper if it exists with renamed target
 if exist "otel-helper-windows.exe" (
     echo Copying OTEL helper...
-    copy /Y "otel-helper-windows.exe" "%USERPROFILE%\\claude-code-with-bedrock\\otel-helper.exe" >/dev/null
+    copy /Y "otel-helper-windows.exe" "%USERPROFILE%\\claude-code-with-bedrock\\otel-helper.exe" >nul
 )
 
 REM Copy configuration
 echo Copying configuration...
-copy /Y "config.json" "%USERPROFILE%\\claude-code-with-bedrock\\" >/dev/null
+copy /Y "config.json" "%USERPROFILE%\\claude-code-with-bedrock\\" >nul
 
 REM Copy Claude Code settings if they exist
 if exist "claude-settings" (
