@@ -52,16 +52,34 @@ func TestDetect(t *testing.T) {
 	}
 }
 
-func TestConfigFor_OktaDefaultCAS(t *testing.T) {
-	// Empty string and "default" both mean the pre-provisioned CAS --
-	// endpoints must be bit-for-bit identical to the Configs map default.
+func TestConfigFor_OktaOrgASWhenNoCASSet(t *testing.T) {
+	// Empty okta_auth_server_id means "upstream shape, no CAS" -- endpoints
+	// hit the Okta Org Authorization Server at /oauth2/v1/... and produce
+	// JWTs with iss=https://<domain>, matching the bare OIDC provider URL
+	// the CFN template registers when isolation is off.
 	want := Configs["okta"]
-	for _, casID := range []string{"", "default", "  default  "} {
-		got := ConfigFor("okta", casID)
-		if got.AuthorizeEndpoint != want.AuthorizeEndpoint || got.TokenEndpoint != want.TokenEndpoint {
-			t.Errorf("ConfigFor(okta, %q): endpoints diverged from default\nauthorize = %q\ntoken     = %q",
-				casID, got.AuthorizeEndpoint, got.TokenEndpoint)
-		}
+	got := ConfigFor("okta", "")
+	if got.AuthorizeEndpoint != want.AuthorizeEndpoint || got.TokenEndpoint != want.TokenEndpoint {
+		t.Errorf("ConfigFor(okta, \"\"): endpoints diverged from Org AS default\nauthorize = %q\ntoken     = %q",
+			got.AuthorizeEndpoint, got.TokenEndpoint)
+	}
+	if want.AuthorizeEndpoint != "/oauth2/v1/authorize" {
+		t.Errorf("Org AS authorize endpoint drift: %q", want.AuthorizeEndpoint)
+	}
+}
+
+func TestConfigFor_OktaDefaultCAS(t *testing.T) {
+	// Explicit "default" means "use the pre-provisioned default CAS" --
+	// endpoints become /oauth2/default/v1/... so JWTs carry
+	// iss=https://<domain>/oauth2/default. This is the shape required by
+	// zone isolation / cost attribution and matches the CFN OIDC provider
+	// URL when EnforceProjectIsolation=true.
+	got := ConfigFor("okta", "default")
+	if got.AuthorizeEndpoint != "/oauth2/default/v1/authorize" {
+		t.Errorf("authorize endpoint = %q, want /oauth2/default/v1/authorize", got.AuthorizeEndpoint)
+	}
+	if got.TokenEndpoint != "/oauth2/default/v1/token" {
+		t.Errorf("token endpoint = %q, want /oauth2/default/v1/token", got.TokenEndpoint)
 	}
 }
 
@@ -76,6 +94,15 @@ func TestConfigFor_OktaCustomCAS(t *testing.T) {
 	// Non-path fields are copied verbatim.
 	if got.Scopes != Configs["okta"].Scopes {
 		t.Errorf("scopes changed unexpectedly: %q", got.Scopes)
+	}
+}
+
+func TestConfigFor_OktaCASWhitespaceTrimmed(t *testing.T) {
+	// Trailing whitespace in the config shouldn't produce a different
+	// endpoint than the bare id.
+	got := ConfigFor("okta", "  myCAS  ")
+	if got.AuthorizeEndpoint != "/oauth2/myCAS/v1/authorize" {
+		t.Errorf("whitespace not trimmed: %q", got.AuthorizeEndpoint)
 	}
 }
 

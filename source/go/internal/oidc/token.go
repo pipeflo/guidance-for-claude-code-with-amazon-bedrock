@@ -20,13 +20,22 @@ type TokenResponse struct {
 }
 
 // ExchangeCode exchanges an authorization code for tokens at the provider's token endpoint.
-func ExchangeCode(tokenURL, code, redirectURI, clientID, codeVerifier string) (*TokenResponse, error) {
-	data := url.Values{
-		"grant_type":    {"authorization_code"},
-		"code":          {code},
-		"redirect_uri":  {redirectURI},
-		"client_id":     {clientID},
-		"code_verifier": {codeVerifier},
+// Pass confidential = nil for public PKCE-only clients; Azure confidential-client callers
+// construct a ConfidentialAuth to inject client_secret or a certificate-signed client_assertion.
+func ExchangeCode(tokenURL, code, redirectURI, clientID, codeVerifier string, confidential *ConfidentialAuth) (*TokenResponse, error) {
+	form := map[string]string{
+		"grant_type":    "authorization_code",
+		"code":          code,
+		"redirect_uri":  redirectURI,
+		"client_id":     clientID,
+		"code_verifier": codeVerifier,
+	}
+	if err := confidential.apply(form, tokenURL, clientID); err != nil {
+		return nil, err
+	}
+	data := url.Values{}
+	for k, v := range form {
+		data.Set(k, v)
 	}
 
 	client := &http.Client{Timeout: 30 * time.Second}

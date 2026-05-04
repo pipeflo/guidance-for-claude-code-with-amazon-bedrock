@@ -22,7 +22,11 @@ type AuthResult struct {
 // oktaAuthServerID is the Okta Custom Authorization Server id for tenants
 // whose CAS isn't named "default". Pass "" (or "default") for every other
 // provider and for standard Okta deployments.
-func Authenticate(providerDomain, clientID, providerType, oktaAuthServerID string, redirectPort int) (*AuthResult, error) {
+//
+// confidential is optional Azure-AD confidential-client material (client_secret
+// or certificate-signed client_assertion). Pass nil for public-client flows --
+// Okta, Auth0, Cognito, and Azure "public" mode all use the PKCE-only path.
+func Authenticate(providerDomain, clientID, providerType, oktaAuthServerID string, redirectPort int, confidential *ConfidentialAuth) (*AuthResult, error) {
 	provCfg := provider.ConfigFor(providerType, oktaAuthServerID)
 	if provCfg.Name == "" {
 		return nil, fmt.Errorf("unknown provider type: %s", providerType)
@@ -90,7 +94,7 @@ func Authenticate(providerDomain, clientID, providerType, oktaAuthServerID strin
 
 	// Exchange code for tokens
 	tokenURL := baseURL + provCfg.TokenEndpoint
-	tokenResp, err := ExchangeCode(tokenURL, result.Code, redirectURI, clientID, pkce.CodeVerifier)
+	tokenResp, err := ExchangeCode(tokenURL, result.Code, redirectURI, clientID, pkce.CodeVerifier, confidential)
 	if err != nil {
 		return nil, err
 	}

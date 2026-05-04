@@ -2,6 +2,7 @@ package storage
 
 import (
 	"encoding/json"
+	"errors"
 	"runtime"
 
 	"github.com/99designs/keyring"
@@ -78,6 +79,26 @@ func ClearKeyring(profile string) error {
 		Expiration:      "2000-01-01T00:00:00Z",
 	}
 	return SaveToKeyring(expired, profile)
+}
+
+// ReadClientSecret reads an Azure confidential-client secret from the OS keyring.
+// Entry name matches what the Python ccwb init wizard writes: "{profile}-client-secret"
+// under service "claude-code-with-bedrock". Returns empty string with no error
+// when the entry is absent -- the caller decides whether that is fatal based on
+// azure_auth_mode.
+func ReadClientSecret(profile string) (string, error) {
+	kr, err := openKeyring()
+	if err != nil {
+		return "", err
+	}
+	item, err := kr.Get(profile + "-client-secret")
+	if err != nil {
+		if errors.Is(err, keyring.ErrKeyNotFound) {
+			return "", nil
+		}
+		return "", err
+	}
+	return string(item.Data), nil
 }
 
 // ReadMonitoringTokenFromKeyring reads the monitoring token from keyring.

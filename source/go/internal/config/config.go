@@ -51,6 +51,14 @@ type ProfileConfig struct {
 	// empty to "Project" so older bundles that predate this field keep working.
 	CostAttributionTagKey string `json:"cost_attribution_tag_key,omitempty"`
 
+	// Azure AD confidential-client auth. "" or "public" -> PKCE-only public client.
+	// "secret" -> look up client_secret from OS keyring at token-exchange time.
+	// "certificate" -> sign a JWT client assertion with a PEM cert + private key.
+	// Only meaningful when provider_type == "azure"; ignored otherwise.
+	AzureAuthMode            string `json:"azure_auth_mode,omitempty"`
+	ClientCertificatePath    string `json:"client_certificate_path,omitempty"`
+	ClientCertificateKeyPath string `json:"client_certificate_key_path,omitempty"`
+
 	// Legacy field names
 	OktaDomain   string `json:"okta_domain"`
 	OktaClientID string `json:"okta_client_id"`
@@ -68,7 +76,21 @@ func LoadProfile(profileName string) (*ProfileConfig, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseProfile(data, profileName)
+}
 
+// LoadProfileFromPath loads a named profile from an explicit config.json path.
+// Exposed for regression tests that need to drive the loader against historical
+// fixture files without touching the real search paths.
+func LoadProfileFromPath(path, profileName string) (*ProfileConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", path, err)
+	}
+	return parseProfile(data, profileName)
+}
+
+func parseProfile(data []byte, profileName string) (*ProfileConfig, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("invalid config.json: %w", err)

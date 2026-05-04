@@ -409,13 +409,65 @@ func (a *credentialApp) run() int {
 }
 
 func (a *credentialApp) authenticate() (*oidc.AuthResult, error) {
+	confidential, err := a.resolveConfidentialAuth()
+	if err != nil {
+		return nil, err
+	}
 	return oidc.Authenticate(
 		a.cfg.ProviderDomain,
 		a.cfg.ClientID,
 		a.providerType,
 		a.cfg.OktaAuthServerID, // "" or "default" -> default CAS; anything else rewrites endpoints
 		a.redirectPort,
+		confidential,
 	)
+}
+
+// resolveConfidentialAuth loads Azure confidential-client material -- either a
+// client secret from the OS keyring, or a certificate + private-key pair from
+// disk. Env-var overrides (AZURE_CLIENT_CERTIFICATE_PATH,
+// AZURE_CLIENT_CERTIFICATE_KEY_PATH) take precedence over config.json so
+// installs stay portable across machines. Returns nil for public-client flows.
+func (a *credentialApp) resolveConfidentialAuth() (*oidc.ConfidentialAuth, error) {
+	if a.providerType != "azure" {
+		return nil, nil
+	}
+	mode := a.cfg.AzureAuthMode
+	if mode == "" || mode == "public" {
+		return nil, nil
+	}
+	switch mode {
+	case "secret":
+		secret, err := storage.ReadClientSecret(a.profile)
+		if err != nil {
+			return nil, fmt.Errorf("reading client secret from keyring: %w", err)
+		}
+		if secret == "" {
+			return nil, fmt.Errorf(
+				"azure_auth_mode is 'secret' but no client secret is stored.\n"+
+					"Run: ccwb init --profile %s (re-run the Azure step) to store one in the OS keyring.",
+				a.profile)
+		}
+		return &oidc.ConfidentialAuth{ClientSecret: secret}, nil
+	case "certificate":
+		certPath := os.Getenv("AZURE_CLIENT_CERTIFICATE_PATH")
+		if certPath == "" {
+			certPath = a.cfg.ClientCertificatePath
+		}
+		keyPath := os.Getenv("AZURE_CLIENT_CERTIFICATE_KEY_PATH")
+		if keyPath == "" {
+			keyPath = a.cfg.ClientCertificateKeyPath
+		}
+		if certPath == "" || keyPath == "" {
+			return nil, fmt.Errorf(
+				"azure_auth_mode is 'certificate' but no certificate paths are configured.\n" +
+					"Set AZURE_CLIENT_CERTIFICATE_PATH and AZURE_CLIENT_CERTIFICATE_KEY_PATH, " +
+					"or update 'client_certificate_path' and 'client_certificate_key_path' in config.json.")
+		}
+		return &oidc.ConfidentialAuth{CertificatePath: certPath, PrivateKeyPath: keyPath}, nil
+	default:
+		return nil, fmt.Errorf("unknown azure_auth_mode %q (expected public, secret, or certificate)", mode)
+	}
 }
 
 func (a *credentialApp) getAWSCredentials(auth *oidc.AuthResult) (*federation.AWSCredentials, error) {

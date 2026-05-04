@@ -20,7 +20,18 @@ Windows binaries have special requirements to avoid Defender cloud ML (Wacatac.B
 2. **Embed PE version info**: Use `go-winres` to embed RT_VERSION + RT_MANIFEST resources
 3. **`.syso` files**: Located at `cmd/credential-process/rsrc_windows_amd64.syso` and `cmd/otel-helper/rsrc_windows_amd64.syso`, auto-linked by the Go compiler for Windows builds
 
-### Building Windows Binaries
+### Three build paths for end-user binaries
+
+| Path | Command | Requires | Runs on Windows admin? |
+|---|---|---|---|
+| **Pre-built** (recommended) | `ccwb package --prebuilt` | Nothing — binaries already in the repo at `source/go/prebuilt/v2.0.0/` | ✅ Yes, natively |
+| **Go cross-compile via ccwb** | `ccwb package --go` | Go 1.22+ installed | ✅ Yes, natively |
+| **Go cross-compile via Makefile** | `cd source/go && make all` | Go 1.22+ and a Unix shell (Git Bash, WSL, or macOS/Linux) | ⚠️ **No** — see below |
+| **Legacy** (default when no flag) | `ccwb package` | PyInstaller + Docker (Linux builds) + CodeBuild (Windows builds) | ⚠️ Partial — native Windows Nuitka works; Linux builds need Docker |
+
+**Pass `--prebuilt` explicitly to avoid the legacy path.** Bare `ccwb package` falls back to PyInstaller/Nuitka/Docker/CodeBuild, which is much heavier and more fragile than `--prebuilt`. Most customer admins should standardize on `ccwb package --prebuilt`.
+
+### Building Windows binaries (cross-compile, any admin OS)
 
 ```bash
 cd source/go
@@ -37,6 +48,38 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
   -ldflags "-X github.com/bluedoors/ccwb-binaries/internal/version.Version=2.0.0" \
   -o bin/otel-helper-windows.exe ./cmd/otel-helper/
 ```
+
+Verified working from macOS Apple Silicon: all 10 binaries (5 platforms × 2 binaries) produced in ~3 minutes. Each binary matches its target platform (`file <binary>` confirms Mach-O/ELF/PE32+), passes strings-leak checks, and the native macOS binary runs successfully with `--version`.
+
+### Building on a Windows machine
+
+**`ccwb package --prebuilt` works natively on Windows** — it's pure Python `shutil.copy2()` of the prebuilt binaries already in the repo. No Go, no shell dependency, no toolchain. **This is the recommended path for Windows admins — always pass `--prebuilt` explicitly.**
+
+Bare `ccwb package` (no flag) falls back to the legacy PyInstaller/Nuitka/Docker/CodeBuild path, which on Windows requires CodeBuild to be enabled during `ccwb init` and takes 12-15 minutes per build.
+
+**`ccwb package --go` also works natively on Windows** — Python subprocess calls `go build` directly and passes env vars as a dict (not shell syntax), with cross-platform `pathlib.Path` handling. Requires only Go 1.22+ installed and on `PATH`.
+
+**`make all` does NOT work on native Windows cmd.exe or PowerShell.** The Makefile uses Unix-only shell constructs (`mkdir -p`, `rm -rf`). Options if you must use the Makefile on Windows:
+
+1. **Git Bash** (bundled with Git for Windows): `make all` works as-is
+2. **WSL (Windows Subsystem for Linux)**: `make all` works after installing `make` and `go`
+3. **Native PowerShell alternative** — skip the Makefile and call `go build` directly:
+
+```powershell
+cd source\go
+$env:CGO_ENABLED="0"
+$env:GOOS="windows"
+$env:GOARCH="amd64"
+go build -trimpath -ldflags "-s -w" -o bin\credential-process-windows.exe .\cmd\credential-process\
+go build -trimpath -ldflags "-s -w" -o bin\otel-helper-windows.exe .\cmd\otel-helper\
+
+# For other platforms, change $env:GOOS and $env:GOARCH:
+$env:GOOS="linux"; $env:GOARCH="amd64"
+go build -trimpath -ldflags "-s -w" -o bin\credential-process-linux-x64 .\cmd\credential-process\
+# ...etc
+```
+
+**Recommended path for Windows admins**: always pass `ccwb package --prebuilt` explicitly. Only rebuild binaries if you've modified the Go source, in which case `ccwb package --go` handles the cross-compile without needing `make`.
 
 ### Verification
 

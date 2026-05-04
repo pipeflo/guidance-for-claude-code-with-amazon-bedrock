@@ -87,6 +87,7 @@ cd source/go && go test ./... -v
 - `prebuilt/v2.0.0/` — Pre-built binaries for all 5 platforms + generic install scripts
 - `scripts/credential-process.ps1` — PowerShell alternative (zero AV risk)
 - `Makefile` — Cross-compile all 10 binaries: `make all`
+- `cmd/azure-assertion-smoke/` — Regression-test binary for Azure certificate-mode JWT signing. Gated behind `//go:build testhelper` so it's excluded from `go build ./...`, `make all`, and `ccwb package`. Build explicitly: `go build -tags testhelper -o /tmp/smoke ./cmd/azure-assertion-smoke`. Usage: `smoke <cert.pem> <key.pem> <clientID> <tokenURL>`.
 
 **`credential_provider/`** — Legacy Python standalone binary (being replaced by Go).
 - `MultiProviderAuth` class orchestrates the full auth flow
@@ -136,9 +137,9 @@ ccwb deploy        → Deploys CF stacks: auth → networking → otel → dashb
                      Saves otel_collector_endpoint to profile for offline packaging
 ccwb deploy distribution → Deploys distribution stack (presigned-s3 or landing-page)
 ccwb package       → Three build modes:
-                     --prebuilt (default): Uses pre-built Go binaries from source/go/prebuilt/
-                     --go: Cross-compiles Go binaries locally (requires Go installed)
-                     (legacy): PyInstaller/Nuitka/Docker builds
+                     (default, no flag): PyInstaller for macOS/Linux via Docker + Nuitka via CodeBuild for Windows
+                     --prebuilt: Copies pre-built Go binaries from source/go/prebuilt/ (no build tools needed, recommended)
+                     --go: Cross-compiles Go binaries locally (requires Go 1.22+ installed)
                      All modes output: dist/{profile}/{timestamp}/ with binaries + config.json + installers
 ccwb package-cb    → Trigger CodeBuild builds (legacy, not needed with Go)
 ccwb builds        → List/download CodeBuild build artifacts

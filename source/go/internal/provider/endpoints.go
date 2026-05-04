@@ -14,19 +14,24 @@ type Config struct {
 
 // Configs maps provider type to its OIDC configuration.
 //
-// For Okta, the endpoints template in /oauth2/default/... points at the
-// pre-provisioned "default" Custom Authorization Server that every Okta
-// Developer / Integrator tenant ships with, and that every Workforce
-// Identity tenant has out of the box. Customers whose admin renamed the
-// CAS set okta_auth_server_id in their ccwb profile and ConfigFor() rewrites
-// the paths at runtime. Only a Custom AS can host admin-defined claims like
-// https://aws.amazon.com/tags/principal_tags/Project -- the Org AS cannot,
-// which is why we never point at it.
+// Okta defaults to the Org Authorization Server endpoints (/oauth2/v1/...),
+// which match the CFN template's bare https://<domain> OIDC provider URL.
+// This is the historical upstream behavior and keeps IAM's
+// InvalidIdentityToken check happy for deployments that haven't opted into
+// zone isolation or a non-default CAS.
+//
+// ConfigFor() rewrites the endpoints to /oauth2/<cas-id>/v1/... when the
+// caller supplies a non-empty okta_auth_server_id in the profile -- that
+// value is only set by `ccwb init` when the operator turns on zone
+// isolation (or explicitly picks a CAS). Only a Custom Authorization
+// Server can host admin-defined claims like the
+// https://aws.amazon.com/tags/principal_tags/* session-tag claim that
+// drives per-project cost attribution and zone isolation.
 var Configs = map[string]Config{
 	"okta": {
 		Name:              "Okta",
-		AuthorizeEndpoint: "/oauth2/default/v1/authorize",
-		TokenEndpoint:     "/oauth2/default/v1/token",
+		AuthorizeEndpoint: "/oauth2/v1/authorize",
+		TokenEndpoint:     "/oauth2/v1/token",
 		Scopes:            "openid profile email",
 		ResponseType:      "code",
 		ResponseMode:      "query",
@@ -58,12 +63,17 @@ var Configs = map[string]Config{
 }
 
 // ConfigFor returns the OIDC configuration for a provider, applying per-
-// profile customizations. Today the only customization is the Okta Custom
-// Authorization Server id: a non-empty value other than "default" rewrites
-// /oauth2/default/... to /oauth2/<id>/... for both the authorize and token
-// endpoints. Callers pass oktaAuthServerID unconditionally (from
-// config.json); non-Okta providers ignore it. Returns a zero-value Config
-// when providerType is unknown.
+// profile customizations.
+//
+// The Okta endpoints default to the Org Authorization Server
+// (/oauth2/v1/...). Callers that need Custom Authorization Server claims
+// (cost attribution, zone isolation) set okta_auth_server_id in the
+// profile; any non-empty value -- including the string "default" for the
+// pre-provisioned CAS -- rewrites the paths to /oauth2/<id>/v1/...
+//
+// Empty / unset okta_auth_server_id keeps the Org AS path and matches
+// upstream's historical shape. Non-Okta providers ignore the argument.
+// Returns a zero-value Config when providerType is unknown.
 func ConfigFor(providerType, oktaAuthServerID string) Config {
 	cfg, ok := Configs[providerType]
 	if !ok {
@@ -73,10 +83,10 @@ func ConfigFor(providerType, oktaAuthServerID string) Config {
 		return cfg
 	}
 	id := strings.TrimSpace(oktaAuthServerID)
-	if id == "" || id == "default" {
+	if id == "" {
 		return cfg
 	}
-	const oldSeg = "/oauth2/default/"
+	const oldSeg = "/oauth2/"
 	newSeg := "/oauth2/" + id + "/"
 	cfg.AuthorizeEndpoint = strings.Replace(cfg.AuthorizeEndpoint, oldSeg, newSeg, 1)
 	cfg.TokenEndpoint = strings.Replace(cfg.TokenEndpoint, oldSeg, newSeg, 1)
