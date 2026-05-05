@@ -88,23 +88,31 @@ Resources:
           Value: !Ref AWS::StackName
 
   # Security Groups
-  # Security Groups
   ALBSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Security group for OTEL Collector ALB
       VpcId: !Ref VpcId
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          CidrIp: 0.0.0.0/0
-          Description: HTTPS access from anywhere
-        - IpProtocol: tcp
-          FromPort: 80
-          ToPort: 80
-          CidrIp: 0.0.0.0/0
-          Description: HTTP access (redirects to HTTPS)
+      SecurityGroupIngress: !If
+        - HasJwtAuth
+        # When API Gateway is deployed, ALB is internal — only allow
+        # traffic from the VPC (API GW VPC Link ENIs live in the subnets).
+        - - IpProtocol: tcp
+            FromPort: 80
+            ToPort: 80
+            CidrIp: 10.0.0.0/8
+            Description: HTTP from VPC (API Gateway VPC Link)
+        # No API Gateway — ALB is public, accept from anywhere.
+        - - IpProtocol: tcp
+            FromPort: 443
+            ToPort: 443
+            CidrIp: 0.0.0.0/0
+            Description: HTTPS access from anywhere
+          - IpProtocol: tcp
+            FromPort: 80
+            ToPort: 80
+            CidrIp: 0.0.0.0/0
+            Description: HTTP access (redirects to HTTPS)
       Tags:
         - Key: Name
           Value: otel-collector-alb-sg
@@ -162,7 +170,10 @@ Resources:
         - otel-collector-alb
       Type: application
       IpAddressType: ipv4
-      Scheme: internet-facing
+      Scheme: !If
+        - HasJwtAuth
+        - internal
+        - internet-facing
       SecurityGroups:
         - !Ref ALBSecurityGroup
       Subnets: !Ref SubnetIds
@@ -170,7 +181,7 @@ Resources:
         - Key: Name
           Value: otel-collector-alb
         - Key: Purpose
-          Value: HTTPS-enabled OTEL collector for Claude Code
+          Value: OTEL collector for Claude Code
 
   # Target Group
   HTTPTargetGroup:
