@@ -2291,8 +2291,9 @@ RUN pyinstaller \
         """
         installer_path = output_dir / "install.sh"
         prebuilt_ps1 = output_dir / "ccwb-install.ps1"
-        if installer_path.exists() and prebuilt_ps1.exists():
-            self.line("  <info>Using prebuilt installer scripts (install.sh, ccwb-install.ps1)</info>")
+        prebuilt_bat = output_dir / "install.bat"
+        if prebuilt_ps1.exists() and (installer_path.exists() or prebuilt_bat.exists()):
+            self.line("  <info>Using prebuilt installer scripts</info>")
             return installer_path
 
         # Determine which binaries were built
