@@ -57,35 +57,48 @@ func run(testMode bool) int {
 		profile = "ClaudeCode"
 	}
 
-	// Layer 1: Check file cache first (avoids credential-process entirely).
-	// If cached headers exist AND a valid monitoring token is available,
-	// return immediately. If the token is expired, fall through to Layer 3
-	// which calls credential-process to trigger re-auth.
+	// Layer 1: Check file cache for user-attribute headers.
+	var cachedHeaders map[string]string
 	if !testMode {
-		headers, err := otel.ReadCachedHeaders(profile)
-		if err == nil && headers != nil {
-			if tok, tokErr := getMonitoringToken(profile); tokErr == nil && tok != "" {
-				debugPrint("Using cached OTEL headers with valid token")
-				headers["Authorization"] = "Bearer " + tok
-				outputJSON(headers)
-				return 0
-			}
-			debugPrint("Cached headers found but token expired, refreshing via credential-process...")
+		if h, err := otel.ReadCachedHeaders(profile); err == nil && h != nil {
+			cachedHeaders = h
 		}
 	}
 
-	// Layer 2: Check environment variable
-	token := os.Getenv("CLAUDE_CODE_MONITORING_TOKEN")
-	if token != "" {
-		debugPrint("Using token from environment variable CLAUDE_CODE_MONITORING_TOKEN")
-	} else {
-		// Layer 3: Get token via credential-process subprocess
+	// Layer 2: Get a valid monitoring token (needed for Authorization header).
+	// Try: storage → env var → credential-process subprocess.
+	token := ""
+	if !testMode {
+		if tok, err := getMonitoringToken(profile); err == nil && tok != "" {
+			token = tok
+		}
+	}
+	if token == "" {
+		token = os.Getenv("CLAUDE_CODE_MONITORING_TOKEN")
+	}
+	if token == "" {
 		var err error
 		token, err = getTokenViaCredentialProcess(profile)
 		if err != nil || token == "" {
 			debugPrint("Could not obtain authentication token")
+			// If we have cached headers, return them without Authorization.
+			// Collectors without JWT auth still work; those with JWT auth
+			// will reject but Claude Code telemetry stays active.
+			if cachedHeaders != nil {
+				debugPrint("Returning cached headers without Authorization")
+				outputJSON(cachedHeaders)
+				return 0
+			}
 			return 1
 		}
+	}
+
+	// If we have cached headers and a valid token, use them (fast path)
+	if cachedHeaders != nil && !testMode {
+		debugPrint("Using cached OTEL headers with valid token")
+		cachedHeaders["Authorization"] = "Bearer " + token
+		outputJSON(cachedHeaders)
+		return 0
 	}
 
 	// Decode JWT and extract user info
