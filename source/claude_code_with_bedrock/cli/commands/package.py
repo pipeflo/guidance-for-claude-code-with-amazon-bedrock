@@ -2295,8 +2295,14 @@ RUN pyinstaller \
         """
         installer_path = output_dir / "install.sh"
         prebuilt_ps1 = output_dir / "ccwb-install.ps1"
-        prebuilt_bat = output_dir / "install.bat"
-        if prebuilt_ps1.exists() and (installer_path.exists() or prebuilt_bat.exists()):
+        if prebuilt_ps1.exists():
+            # Ensure install.bat exists (may be missing if symlink broke on Windows)
+            bat_path = output_dir / "install.bat"
+            if not bat_path.exists():
+                bat_path.write_text(
+                    '@echo off\r\nREM Claude Code Authentication Installer for Windows\r\n\r\n'
+                    'powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0ccwb-install.ps1"\r\n\r\npause\r\n'
+                )
             self.line("  <info>Using prebuilt installer scripts</info>")
             return installer_path
 
