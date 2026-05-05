@@ -631,7 +631,11 @@ class PackageCommand(Command):
         """
         import shutil
 
-        prebuilt_dir = Path(__file__).parents[3] / "go" / "prebuilt" / "latest"
+        prebuilt_base = Path(__file__).parents[3] / "go" / "prebuilt"
+        prebuilt_dir = prebuilt_base / "latest"
+        if not prebuilt_dir.exists() or prebuilt_dir.is_file():
+            # On Windows, git checks out symlinks as text files. Fall back to v2.0.0.
+            prebuilt_dir = prebuilt_base / "v2.0.0"
         if not prebuilt_dir.exists():
             raise FileNotFoundError(
                 f"Pre-built binaries not found at {prebuilt_dir}. "
@@ -2292,7 +2296,6 @@ RUN pyinstaller \
         installer_path = output_dir / "install.sh"
         prebuilt_ps1 = output_dir / "ccwb-install.ps1"
         prebuilt_bat = output_dir / "install.bat"
-        self.line(f"  <comment>Checking: ps1={prebuilt_ps1.exists()} sh={installer_path.exists()} bat={prebuilt_bat.exists()}</comment>")
         if prebuilt_ps1.exists() and (installer_path.exists() or prebuilt_bat.exists()):
             self.line("  <info>Using prebuilt installer scripts</info>")
             return installer_path
