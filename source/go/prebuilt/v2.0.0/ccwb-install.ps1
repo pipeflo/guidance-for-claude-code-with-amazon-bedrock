@@ -52,19 +52,42 @@ Write-Host 'Installing authentication tools...'
 $installDir = Join-Path $env:USERPROFILE 'claude-code-with-bedrock'
 if (-not (Test-Path $installDir)) { New-Item -ItemType Directory -Path $installDir -Force | Out-Null }
 
-# Copy credential process
+# Unblock source binaries before any operations — Defender holds a scan
+# lock on MOTW-tagged files immediately after extraction from a ZIP.
+Get-ChildItem -Path $ScriptDir -Filter '*.exe' | ForEach-Object {
+    try { Unblock-File -Path $_.FullName } catch {}
+}
+
+# Stop any running credential-process so the destination isn't locked by AWS CLI
+Get-Process -Name 'credential-process' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Get-Process -Name 'otel-helper' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 500
+
+# Copy credential process (rename old binary if still locked)
 Write-Host 'Copying credential process...'
-Copy-Item -Force 'credential-process-windows.exe' (Join-Path $installDir 'credential-process.exe')
+$cpDest = Join-Path $installDir 'credential-process.exe'
+try {
+    Copy-Item -Force 'credential-process-windows.exe' $cpDest
+} catch {
+    $old = Join-Path $installDir "credential-process.exe.old-$(Get-Date -Format 'yyyyMMddHHmmss')"
+    Move-Item -Force $cpDest $old -ErrorAction SilentlyContinue
+    Copy-Item -Force 'credential-process-windows.exe' $cpDest
+}
 
 # Copy OTEL helper if it exists
 if (Test-Path 'otel-helper-windows.exe') {
     Write-Host 'Copying OTEL helper...'
-    Copy-Item -Force 'otel-helper-windows.exe' (Join-Path $installDir 'otel-helper.exe')
+    $ohDest = Join-Path $installDir 'otel-helper.exe'
+    try {
+        Copy-Item -Force 'otel-helper-windows.exe' $ohDest
+    } catch {
+        $old = Join-Path $installDir "otel-helper.exe.old-$(Get-Date -Format 'yyyyMMddHHmmss')"
+        Move-Item -Force $ohDest $old -ErrorAction SilentlyContinue
+        Copy-Item -Force 'otel-helper-windows.exe' $ohDest
+    }
 }
 
-# Remove Mark-of-the-Web so Windows doesn't block execution.
-# Binaries downloaded via browser/S3 carry a Zone.Identifier ADS that
-# triggers SmartScreen on first run. Unblock-File strips it silently.
+# Unblock destination binaries (in case MOTW propagated despite source unblock)
 Get-ChildItem -Path $installDir -Filter '*.exe' | ForEach-Object {
     try { Unblock-File -Path $_.FullName } catch {}
 }
