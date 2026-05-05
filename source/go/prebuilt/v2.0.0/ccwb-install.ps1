@@ -91,12 +91,14 @@ if (Test-Path 'claude-settings/settings.json') {
     if ($doWrite) {
         $otelPath = ((Join-Path $installDir 'otel-helper.exe') -replace '\\', '/')
         $credPath = ((Join-Path $installDir 'credential-process.exe') -replace '\\', '/')
-        # Replace placeholders in the raw JSON text to avoid double-quoting
-        # issues from ConvertTo-Json re-serialization.
+        # Paths with spaces need escaped quotes so the shell treats them as one argument
+        $credPathQuoted = if ($credPath -match ' ') { "\`"$credPath\`"" } else { $credPath }
+        $otelPathQuoted = if ($otelPath -match ' ') { "\`"$otelPath\`"" } else { $otelPath }
+        # Replace placeholders in the raw JSON text
         $settingsContent = Get-Content 'claude-settings/settings.json' -Raw
-        $settingsContent = $settingsContent -replace '__CREDENTIAL_PROCESS_PATH__', $credPath
-        $settingsContent = $settingsContent -replace '__OTEL_HELPER_PATH__', $otelPath
-        # otelHeadersHelper placeholder is the entire value
+        $settingsContent = $settingsContent -replace '__CREDENTIAL_PROCESS_PATH__', $credPathQuoted
+        $settingsContent = $settingsContent -replace '__OTEL_HELPER_PATH__', $otelPathQuoted
+        # otelHeadersHelper value — plain path (Claude Code handles quoting for exec)
         $settingsContent = $settingsContent -replace '"~/claude-code-with-bedrock/otel-helper"', "`"$otelPath`""
         $settingsContent = $settingsContent -replace '"~/claude-code-with-bedrock/otel-helper.exe"', "`"$otelPath`""
         Set-Content -Encoding UTF8 -Path $settingsTarget -Value $settingsContent

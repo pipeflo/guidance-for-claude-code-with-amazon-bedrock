@@ -48,23 +48,29 @@ func main() {
 func run(testMode bool) int {
 	profile := os.Getenv("AWS_PROFILE")
 	if profile == "" {
+		// When spawned by Claude Code, AWS_PROFILE may not be in the
+		// subprocess env. Fall back to auto-detecting from config.json
+		// (which typically has exactly one profile).
+		profile = config.AutoDetectProfile()
+	}
+	if profile == "" {
 		profile = "ClaudeCode"
 	}
 
 	// Layer 1: Check file cache first (avoids credential-process entirely).
-	// If cached headers exist, still try to attach a fresh monitoring token
-	// for ALB JWT validation. If the token fetch fails (expired, no cache),
-	// emit headers without authorization — metrics still flow on collectors
-	// that don't enforce JWT auth (HTTP-only / no custom domain).
+	// If cached headers exist AND a valid monitoring token is available,
+	// return immediately. If the token is expired, fall through to Layer 3
+	// which calls credential-process to trigger re-auth.
 	if !testMode {
 		headers, err := otel.ReadCachedHeaders(profile)
 		if err == nil && headers != nil {
-			debugPrint("Using cached OTEL headers")
 			if tok, tokErr := getMonitoringToken(profile); tokErr == nil && tok != "" {
-				headers["authorization"] = "Bearer " + tok
+				debugPrint("Using cached OTEL headers with valid token")
+				headers["Authorization"] = "Bearer " + tok
+				outputJSON(headers)
+				return 0
 			}
-			outputJSON(headers)
-			return 0
+			debugPrint("Cached headers found but token expired, refreshing via credential-process...")
 		}
 	}
 
@@ -104,7 +110,7 @@ func run(testMode bool) int {
 
 	if testMode {
 		// Show auth header in test output for diagnostics
-		headers["authorization"] = "Bearer " + token
+		headers["Authorization"] = "Bearer " + token
 		printTestOutput(userInfo, headers)
 	} else {
 		// Cache user-attribute headers (stable across token refreshes).
@@ -121,7 +127,7 @@ func run(testMode bool) int {
 			debugPrint("JWT has no exp claim, skipping cache write")
 		}
 		// Add authorization header AFTER caching, from the live token
-		headers["authorization"] = "Bearer " + token
+		headers["Authorization"] = "Bearer " + token
 		outputJSON(headers)
 	}
 
