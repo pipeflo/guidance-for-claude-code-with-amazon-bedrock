@@ -91,16 +91,16 @@ if (Test-Path 'claude-settings/settings.json') {
     if ($doWrite) {
         $otelPath = ((Join-Path $installDir 'otel-helper.exe') -replace '\\', '/')
         $credPath = ((Join-Path $installDir 'credential-process.exe') -replace '\\', '/')
-        $settings = Get-Content 'claude-settings/settings.json' -Raw | ConvertFrom-Json
-        if ($settings.otelHeadersHelper) {
-            $settings.otelHeadersHelper = "`"$otelPath`""
-        }
-        if ($settings.awsAuthRefresh) {
-            $settings.awsAuthRefresh = $settings.awsAuthRefresh -replace '__CREDENTIAL_PROCESS_PATH__', "`"$credPath`""
-        }
-        $settings | ConvertTo-Json -Depth 10 | Set-Content -Encoding UTF8 $settingsTarget
+        # Replace placeholders in the raw JSON text to avoid double-quoting
+        # issues from ConvertTo-Json re-serialization.
+        $settingsContent = Get-Content 'claude-settings/settings.json' -Raw
+        $settingsContent = $settingsContent -replace '__CREDENTIAL_PROCESS_PATH__', $credPath
+        $settingsContent = $settingsContent -replace '__OTEL_HELPER_PATH__', $otelPath
+        # otelHeadersHelper placeholder is the entire value
+        $settingsContent = $settingsContent -replace '"~/claude-code-with-bedrock/otel-helper"', "`"$otelPath`""
+        $settingsContent = $settingsContent -replace '"~/claude-code-with-bedrock/otel-helper.exe"', "`"$otelPath`""
+        Set-Content -Encoding UTF8 -Path $settingsTarget -Value $settingsContent
 
-        $settingsContent = Get-Content $settingsTarget -Raw
         if ($settingsContent -match '__CREDENTIAL_PROCESS_PATH__|__OTEL_HELPER_PATH__') {
             Write-Host 'WARNING: Some path placeholders were not replaced in settings.json'
             Write-Host "         You may need to edit the file manually: $settingsTarget"
