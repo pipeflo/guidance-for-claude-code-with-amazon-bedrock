@@ -52,54 +52,15 @@ Write-Host 'Installing authentication tools...'
 $installDir = Join-Path $env:USERPROFILE 'claude-code-with-bedrock'
 if (-not (Test-Path $installDir)) { New-Item -ItemType Directory -Path $installDir -Force | Out-Null }
 
-# Unblock source binaries before any operations — Defender holds a scan
-# lock on MOTW-tagged files immediately after extraction from a ZIP.
-Get-ChildItem -Path $ScriptDir -Filter '*.exe' | ForEach-Object {
-    try { Unblock-File -Path $_.FullName } catch {}
-}
-
-# Stop any running credential-process so the destination isn't locked by AWS CLI
-Get-Process -Name 'credential-process' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-Get-Process -Name 'otel-helper' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-Start-Sleep -Milliseconds 500
-
-# Copy credential process (rename old binary if still locked)
+# Copy credential process
 Write-Host 'Copying credential process...'
-$cpDest = Join-Path $installDir 'credential-process.exe'
-try {
-    Copy-Item -Force 'credential-process-windows.exe' $cpDest
-} catch {
-    $old = Join-Path $installDir "credential-process.exe.old-$(Get-Date -Format 'yyyyMMddHHmmss')"
-    Move-Item -Force $cpDest $old -ErrorAction SilentlyContinue
-    Copy-Item -Force 'credential-process-windows.exe' $cpDest
-}
+Copy-Item -Force 'credential-process-windows.exe' (Join-Path $installDir 'credential-process.exe')
 
 # Copy OTEL helper if it exists
 if (Test-Path 'otel-helper-windows.exe') {
     Write-Host 'Copying OTEL helper...'
-    $ohDest = Join-Path $installDir 'otel-helper.exe'
-    try {
-        Copy-Item -Force 'otel-helper-windows.exe' $ohDest
-    } catch {
-        $old = Join-Path $installDir "otel-helper.exe.old-$(Get-Date -Format 'yyyyMMddHHmmss')"
-        Move-Item -Force $ohDest $old -ErrorAction SilentlyContinue
-        Copy-Item -Force 'otel-helper-windows.exe' $ohDest
-    }
+    Copy-Item -Force 'otel-helper-windows.exe' (Join-Path $installDir 'otel-helper.exe')
 }
-
-# Unblock destination binaries (in case MOTW propagated despite source unblock)
-Get-ChildItem -Path $installDir -Filter '*.exe' | ForEach-Object {
-    try { Unblock-File -Path $_.FullName } catch {}
-}
-
-# Warm Defender's "Block at First Sight" cloud cache. Defender silently
-# blocks unknown binaries in subprocess/non-interactive contexts until it
-# has seen them run interactively once. Running --version here (in the
-# user's interactive terminal) triggers the cloud verdict and caches it,
-# so subsequent subprocess calls from AWS CLI / Claude Code succeed.
-Write-Host 'Warming Defender cache...'
-& (Join-Path $installDir 'credential-process.exe') --version 2>$null | Out-Null
-& (Join-Path $installDir 'otel-helper.exe') --version 2>$null | Out-Null
 
 # Copy configuration
 Write-Host 'Copying configuration...'
