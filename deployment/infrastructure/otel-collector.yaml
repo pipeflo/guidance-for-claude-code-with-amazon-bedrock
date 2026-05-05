@@ -33,17 +33,17 @@ Parameters:
   OidcIssuerUrl:
     Type: String
     Default: ''
-    Description: OIDC issuer URL for ALB JWT validation
+    Description: OIDC issuer URL for JWT validation (API Gateway authorizer and/or ALB)
 
   OidcJwksEndpoint:
     Type: String
     Default: ''
-    Description: JWKS endpoint URL for ALB JWT signature validation
+    Description: JWKS endpoint URL for ALB JWT signature validation (only used with custom domain HTTPS path)
 
   OidcClientId:
     Type: String
     Default: ''
-    Description: OIDC client ID for ALB JWT audience (aud) claim validation
+    Description: OIDC client ID for JWT audience (aud) claim validation
 
 Conditions:
   HasCustomDomain: !Not [!Equals [!Ref CustomDomainName, '']]
@@ -587,6 +587,107 @@ Resources:
   #       ScaleOutCooldown: 60
   #       TargetValue: 70
 
+  # ============================================
+  # API Gateway — JWT-authenticated public entry point
+  # Deployed when OidcIssuerUrl is provided. Forwards validated requests
+  # to the ALB via VPC Link. Customers use this endpoint instead of the
+  # raw ALB URL to ensure only authenticated users can send metrics.
+  # ============================================
+
+  OtelApi:
+    Type: AWS::ApiGatewayV2::Api
+    Condition: HasJwtAuth
+    Properties:
+      Name: !Sub '${AWS::StackName}-otel-api'
+      Description: JWT-authenticated entry point for Claude Code OTLP metrics
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins:
+          - '*'
+        AllowMethods:
+          - POST
+          - OPTIONS
+        AllowHeaders:
+          - Content-Type
+          - Authorization
+          - X-*
+        MaxAge: 300
+
+  OtelApiAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Condition: HasJwtAuth
+    Properties:
+      ApiId: !Ref OtelApi
+      AuthorizerType: JWT
+      Name: oidc-jwt-authorizer
+      IdentitySource:
+        - "$request.header.Authorization"
+      JwtConfiguration:
+        Issuer: !Ref OidcIssuerUrl
+        Audience: !If
+          - HasOidcClientId
+          - - !Ref OidcClientId
+          - - !Ref OidcIssuerUrl
+
+  OtelApiVpcLink:
+    Type: AWS::ApiGatewayV2::VpcLink
+    Condition: HasJwtAuth
+    Properties:
+      Name: !Sub '${AWS::StackName}-otel-vpclink'
+      SubnetIds: !Ref SubnetIds
+      SecurityGroupIds:
+        - !Ref ALBSecurityGroup
+
+  OtelApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Condition: HasJwtAuth
+    Properties:
+      ApiId: !Ref OtelApi
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: POST
+      IntegrationUri: !GetAtt HTTPListener.ListenerArn
+      ConnectionType: VPC_LINK
+      ConnectionId: !Ref OtelApiVpcLink
+      PayloadFormatVersion: '1.0'
+
+  OtelApiMetricsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: HasJwtAuth
+    Properties:
+      ApiId: !Ref OtelApi
+      RouteKey: 'POST /v1/metrics'
+      Target: !Sub 'integrations/${OtelApiIntegration}'
+      AuthorizerId: !Ref OtelApiAuthorizer
+      AuthorizationType: JWT
+
+  OtelApiLogsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: HasJwtAuth
+    Properties:
+      ApiId: !Ref OtelApi
+      RouteKey: 'POST /v1/logs'
+      Target: !Sub 'integrations/${OtelApiIntegration}'
+      AuthorizerId: !Ref OtelApiAuthorizer
+      AuthorizationType: JWT
+
+  OtelApiTracesRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Condition: HasJwtAuth
+    Properties:
+      ApiId: !Ref OtelApi
+      RouteKey: 'POST /v1/traces'
+      Target: !Sub 'integrations/${OtelApiIntegration}'
+      AuthorizerId: !Ref OtelApiAuthorizer
+      AuthorizationType: JWT
+
+  OtelApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Condition: HasJwtAuth
+    Properties:
+      ApiId: !Ref OtelApi
+      StageName: '$default'
+      AutoDeploy: true
+
 Outputs:
   VpcId:
     Description: VPC ID used
@@ -597,13 +698,23 @@ Outputs:
     Value: !Join [',', !Ref SubnetIds]
 
   CollectorEndpoint:
-    Description: Endpoint for OTLP metrics
+    Description: Endpoint for OTLP metrics (prefers API Gateway when JWT auth is configured)
     Value: !If
-      - HasCustomDomain
-      - !Sub 'https://${CustomDomainName}'
-      - !Sub 'http://${LoadBalancer.DNSName}'
+      - HasJwtAuth
+      - !Sub 'https://${OtelApi}.execute-api.${AWS::Region}.amazonaws.com'
+      - !If
+        - HasCustomDomain
+        - !Sub 'https://${CustomDomainName}'
+        - !Sub 'http://${LoadBalancer.DNSName}'
     Export:
       Name: !Sub '${AWS::StackName}-endpoint'
+
+  ApiGatewayEndpoint:
+    Condition: HasJwtAuth
+    Description: JWT-authenticated API Gateway endpoint for OTLP metrics
+    Value: !Sub 'https://${OtelApi}.execute-api.${AWS::Region}.amazonaws.com'
+    Export:
+      Name: !Sub '${AWS::StackName}-api-endpoint'
 
   ALBEndpoint:
     Description: ALB DNS name
