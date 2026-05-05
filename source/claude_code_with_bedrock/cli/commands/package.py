@@ -2292,6 +2292,7 @@ RUN pyinstaller \
         installer_path = output_dir / "install.sh"
         prebuilt_ps1 = output_dir / "ccwb-install.ps1"
         prebuilt_bat = output_dir / "install.bat"
+        self.line(f"  <comment>Checking: ps1={prebuilt_ps1.exists()} sh={installer_path.exists()} bat={prebuilt_bat.exists()}</comment>")
         if prebuilt_ps1.exists() and (installer_path.exists() or prebuilt_bat.exists()):
             self.line("  <info>Using prebuilt installer scripts</info>")
             return installer_path
