@@ -631,11 +631,7 @@ class PackageCommand(Command):
         """
         import shutil
 
-        prebuilt_base = Path(__file__).parents[3] / "go" / "prebuilt"
-        prebuilt_dir = prebuilt_base / "latest"
-        if not prebuilt_dir.exists() or prebuilt_dir.is_file():
-            # On Windows, git checks out symlinks as text files. Fall back to v2.0.0.
-            prebuilt_dir = prebuilt_base / "v2.0.0"
+        prebuilt_dir = Path(__file__).parents[3] / "go" / "prebuilt" / "latest"
         if not prebuilt_dir.exists():
             raise FileNotFoundError(
                 f"Pre-built binaries not found at {prebuilt_dir}. "
@@ -2295,15 +2291,8 @@ RUN pyinstaller \
         """
         installer_path = output_dir / "install.sh"
         prebuilt_ps1 = output_dir / "ccwb-install.ps1"
-        if prebuilt_ps1.exists():
-            # Ensure install.bat exists (may be missing if symlink broke on Windows)
-            bat_path = output_dir / "install.bat"
-            if not bat_path.exists():
-                bat_path.write_text(
-                    '@echo off\r\nREM Claude Code Authentication Installer for Windows\r\n\r\n'
-                    'powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0ccwb-install.ps1"\r\n\r\npause\r\n'
-                )
-            self.line("  <info>Using prebuilt installer scripts</info>")
+        if installer_path.exists() and prebuilt_ps1.exists():
+            self.line("  <info>Using prebuilt installer scripts (install.sh, ccwb-install.ps1)</info>")
             return installer_path
 
         # Determine which binaries were built
