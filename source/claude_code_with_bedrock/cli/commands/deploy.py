@@ -707,8 +707,16 @@ class DeployCommand(Command):
                         elif provider_type == "okta":
                             # provider_domain is e.g. "company.okta.com"
                             domain = provider_domain.rstrip("/")
-                            oidc_issuer = f"https://{domain}/oauth2/default"
-                            oidc_jwks = f"https://{domain}/oauth2/default/v1/keys"
+                            cas_id = getattr(profile, "okta_auth_server_id", "") or ""
+                            if cas_id and cas_id != "default":
+                                oidc_issuer = f"https://{domain}/oauth2/{cas_id}"
+                                oidc_jwks = f"https://{domain}/oauth2/{cas_id}/v1/keys"
+                            elif getattr(profile, "project_attribution_enabled", False) or getattr(profile, "enforce_project_isolation", False):
+                                oidc_issuer = f"https://{domain}/oauth2/default"
+                                oidc_jwks = f"https://{domain}/oauth2/default/v1/keys"
+                            else:
+                                oidc_issuer = f"https://{domain}"
+                                oidc_jwks = f"https://{domain}/oauth2/v1/keys"
                         elif provider_type == "auth0":
                             domain = provider_domain.rstrip("/")
                             oidc_issuer = f"https://{domain}/"

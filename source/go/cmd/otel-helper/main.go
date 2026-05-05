@@ -12,6 +12,7 @@ import (
 	"github.com/bluedoors/ccwb-binaries/internal/config"
 	"github.com/bluedoors/ccwb-binaries/internal/jwt"
 	"github.com/bluedoors/ccwb-binaries/internal/otel"
+	"github.com/bluedoors/ccwb-binaries/internal/storage"
 	"github.com/bluedoors/ccwb-binaries/internal/version"
 )
 
@@ -50,11 +51,18 @@ func run(testMode bool) int {
 		profile = "ClaudeCode"
 	}
 
-	// Layer 1: Check file cache first (avoids credential-process entirely)
+	// Layer 1: Check file cache first (avoids credential-process entirely).
+	// If cached headers exist, still try to attach a fresh monitoring token
+	// for ALB JWT validation. If the token fetch fails (expired, no cache),
+	// emit headers without authorization — metrics still flow on collectors
+	// that don't enforce JWT auth (HTTP-only / no custom domain).
 	if !testMode {
 		headers, err := otel.ReadCachedHeaders(profile)
 		if err == nil && headers != nil {
-			debugPrint("Using cached OTEL headers (token still valid)")
+			debugPrint("Using cached OTEL headers")
+			if tok, tokErr := getMonitoringToken(profile); tokErr == nil && tok != "" {
+				headers["authorization"] = "Bearer " + tok
+			}
 			outputJSON(headers)
 			return 0
 		}
@@ -95,9 +103,15 @@ func run(testMode bool) int {
 	headers := otel.FormatHeaders(userInfo)
 
 	if testMode {
+		// Show auth header in test output for diagnostics
+		headers["authorization"] = "Bearer " + token
 		printTestOutput(userInfo, headers)
 	} else {
-		// Cache headers for future calls
+		// Cache user-attribute headers (stable across token refreshes).
+		// Do NOT cache the authorization header — it contains the JWT which
+		// expires (~1h for Okta). The cache intentionally outlives token
+		// expiry for static attributes, but an expired JWT would cause the
+		// ALB jwt-validation to reject requests.
 		tokenExp := int64(claims.GetFloat("exp"))
 		if tokenExp > 0 {
 			if err := otel.WriteCachedHeaders(profile, headers, tokenExp); err != nil {
@@ -106,6 +120,8 @@ func run(testMode bool) int {
 		} else {
 			debugPrint("JWT has no exp claim, skipping cache write")
 		}
+		// Add authorization header AFTER caching, from the live token
+		headers["authorization"] = "Bearer " + token
 		outputJSON(headers)
 	}
 
@@ -135,6 +151,14 @@ func getTokenViaCredentialProcess(profile string) (string, error) {
 
 	debugPrint("Successfully retrieved token via credential-process")
 	return token, nil
+}
+
+func getMonitoringToken(profile string) (string, error) {
+	storageType := "session"
+	if cfg, err := config.LoadProfile(profile); err == nil && cfg.CredentialStorage != "" {
+		storageType = cfg.CredentialStorage
+	}
+	return storage.GetMonitoringToken(profile, storageType)
 }
 
 func outputJSON(v interface{}) {
