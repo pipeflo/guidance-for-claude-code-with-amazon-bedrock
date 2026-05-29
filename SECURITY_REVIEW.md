@@ -2,11 +2,10 @@
 
 This document captures a baseline security review of the two Go binaries this guidance ships to end-user endpoints. It is intended as a starting artifact for any organization adopting the solution — run the same tools against any future revision to regenerate this exact artifact set.
 
-**Code scanned:** Go source tree under `source/go/`, HEAD `2f64a6f` of `main` at scan time.
-**Scope:** the two Go binaries deployed to end-user endpoints (`credential-process` and `otel-helper`) and their transitive dependencies.
-**Out of scope:** the `ccwb` Python CLI (deployed only to admin workstations), CloudFormation templates, Claude Code itself (maintained by Anthropic), AWS SDK internals (maintained by AWS).
-**Scan date:** 2026-05-02.
-**Tools used:** `gosec` 2.26.1, `govulncheck` (Homebrew-installed latest), `syft` (Homebrew-installed latest), Go toolchain 1.26.2.
+- **Code scanned:** Go source tree under `source/go/`.
+- **Scope:** the two Go binaries deployed to end-user endpoints (`credential-process` and `otel-helper`) and their transitive dependencies.
+- **Scan date:** 2026-05-02.
+- **Tools used:** `gosec` 2.26.1, `govulncheck` (Homebrew-installed latest), `syft` (Homebrew-installed latest), Go toolchain 1.26.2.
 
 ---
 
@@ -20,7 +19,7 @@ This document captures a baseline security review of the two Go binaries this gu
 1. Checks for cached STS session credentials (OS keyring or session file). If valid, outputs them to stdout and exits.
 2. If no valid cache, opens a local TCP listener on `127.0.0.1:8400`, launches the user's browser to their IdP (Okta / Azure AD / Auth0 / Cognito User Pool), runs the OAuth2 authorization-code-with-PKCE flow.
 3. Exchanges the resulting ID token for AWS credentials via `sts:AssumeRoleWithWebIdentity` (or `cognito-identity:GetCredentialsForIdentity` when federating through a Cognito Identity Pool).
-4. Caches credentials locally (OS keyring where available, session-file fallback), writes the ID token to `~/.claude-code-session/<profile>-monitoring.json` (used by `otel-helper`), emits AWS credentials JSON to stdout.
+4. Caches credentials locally (session-file fallback), writes the ID token to `~/.claude-code-session/<profile>-monitoring.json` (used by `otel-helper`), emits AWS credentials JSON to stdout.
 
 **Data handled.** User's IdP ID token (JWT), AWS session credentials (temporary, ≤12h TTL), the user's own session-tag claims (as configured by the deploying organization — e.g. project, cost-center, zone, email, department). All locally scoped to one user on one machine.
 
@@ -52,7 +51,7 @@ Separation of concerns. `credential-process` is the auth critical path (must run
 
 ## 2. Binary provenance
 
-**Source.** All code is in this repository. Current HEAD at scan time: `2f64a6f`.
+**Source.** All code is in this repository.
 
 **Build command.** Reproducible from source:
 

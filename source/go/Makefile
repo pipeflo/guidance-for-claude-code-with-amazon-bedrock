@@ -6,7 +6,11 @@ LDFLAGS := -s -w -X github.com/bluedoors/ccwb-binaries/internal/version.Version=
 LDFLAGS_WIN := -X github.com/bluedoors/ccwb-binaries/internal/version.Version=$(VERSION)
 OUT ?= bin
 
-.PHONY: all test clean fmt vet macos-arm64 macos-intel linux-x64 linux-arm64 windows
+# macOS Developer ID signing + notarization
+CODESIGN_IDENTITY ?= Developer ID Application: Luis Florez (6Z8H988K7H)
+NOTARYTOOL_PROFILE ?= notarytool-profile
+
+.PHONY: all test clean fmt vet macos-arm64 macos-intel linux-x64 linux-arm64 windows notarize
 
 all: macos-arm64 macos-intel linux-x64 linux-arm64 windows
 
@@ -26,11 +30,29 @@ macos-arm64:
 	@mkdir -p $(OUT)
 	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "$(LDFLAGS)" -o $(OUT)/credential-process-macos-arm64 ./cmd/credential-process/
 	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "$(LDFLAGS)" -o $(OUT)/otel-helper-macos-arm64 ./cmd/otel-helper/
+	codesign --force --options runtime --sign "$(CODESIGN_IDENTITY)" $(OUT)/credential-process-macos-arm64
+	codesign --force --options runtime --sign "$(CODESIGN_IDENTITY)" $(OUT)/otel-helper-macos-arm64
 
 macos-intel:
 	@mkdir -p $(OUT)
 	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags "$(LDFLAGS)" -o $(OUT)/credential-process-macos-intel ./cmd/credential-process/
 	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags "$(LDFLAGS)" -o $(OUT)/otel-helper-macos-intel ./cmd/otel-helper/
+	codesign --force --options runtime --sign "$(CODESIGN_IDENTITY)" $(OUT)/credential-process-macos-intel
+	codesign --force --options runtime --sign "$(CODESIGN_IDENTITY)" $(OUT)/otel-helper-macos-intel
+
+notarize: macos-arm64 macos-intel
+	@echo "Packaging macOS binaries for notarization..."
+	@mkdir -p $(OUT)/notarize-tmp
+	zip -j $(OUT)/notarize-tmp/macos-binaries.zip \
+		$(OUT)/credential-process-macos-arm64 \
+		$(OUT)/otel-helper-macos-arm64 \
+		$(OUT)/credential-process-macos-intel \
+		$(OUT)/otel-helper-macos-intel
+	@echo "Submitting to Apple for notarization..."
+	xcrun notarytool submit $(OUT)/notarize-tmp/macos-binaries.zip \
+		--keychain-profile "$(NOTARYTOOL_PROFILE)" --wait
+	@rm -rf $(OUT)/notarize-tmp
+	@echo "Notarization complete."
 
 linux-x64:
 	@mkdir -p $(OUT)

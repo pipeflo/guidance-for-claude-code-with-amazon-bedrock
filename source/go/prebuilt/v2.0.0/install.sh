@@ -96,6 +96,14 @@ chmod +x ~/claude-code-with-bedrock/credential-process
 
 if [[ "$OSTYPE" == "darwin"* ]]; then
     echo
+    echo "macOS Gatekeeper:"
+    echo "   On first use, macOS may block the binary with:"
+    echo "   '...can't be opened because Apple cannot check it for malicious software.'"
+    echo "   If that happens, run:"
+    echo "     xattr -d com.apple.quarantine ~/claude-code-with-bedrock/credential-process"
+    echo "     xattr -d com.apple.quarantine ~/claude-code-with-bedrock/otel-helper"
+    echo "   Or: System Settings → Privacy & Security → click 'Allow Anyway'"
+    echo
     echo "macOS Keychain Access:"
     echo "   On first use, macOS will ask for permission to access the keychain."
     echo "   This is normal and required for secure credential storage."
