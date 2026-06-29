@@ -125,4 +125,129 @@ The bootstrap server works with any OIDC-compatible IdP:
 - **Auth0** — JWKS at `{issuer}/.well-known/jwks.json`
 - **Generic OIDC** — Any provider with a standard JWKS endpoint
 
+---
+
+## Zone- and role-based dynamic routing
+
+The bootstrap Lambda also accepts a richer configuration that resolves the
+user's Bedrock **region**, **model list**, **MCP servers**, **spend caps**,
+and **feature toggles** from their OIDC `groups` claim. This is what makes
+the bootstrap server useful for organizations that need GDPR-style region
+isolation, role-based model access, or per-team MCP/policy without
+maintaining one MDM profile per (zone × role) combination.
+
+### How resolution works
+
+The Lambda matches the `groups` claim against two maps configured on the
+ccwb profile:
+
+```
+groups = ["ccwb-europe-beta", "ccwb-consulting"]
+                 │                     │
+                 ▼                     ▼
+       claude_desktop_zone_config   claude_desktop_role_config
+       │
+       └─► {"europe": {"region": "eu-west-3", ...}}
+                              │
+                              ▼
+                inferenceBedrockRegion = "eu-west-3"
+                model_prefix = "eu"
+```
+
+- **Zone match**: any group whose suffix (after the `okta_group_prefix`,
+  default `ccwb-`) starts with a zone name in `claude_desktop_zone_config`
+  → determines `inferenceBedrockRegion` + `inferenceBedrockSsoRegion`.
+- **Role match**: any group whose suffix equals or starts with a role name
+  + `-` in `claude_desktop_role_config` → determines `inferenceModels`,
+  `inferenceMaxTokensPerWindow`, `managedMcpServers`,
+  `coworkEgressAllowedHosts`.
+
+Both matches are independent — a user can have zero, one, or both. The
+zone match also drives a `model_prefix` (e.g. `eu` vs `us`) that is
+prepended to role-provided model IDs to form full Bedrock model ARNs
+(`eu.anthropic.claude-opus-4-6-v1:0`).
+
+### Profile schema
+
+```json
+{
+  "cowork_config_mode": "dynamic",
+  "claude_desktop_sso_start_url": "https://d-1234567890.awsapps.com/start",
+  "claude_desktop_sso_region": "us-east-1",
+  "claude_desktop_sso_account_id": "716659702157",
+  "claude_desktop_sso_role_name": "ClaudeDesktopBedrock",
+
+  "claude_desktop_zone_config": {
+    "usa":    {"region": "us-east-1", "sso_region": "us-east-1", "model_prefix": "us"},
+    "europe": {"region": "eu-west-3", "sso_region": "eu-west-1", "model_prefix": "eu"}
+  },
+
+  "claude_desktop_role_config": {
+    "consulting": {
+      "models": ["claude-opus-4-6-v1:0", "claude-sonnet-4-6-v1:0"],
+      "max_tokens_per_window": "5000000",
+      "mcp_servers": [
+        {"name": "knowledge-base", "url": "https://mcp.company.com/kb"}
+      ]
+    },
+    "engineering": {
+      "models": ["claude-opus-4-6-v1:0", "claude-sonnet-4-6-v1:0", "claude-haiku-4-5-v1:0"],
+      "max_tokens_per_window": "10000000",
+      "mcp_servers": [
+        {"name": "github", "url": "https://mcp.company.com/github"}
+      ],
+      "egress_allowed_hosts": ["github.com", "registry.npmjs.org"]
+    }
+  },
+
+  "claude_desktop_feature_defaults": {
+    "chatTabEnabled": "true",
+    "coworkTabEnabled": "true",
+    "isClaudeCodeForDesktopEnabled": "true"
+  }
+}
+```
+
+### Auto-populated values
+
+`ccwb init` derives sensible defaults from your existing profile:
+
+| Field | Source |
+|-------|--------|
+| `claude_desktop_sso_region` | `aws_region` |
+| `claude_desktop_sso_account_id` | parsed from `federated_role_arn` |
+| `claude_desktop_zone_config` | built from `zones[]` when `enforce_project_isolation` is true, using a built-in `usa→us-east-1` / `europe→eu-west-3` / `apac→ap-northeast-1` table |
+| `claude_desktop_feature_defaults` | `{chatTab, coworkTab, code} = "true"` |
+
+Role config is not collected interactively — admins edit the profile JSON
+directly (see schema above) or hand-edit before `ccwb deploy bootstrap`.
+
+### Backward compatibility
+
+If `claude_desktop_zone_config` is empty, the Lambda falls back to the
+upstream behavior of returning a static `DEFAULT_INFERENCE_REGION` and
+`DEFAULT_INFERENCE_MODELS` for every user. The new fields are entirely
+opt-in and only become active once populated in the profile.
+
+### Generating MDM trust-anchor profiles
+
+After `ccwb deploy bootstrap` succeeds, generate the MDM profile that points
+end-user devices at your bootstrap endpoint:
+
+```bash
+ccwb claude-desktop generate
+```
+
+Writes three files to `dist/<profile>/claude-desktop/`:
+
+- `claude-desktop-trust-anchor.json` — raw config for debugging
+- `claude-desktop-trust-anchor.mobileconfig` — push via Jamf / Kandji / etc.
+- `claude-desktop-trust-anchor.reg` — push via Group Policy / Intune
+
+The trust-anchor profile is identical for every user — only the bootstrap
+URL and OIDC settings are baked in. Per-user config is fetched at sign-in.
+
+See `customer-upgrade-guides/UPGRADE_TO_CLAUDE_DESKTOP_BOOTSTRAP.md` for a
+full deployment walkthrough.
+
 > **Note**: IAM Identity Center (IDC) is not supported for bootstrap server in v1. Use static MDM profiles for IDC deployments.

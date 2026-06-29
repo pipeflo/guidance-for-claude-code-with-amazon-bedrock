@@ -1342,6 +1342,100 @@ class InitCommand(Command):
                     console.print(
                         "[dim]  Clients receive per-user config dynamically at sign-in via OIDC token exchange[/dim]"
                     )
+
+                    # \u2500\u2500 Claude Desktop bootstrap: SSO + zone/role config \u2500\u2500
+                    console.print("\n[bold]Claude Desktop \u2014 IAM Identity Center[/bold]")
+                    console.print(
+                        "[dim]The bootstrap server tells Claude Desktop to use IAM Identity Center "
+                        "for Bedrock credentials. We'll auto-populate what we can from your profile.[/dim]"
+                    )
+
+                    # Auto-derive defaults from existing config_data
+                    saved_cd = config.get("claude_desktop", {})
+                    aws_region = config_data.get("aws", {}).get("region", "us-east-1")
+
+                    # Account ID from federated_role_arn if present
+                    federated_arn = config_data.get("aws", {}).get("federated_role_arn", "")
+                    derived_account = ""
+                    if federated_arn and ":" in federated_arn:
+                        parts = federated_arn.split(":")
+                        if len(parts) >= 5:
+                            derived_account = parts[4]
+
+                    cd_sso_start_url = questionary.text(
+                        "IAM Identity Center start URL:",
+                        default=saved_cd.get("sso_start_url", ""),
+                        instruction="(e.g. https://d-1234567890.awsapps.com/start)",
+                    ).ask() or ""
+
+                    cd_sso_region = questionary.text(
+                        "IAM Identity Center region:",
+                        default=saved_cd.get("sso_region", "") or aws_region,
+                    ).ask() or aws_region
+
+                    cd_sso_account_id = questionary.text(
+                        "AWS account ID for Bedrock:",
+                        default=saved_cd.get("sso_account_id", "") or derived_account,
+                    ).ask() or derived_account
+
+                    cd_sso_role_name = questionary.text(
+                        "Identity Center permission set role name:",
+                        default=saved_cd.get("sso_role_name", "ClaudeDesktopBedrock"),
+                    ).ask() or "ClaudeDesktopBedrock"
+
+                    if "claude_desktop" not in config:
+                        config["claude_desktop"] = {}
+                    config["claude_desktop"]["sso_start_url"] = cd_sso_start_url
+                    config["claude_desktop"]["sso_region"] = cd_sso_region
+                    config["claude_desktop"]["sso_account_id"] = cd_sso_account_id
+                    config["claude_desktop"]["sso_role_name"] = cd_sso_role_name
+
+                    # Auto-build zone config if GDPR zones are already configured
+                    if config_data.get("enforce_project_isolation") and config_data.get("zones"):
+                        zone_region_map = {
+                            "usa": ("us-east-1", "us-east-1", "us"),
+                            "us": ("us-east-1", "us-east-1", "us"),
+                            "europe": ("eu-west-3", "eu-west-1", "eu"),
+                            "eu": ("eu-west-1", "eu-west-1", "eu"),
+                            "apac": ("ap-northeast-1", "ap-northeast-1", "apac"),
+                        }
+                        zone_config_built = {}
+                        for z in config_data["zones"]:
+                            if z in zone_region_map:
+                                region, sso_r, prefix = zone_region_map[z]
+                                zone_config_built[z] = {
+                                    "region": region,
+                                    "sso_region": sso_r,
+                                    "model_prefix": prefix,
+                                }
+                        if zone_config_built:
+                            config["claude_desktop"]["zone_config"] = zone_config_built
+                            console.print(
+                                f"[green]\u2713[/green] Auto-populated zone routing for: "
+                                f"{', '.join(zone_config_built.keys())}"
+                            )
+                    else:
+                        # Preserve any previously configured zone_config
+                        if "zone_config" in saved_cd:
+                            config["claude_desktop"]["zone_config"] = saved_cd["zone_config"]
+
+                    # Preserve role_config and feature_defaults if previously configured
+                    # (no inline editor \u2014 admins edit profile JSON for these)
+                    if "role_config" in saved_cd:
+                        config["claude_desktop"]["role_config"] = saved_cd["role_config"]
+                    if "feature_defaults" in saved_cd:
+                        config["claude_desktop"]["feature_defaults"] = saved_cd["feature_defaults"]
+                    else:
+                        # Sensible default \u2014 all three tabs enabled
+                        config["claude_desktop"]["feature_defaults"] = {
+                            "chatTabEnabled": "true",
+                            "coworkTabEnabled": "true",
+                            "isClaudeCodeForDesktopEnabled": "true",
+                        }
+                    console.print(
+                        "[dim]  Role-based models/MCP can be edited in the profile JSON later. "
+                        "See assets/docs/BOOTSTRAP_SERVER.md for the schema.[/dim]"
+                    )
                 else:
                     console.print("[green]\u2713[/green] Static MDM configuration (default)")
 
@@ -2132,6 +2226,23 @@ class InitCommand(Command):
             "cowork_chat_tab_enabled": config_data.get("cowork_3p", {}).get("chat_tab_enabled", True),
             "cowork_chat_advanced_file_analysis": config_data.get("cowork_3p", {}).get(
                 "chat_advanced_file_analysis", True
+            ),
+            # Claude Desktop bootstrap (collected only when cowork_config_mode == "dynamic")
+            "claude_desktop_sso_start_url": config_data.get("claude_desktop", {}).get("sso_start_url", ""),
+            "claude_desktop_sso_region": config_data.get("claude_desktop", {}).get("sso_region", ""),
+            "claude_desktop_sso_account_id": config_data.get("claude_desktop", {}).get("sso_account_id", ""),
+            "claude_desktop_sso_role_name": config_data.get("claude_desktop", {}).get(
+                "sso_role_name", "ClaudeDesktopBedrock"
+            ),
+            "claude_desktop_zone_config": config_data.get("claude_desktop", {}).get("zone_config", {}),
+            "claude_desktop_role_config": config_data.get("claude_desktop", {}).get("role_config", {}),
+            "claude_desktop_feature_defaults": config_data.get("claude_desktop", {}).get(
+                "feature_defaults",
+                {
+                    "chatTabEnabled": "true",
+                    "coworkTabEnabled": "true",
+                    "isClaudeCodeForDesktopEnabled": "true",
+                },
             ),
         }
 
