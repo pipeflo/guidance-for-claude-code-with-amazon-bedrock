@@ -3,6 +3,7 @@
 
 """Deploy command - Deploy AWS infrastructure using boto3."""
 
+import json
 import os
 import re
 import subprocess
@@ -1070,6 +1071,40 @@ class DeployCommand(Command):
                 # Get inference models
                 inference_models = getattr(profile, "selected_model", "") or "us.anthropic.claude-sonnet-4-20250514-v1:0"
 
+                # Auto-derive SSO account ID from federated_role_arn when not set
+                sso_account_id = getattr(profile, "claude_desktop_sso_account_id", "") or ""
+                if not sso_account_id and getattr(profile, "federated_role_arn", None):
+                    # arn:aws:iam::716659702157:role/... \u2192 "716659702157"
+                    role_arn_parts = profile.federated_role_arn.split(":")
+                    if len(role_arn_parts) >= 5:
+                        sso_account_id = role_arn_parts[4]
+
+                # Auto-derive SSO region from profile.aws_region when not set
+                sso_region = getattr(profile, "claude_desktop_sso_region", "") or profile.aws_region
+
+                # Build zone config from existing GDPR isolation profile, if set
+                zone_config = getattr(profile, "claude_desktop_zone_config", {}) or {}
+                if not zone_config and getattr(profile, "enforce_project_isolation", False):
+                    # Auto-populate from existing zones list with standard region mapping
+                    zone_region_map = {
+                        "usa": ("us-east-1", "us-east-1", "us"),
+                        "us": ("us-east-1", "us-east-1", "us"),
+                        "europe": ("eu-west-3", "eu-west-1", "eu"),
+                        "eu": ("eu-west-1", "eu-west-1", "eu"),
+                    }
+                    for z in getattr(profile, "zones", []) or []:
+                        if z in zone_region_map:
+                            region, sso_r, prefix = zone_region_map[z]
+                            zone_config[z] = {
+                                "region": region,
+                                "sso_region": sso_r,
+                                "model_prefix": prefix,
+                            }
+
+                role_config = getattr(profile, "claude_desktop_role_config", {}) or {}
+                feature_defaults = getattr(profile, "claude_desktop_feature_defaults", {}) or {}
+                group_prefix = getattr(profile, "okta_group_prefix", "ccwb-") or "ccwb-"
+
                 params = [
                     f"OidcIssuerUrl={oidc_issuer_url}",
                     f"OidcClientId={profile.client_id}",
@@ -1077,6 +1112,14 @@ class DeployCommand(Command):
                     f"DefaultInferenceRegion={profile.aws_region}",
                     f"DefaultInferenceModels={inference_models}",
                     f"OtlpEndpoint={otlp_endpoint}",
+                    f"ZoneConfig={json.dumps(zone_config) if zone_config else ''}",
+                    f"RoleConfig={json.dumps(role_config) if role_config else ''}",
+                    f"FeatureDefaults={json.dumps(feature_defaults) if feature_defaults else ''}",
+                    f"GroupPrefix={group_prefix}",
+                    f"SsoStartUrl={getattr(profile, 'claude_desktop_sso_start_url', '') or ''}",
+                    f"SsoRegion={sso_region}",
+                    f"SsoAccountId={sso_account_id}",
+                    f"SsoRoleName={getattr(profile, 'claude_desktop_sso_role_name', '') or 'ClaudeDesktopBedrock'}",
                 ]
 
                 result = deploy_with_cf(
@@ -1087,7 +1130,7 @@ class DeployCommand(Command):
                     task_description="Deploying CoWork Bootstrap Server...",
                 )
 
-                # Display bootstrap URL on success
+                # Display bootstrap URL on success and save to profile
                 if result == 0:
                     outputs = get_stack_outputs(stack_name, profile.aws_region)
                     bootstrap_url = outputs.get("BootstrapUrl", "N/A")
@@ -1096,6 +1139,10 @@ class DeployCommand(Command):
                     console.print(
                         "\n[dim]Add this URL as 'bootstrapUrl' in your MDM anchor profile.[/dim]"
                     )
+                    # Persist endpoint to profile for trust-anchor generation
+                    if bootstrap_url and bootstrap_url != "N/A":
+                        profile.claude_desktop_bootstrap_endpoint = bootstrap_url
+                        Config.load().save_profile(profile)
 
                 return result
 

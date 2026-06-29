@@ -2068,48 +2068,51 @@ class InitCommand(Command):
         provider_domain = config_data.get("okta", {}).get("domain", "none") if sso_enabled else "none"
         client_id = config_data.get("okta", {}).get("client_id", "none") if sso_enabled else "none"
 
-        profile = Profile(
-            name=profile_name,
-            provider_domain=provider_domain,
-            client_id=client_id,
-            credential_storage=config_data.get("credential_storage", "session"),
-            aws_region=config_data["aws"]["region"],
-            identity_pool_name=config_data["aws"]["identity_pool_name"],
-            stack_names=config_data["aws"]["stacks"],
-            monitoring_enabled=config_data["monitoring"]["enabled"],
-            monitoring_config=monitoring_config,
-            analytics_enabled=(
+        # Fields gathered by the init wizard — overwritten on each ccwb init run.
+        # Fields managed elsewhere (federated_role_arn from deploy, otel_collector_endpoint,
+        # claude_desktop_bootstrap_endpoint, etc.) are preserved on existing profiles.
+        wizard_fields = {
+            "name": profile_name,
+            "provider_domain": provider_domain,
+            "client_id": client_id,
+            "credential_storage": config_data.get("credential_storage", "session"),
+            "aws_region": config_data["aws"]["region"],
+            "identity_pool_name": config_data["aws"]["identity_pool_name"],
+            "stack_names": config_data["aws"]["stacks"],
+            "monitoring_enabled": config_data["monitoring"]["enabled"],
+            "monitoring_config": monitoring_config,
+            "analytics_enabled": (
                 config_data.get("analytics", {}).get("enabled", True)
                 if config_data.get("monitoring", {}).get("enabled")
                 else False
             ),
-            allowed_bedrock_regions=config_data["aws"]["allowed_bedrock_regions"],
-            cross_region_profile=config_data["aws"].get("cross_region_profile", "us"),
-            selected_model=config_data["aws"].get("selected_model"),
-            selected_source_region=config_data["aws"].get("selected_source_region"),
-            provider_type=config_data.get("provider_type"),
-            cognito_user_pool_id=config_data.get("cognito_user_pool_id"),
-            federation_type=config_data.get("federation_type", "cognito"),
-            max_session_duration=config_data.get("max_session_duration", 28800),
-            project_attribution_enabled=config_data.get("project_attribution_enabled", False),
-            cost_attribution_tag_key=config_data.get("cost_attribution_tag_key", "Project"),
-            okta_auth_server_id=config_data.get("okta_auth_server_id", "default"),
-            enforce_project_isolation=config_data.get("enforce_project_isolation", False),
-            zones=config_data.get("zones", []) or [],
-            sso_enabled=config_data.get("sso_enabled", True),
-            azure_auth_mode=config_data.get("azure_auth_mode"),
-            client_certificate_path=config_data.get("client_certificate_path"),
-            client_certificate_key_path=config_data.get("client_certificate_key_path"),
-            enable_codebuild=config_data.get("codebuild", {}).get("enabled", False),
-            enable_distribution=config_data.get("distribution", {}).get("enabled", False),
-            distribution_type=config_data.get("distribution", {}).get("type"),
-            distribution_idp_provider=config_data.get("distribution", {}).get("idp_provider"),
-            distribution_idp_domain=config_data.get("distribution", {}).get("idp_domain"),
-            distribution_idp_client_id=config_data.get("distribution", {}).get("idp_client_id"),
-            distribution_idp_client_secret_arn=config_data.get("distribution", {}).get("idp_client_secret_arn"),
-            distribution_custom_domain=config_data.get("distribution", {}).get("custom_domain"),
-            distribution_hosted_zone_id=config_data.get("distribution", {}).get("hosted_zone_id"),
-            quota_monitoring_enabled=(
+            "allowed_bedrock_regions": config_data["aws"]["allowed_bedrock_regions"],
+            "cross_region_profile": config_data["aws"].get("cross_region_profile", "us"),
+            "selected_model": config_data["aws"].get("selected_model"),
+            "selected_source_region": config_data["aws"].get("selected_source_region"),
+            "provider_type": config_data.get("provider_type"),
+            "cognito_user_pool_id": config_data.get("cognito_user_pool_id"),
+            "federation_type": config_data.get("federation_type", "cognito"),
+            "max_session_duration": config_data.get("max_session_duration", 28800),
+            "project_attribution_enabled": config_data.get("project_attribution_enabled", False),
+            "cost_attribution_tag_key": config_data.get("cost_attribution_tag_key", "Project"),
+            "okta_auth_server_id": config_data.get("okta_auth_server_id", "default"),
+            "enforce_project_isolation": config_data.get("enforce_project_isolation", False),
+            "zones": config_data.get("zones", []) or [],
+            "sso_enabled": config_data.get("sso_enabled", True),
+            "azure_auth_mode": config_data.get("azure_auth_mode"),
+            "client_certificate_path": config_data.get("client_certificate_path"),
+            "client_certificate_key_path": config_data.get("client_certificate_key_path"),
+            "enable_codebuild": config_data.get("codebuild", {}).get("enabled", False),
+            "enable_distribution": config_data.get("distribution", {}).get("enabled", False),
+            "distribution_type": config_data.get("distribution", {}).get("type"),
+            "distribution_idp_provider": config_data.get("distribution", {}).get("idp_provider"),
+            "distribution_idp_domain": config_data.get("distribution", {}).get("idp_domain"),
+            "distribution_idp_client_id": config_data.get("distribution", {}).get("idp_client_id"),
+            "distribution_idp_client_secret_arn": config_data.get("distribution", {}).get("idp_client_secret_arn"),
+            "distribution_custom_domain": config_data.get("distribution", {}).get("custom_domain"),
+            "distribution_hosted_zone_id": config_data.get("distribution", {}).get("hosted_zone_id"),
+            "quota_monitoring_enabled": (
                 config_data.get("quota", {}).get("enabled", False)
                 if config_data.get("monitoring", {}).get("enabled")
                 else False
@@ -2122,7 +2125,6 @@ class InitCommand(Command):
             "daily_enforcement_mode": config_data.get("quota", {}).get("daily_enforcement_mode", "alert"),
             "monthly_enforcement_mode": config_data.get("quota", {}).get("monthly_enforcement_mode", "block"),
             "quota_check_interval": config_data.get("quota", {}).get("check_interval", 30),
-            "enable_bypass_detection": config_data.get("quota", {}).get("enable_bypass_detection", False),
             "cowork_3p_enabled": config_data.get("cowork_3p", {}).get("enabled", True),
             "cowork_3p_extra_keys": config_data.get("cowork_3p", {}).get("extra_keys", {}),
             "cowork_service_token": config_data.get("cowork_3p", {}).get("service_token", ""),
@@ -2131,18 +2133,14 @@ class InitCommand(Command):
             "cowork_chat_advanced_file_analysis": config_data.get("cowork_3p", {}).get(
                 "chat_advanced_file_analysis", True
             ),
-            "settings_target": "managed"
-            if (self._io and self.option("managed"))
-            else config_data.get("settings_target", "user"),
-            "lock_default_model": config_data.get("lock_default_model", False),
-            "tags": config_data.get("tags", {}),
-            "redirect_port": config_data.get("redirect_port"),
         }
 
+        # Look for an existing profile to update; otherwise create a new one.
+        existing_profile = config.get_profile(profile_name)
         if existing_profile:
             # Update existing profile — preserves fields not managed by the wizard
             # (e.g. include_coauthored_by, federated_role_arn, quota_fail_mode,
-            # otel_collector_endpoint, model_alias, okta_auth_server, etc.)
+            # otel_collector_endpoint, claude_desktop_bootstrap_endpoint, model_alias).
             for field, value in wizard_fields.items():
                 setattr(existing_profile, field, value)
             profile = existing_profile

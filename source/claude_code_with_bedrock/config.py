@@ -154,6 +154,21 @@ class Profile:
     )
     cowork_inference_session_lifetime_sec: int | None = None  # inferenceSessionLifetimeSec — re-auth reminder timer
 
+    # Claude Desktop Bootstrap — zone/role dynamic routing
+    claude_desktop_bootstrap_endpoint: str | None = None  # saved from deploy output
+    claude_desktop_bootstrap_oidc_client_id: str | None = None  # defaults to profile client_id
+    claude_desktop_sso_start_url: str = ""
+    claude_desktop_sso_region: str = ""
+    claude_desktop_sso_account_id: str = ""
+    claude_desktop_sso_role_name: str = "ClaudeDesktopBedrock"
+    claude_desktop_zone_config: dict = field(default_factory=dict)
+    claude_desktop_role_config: dict = field(default_factory=dict)
+    claude_desktop_feature_defaults: dict = field(default_factory=lambda: {
+        "chatTabEnabled": "true",
+        "coworkTabEnabled": "true",
+        "isClaudeCodeForDesktopEnabled": "true",
+    })
+
     # Legacy field support
     @property
     def okta_domain(self) -> str:
