@@ -1279,6 +1279,113 @@ class InitCommand(Command):
         if enable_cowork:
             console.print("[green]✓[/green] CoWork 3P configs will be generated during packaging")
 
+
+            # Preserve existing custom MDM keys; advise JSON editing for additions
+            existing_extra = config.get("cowork_3p", {}).get("extra_keys", {})
+            if existing_extra:
+                console.print(f"[dim]Custom MDM keys configured: {len(existing_extra)} key(s)[/dim]")
+            else:
+                console.print(
+                    "[dim]To add custom MDM keys (e.g. coworkWebSearchEnabled), edit your profile JSON directly.[/dim]"
+                )
+                console.print("[dim]See: assets/docs/COWORK_3P.md → Custom MDM Keys[/dim]")
+            config["cowork_3p"]["extra_keys"] = existing_extra
+
+            # Generate CoWork service token for ALB auth bypass (central mode only).
+            # CoWork can't do OIDC, so this static token in X-Cowork-Token header
+            # bypasses JWT validation on the ALB listener.
+            monitoring_mode = config.get("monitoring", {}).get("mode", "central")
+            if monitoring_mode == "central":
+                existing_token = config.get("cowork_3p", {}).get("service_token", "")
+                if not existing_token:
+                    import uuid
+
+                    token = str(uuid.uuid4())
+                    config["cowork_3p"]["service_token"] = token
+                    console.print("[green]✓[/green] Generated CoWork service token for ALB auth bypass")
+                    console.print(
+                        "[dim]  Pass this as CoWorkServiceToken parameter when deploying the monitoring stack[/dim]"
+                    )
+                else:
+                    console.print("[dim]CoWork service token already configured[/dim]")
+
+            # CoWork configuration delivery mode (OIDC only)
+            if config.get("auth_type", "oidc") == "oidc":
+                console.print("\n[bold]CoWork Configuration Delivery[/bold]")
+                console.print("How should CoWork clients receive their configuration?")
+                console.print("  • Static: MDM profile with inline config (default)")
+                console.print("  • Dynamic: Bootstrap server delivers per-user config at sign-in")
+
+                config_mode_choices = [
+                    questionary.Choice(
+                        "Static (default \u2014 MDM profile with inline config)", value="static"
+                    ),
+                    questionary.Choice(
+                        "Dynamic (bootstrap server \u2014 per-user config at sign-in)", value="dynamic"
+                    ),
+                ]
+                saved_config_mode = config.get("cowork", {}).get("config_mode", "static")
+                config_mode = questionary.select(
+                    "CoWork configuration delivery:",
+                    choices=config_mode_choices,
+                    default=saved_config_mode,
+                ).ask()
+
+                if "cowork" not in config:
+                    config["cowork"] = {}
+                config["cowork"]["config_mode"] = config_mode
+
+                if config_mode == "dynamic":
+                    console.print(
+                        "[green]\u2713[/green] Bootstrap server will be deployed with [cyan]ccwb deploy bootstrap[/cyan]"
+                    )
+                    console.print(
+                        "[dim]  Clients receive per-user config dynamically at sign-in via OIDC token exchange[/dim]"
+                    )
+                else:
+                    console.print("[green]\u2713[/green] Static MDM configuration (default)")
+
+        # Settings deployment target
+        console.print("\n[bold]Settings Deployment Target[/bold]")
+        console.print("Choose where Claude Code settings are installed on user machines:")
+        console.print("  • User scope: ~/.claude/settings.json (users can override)")
+        console.print("  • Managed (org enforcement): OS-level path (highest precedence, non-overridable)")
+
+        saved_target = config.get("settings_target", "user")
+        # --managed flag overrides the wizard default
+        if self._io and self.option("managed"):
+            saved_target = "managed"
+
+        settings_target_choices = [
+            questionary.Choice("User scope (~/.claude/settings.json)", value="user"),
+            questionary.Choice("Managed (organization-wide enforcement, requires sudo/admin)", value="managed"),
+        ]
+        settings_target = questionary.select(
+            "Settings deployment target:",
+            choices=settings_target_choices,
+            default=saved_target,
+        ).ask()
+        config["settings_target"] = settings_target or "user"
+
+        if config["settings_target"] == "managed":
+            console.print("[green]✓[/green] Settings will be deployed to OS-level managed path")
+            console.print("[dim]  Users will need sudo (Unix) or Administrator (Windows) to install[/dim]")
+
+            # Ask whether to lock model selection in managed settings
+            console.print()
+            saved_lock = config.get("lock_default_model", False)
+            lock_model = questionary.confirm(
+                "Lock default model for all users? (Prevents users from changing model via /model)",
+                default=saved_lock,
+            ).ask()
+            config["lock_default_model"] = lock_model if lock_model is not None else False
+            if not config["lock_default_model"]:
+                console.print("[green]✓[/green] Users can freely select models via /model (CRIS routing still applied)")
+            else:
+                console.print("[yellow]![/yellow] Default model will be enforced for all users via managed-settings")
+        else:
+            console.print("[green]✓[/green] Settings will be deployed to user-scope path")
+
         # Package distribution support
         console.print("\n[bold]Package Distribution[/bold]")
         console.print("Choose how to distribute Claude Code packages to end users:")
@@ -2007,16 +2114,41 @@ class InitCommand(Command):
                 if config_data.get("monitoring", {}).get("enabled")
                 else False
             ),
-            monthly_token_limit=config_data.get("quota", {}).get("monthly_limit", 300000000),
-            warning_threshold_80=config_data.get("quota", {}).get("warning_threshold_80", 240000000),
-            warning_threshold_90=config_data.get("quota", {}).get("warning_threshold_90", 270000000),
-            daily_token_limit=config_data.get("quota", {}).get("daily_limit"),
-            burst_buffer_percent=config_data.get("quota", {}).get("burst_buffer_percent", 10),
-            daily_enforcement_mode=config_data.get("quota", {}).get("daily_enforcement_mode", "alert"),
-            monthly_enforcement_mode=config_data.get("quota", {}).get("monthly_enforcement_mode", "block"),
-            quota_check_interval=config_data.get("quota", {}).get("check_interval", 30),
-            cowork_3p_enabled=config_data.get("cowork_3p", {}).get("enabled", True),
-        )
+            "monthly_token_limit": config_data.get("quota", {}).get("monthly_limit", 300000000),
+            "warning_threshold_80": config_data.get("quota", {}).get("warning_threshold_80", 240000000),
+            "warning_threshold_90": config_data.get("quota", {}).get("warning_threshold_90", 270000000),
+            "daily_token_limit": config_data.get("quota", {}).get("daily_limit"),
+            "burst_buffer_percent": config_data.get("quota", {}).get("burst_buffer_percent", 10),
+            "daily_enforcement_mode": config_data.get("quota", {}).get("daily_enforcement_mode", "alert"),
+            "monthly_enforcement_mode": config_data.get("quota", {}).get("monthly_enforcement_mode", "block"),
+            "quota_check_interval": config_data.get("quota", {}).get("check_interval", 30),
+            "enable_bypass_detection": config_data.get("quota", {}).get("enable_bypass_detection", False),
+            "cowork_3p_enabled": config_data.get("cowork_3p", {}).get("enabled", True),
+            "cowork_3p_extra_keys": config_data.get("cowork_3p", {}).get("extra_keys", {}),
+            "cowork_service_token": config_data.get("cowork_3p", {}).get("service_token", ""),
+            "cowork_config_mode": config_data.get("cowork", {}).get("config_mode", "static"),
+            "cowork_chat_tab_enabled": config_data.get("cowork_3p", {}).get("chat_tab_enabled", True),
+            "cowork_chat_advanced_file_analysis": config_data.get("cowork_3p", {}).get(
+                "chat_advanced_file_analysis", True
+            ),
+            "settings_target": "managed"
+            if (self._io and self.option("managed"))
+            else config_data.get("settings_target", "user"),
+            "lock_default_model": config_data.get("lock_default_model", False),
+            "tags": config_data.get("tags", {}),
+            "redirect_port": config_data.get("redirect_port"),
+        }
+
+        if existing_profile:
+            # Update existing profile — preserves fields not managed by the wizard
+            # (e.g. include_coauthored_by, federated_role_arn, quota_fail_mode,
+            # otel_collector_endpoint, model_alias, okta_auth_server, etc.)
+            for field, value in wizard_fields.items():
+                setattr(existing_profile, field, value)
+            profile = existing_profile
+        else:
+            # New profile — construct from scratch
+            profile = Profile(**wizard_fields)
 
         config.add_profile(profile)
         # Set as active profile when creating/updating
@@ -2317,6 +2449,12 @@ class InitCommand(Command):
 
             # Add CoWork 3P configuration
             existing_config["cowork_3p"] = {"enabled": profile.cowork_3p_enabled}
+
+            # Add CoWork dynamic config mode
+            if profile.cowork_config_mode and profile.cowork_config_mode != "static":
+                if "cowork" not in existing_config:
+                    existing_config["cowork"] = {}
+                existing_config["cowork"]["config_mode"] = profile.cowork_config_mode
 
             # Add distribution configuration if present
             if hasattr(profile, "enable_distribution"):
