@@ -149,7 +149,7 @@ class TestLambdaHandler:
 
         # Check required fields
         assert body["inferenceProvider"] == "bedrock"
-        assert body["inferenceRegion"] == "us-west-2"
+        assert body["inferenceBedrockRegion"] == "us-west-2"
         assert body["inferenceModels"] == [
             "us.anthropic.claude-sonnet-4-20250514-v1:0",
             "us.anthropic.claude-opus-4-20250514-v1:0",
@@ -297,7 +297,7 @@ class TestBuildConfigResponse:
         config = reload_handler._build_config_response(claims)
 
         assert config["inferenceProvider"] == "bedrock"
-        assert config["inferenceRegion"] == "us-west-2"
+        assert config["inferenceBedrockRegion"] == "us-west-2"
         assert isinstance(config["inferenceModels"], list)
         assert config["inferenceSessionLifetimeSec"] == 14400
         assert "expiresAt" in config
@@ -319,3 +319,127 @@ class TestBuildConfigResponse:
         config = reload_handler._build_config_response(claims)
 
         assert config["user"]["email"] == "user-sub-id"
+
+
+class TestZoneRouting:
+    """Tests for zone-based dynamic region routing."""
+
+    @pytest.fixture
+    def zone_env(self, monkeypatch):
+        """Set zone/role config env vars."""
+        zone_config = {
+            "usa": {"region": "us-east-1", "sso_region": "us-east-1", "model_prefix": "us"},
+            "europe": {"region": "eu-west-3", "sso_region": "eu-west-1", "model_prefix": "eu"},
+        }
+        role_config = {
+            "consulting": {
+                "models": ["claude-opus-4-6-v1:0", "claude-sonnet-4-6-v1:0"],
+                "max_tokens_per_window": "5000000",
+            },
+            "engineering": {
+                "models": ["claude-opus-4-6-v1:0", "claude-sonnet-4-6-v1:0", "claude-haiku-4-5-v1:0"],
+                "max_tokens_per_window": "10000000",
+                "mcp_servers": [{"name": "github", "url": "https://mcp.example.com/github"}],
+            },
+        }
+        feature_defaults = {
+            "chatTabEnabled": "true",
+            "coworkTabEnabled": "true",
+            "isClaudeCodeForDesktopEnabled": "true",
+        }
+        monkeypatch.setenv("ZONE_CONFIG", json.dumps(zone_config))
+        monkeypatch.setenv("ROLE_CONFIG", json.dumps(role_config))
+        monkeypatch.setenv("FEATURE_DEFAULTS", json.dumps(feature_defaults))
+        monkeypatch.setenv("GROUP_PREFIX", "ccwb-")
+        monkeypatch.setenv("SSO_START_URL", "https://d-1234567890.awsapps.com/start")
+        monkeypatch.setenv("SSO_REGION", "us-east-1")
+        monkeypatch.setenv("SSO_ACCOUNT_ID", "123456789012")
+        monkeypatch.setenv("SSO_ROLE_NAME", "ClaudeDesktopBedrock")
+
+    def test_europe_zone_routing(self, reload_handler, zone_env):
+        """User in ccwb-europe-beta group gets eu-west-3 region."""
+        claims = {"sub": "u1", "email": "u@ex.com", "groups": ["ccwb-europe-beta"]}
+        config = reload_handler._build_config_response(claims)
+
+        assert config["inferenceBedrockRegion"] == "eu-west-3"
+        assert config["inferenceBedrockSsoRegion"] == "eu-west-1"
+
+    def test_usa_zone_routing(self, reload_handler, zone_env):
+        """User in ccwb-usa-alpha group gets us-east-1 region."""
+        claims = {"sub": "u2", "email": "u2@ex.com", "groups": ["ccwb-usa-alpha"]}
+        config = reload_handler._build_config_response(claims)
+
+        assert config["inferenceBedrockRegion"] == "us-east-1"
+        assert config["inferenceBedrockSsoRegion"] == "us-east-1"
+
+    def test_no_zone_uses_default(self, reload_handler, zone_env):
+        """User with no matching zone group gets default region."""
+        claims = {"sub": "u3", "email": "u3@ex.com", "groups": ["other-group"]}
+        config = reload_handler._build_config_response(claims)
+
+        assert config["inferenceBedrockRegion"] == "us-west-2"  # DEFAULT_INFERENCE_REGION
+
+    def test_role_sets_models_with_zone_prefix(self, reload_handler, zone_env):
+        """Consulting role in Europe zone gets eu-prefixed models."""
+        claims = {"sub": "u4", "groups": ["ccwb-europe-beta", "ccwb-consulting"]}
+        config = reload_handler._build_config_response(claims)
+
+        assert "eu.anthropic.claude-opus-4-6-v1:0" in config["inferenceModels"]
+        assert "eu.anthropic.claude-sonnet-4-6-v1:0" in config["inferenceModels"]
+
+    def test_role_sets_models_with_us_prefix(self, reload_handler, zone_env):
+        """Engineering role in USA zone gets us-prefixed models."""
+        claims = {"sub": "u5", "groups": ["ccwb-usa-alpha", "ccwb-engineering"]}
+        config = reload_handler._build_config_response(claims)
+
+        assert "us.anthropic.claude-opus-4-6-v1:0" in config["inferenceModels"]
+        assert "us.anthropic.claude-haiku-4-5-v1:0" in config["inferenceModels"]
+
+    def test_role_sets_spend_cap(self, reload_handler, zone_env):
+        """Role config sets max_tokens_per_window."""
+        claims = {"sub": "u6", "groups": ["ccwb-usa-alpha", "ccwb-consulting"]}
+        config = reload_handler._build_config_response(claims)
+
+        assert config["inferenceMaxTokensPerWindow"] == "5000000"
+
+    def test_role_sets_mcp_servers(self, reload_handler, zone_env):
+        """Engineering role gets MCP servers."""
+        claims = {"sub": "u7", "groups": ["ccwb-usa-alpha", "ccwb-engineering"]}
+        config = reload_handler._build_config_response(claims)
+
+        assert "managedMcpServers" in config
+        mcp = json.loads(config["managedMcpServers"])
+        assert mcp[0]["name"] == "github"
+
+    def test_sso_config_included(self, reload_handler, zone_env):
+        """SSO config fields included when SSO_START_URL is set."""
+        claims = {"sub": "u8", "groups": ["ccwb-usa-alpha"]}
+        config = reload_handler._build_config_response(claims)
+
+        assert config["inferenceBedrockSsoStartUrl"] == "https://d-1234567890.awsapps.com/start"
+        assert config["inferenceBedrockSsoAccountId"] == "123456789012"
+        assert config["inferenceBedrockSsoRoleName"] == "ClaudeDesktopBedrock"
+
+    def test_feature_defaults_applied(self, reload_handler, zone_env):
+        """Feature toggle defaults are included in response."""
+        claims = {"sub": "u9", "groups": []}
+        config = reload_handler._build_config_response(claims)
+
+        assert config["chatTabEnabled"] == "true"
+        assert config["coworkTabEnabled"] == "true"
+
+    def test_zone_banner_set(self, reload_handler, zone_env):
+        """Zone banner is set when zone is resolved."""
+        claims = {"sub": "u10", "groups": ["ccwb-europe-beta"]}
+        config = reload_handler._build_config_response(claims)
+
+        assert "banner" in config
+        banner = json.loads(config["banner"])
+        assert "EUROPE" in banner["text"]
+
+    def test_no_banner_without_zone(self, reload_handler, zone_env):
+        """No banner when no zone is resolved."""
+        claims = {"sub": "u11", "groups": ["unrelated"]}
+        config = reload_handler._build_config_response(claims)
+
+        assert "banner" not in config

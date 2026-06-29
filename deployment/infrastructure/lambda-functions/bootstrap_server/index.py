@@ -34,6 +34,32 @@ DEFAULT_INFERENCE_MODELS = os.environ.get("DEFAULT_INFERENCE_MODELS", "")
 OTLP_ENDPOINT = os.environ.get("OTLP_ENDPOINT", "")
 INFERENCE_SESSION_LIFETIME_SEC = int(os.environ.get("INFERENCE_SESSION_LIFETIME_SEC", "28800"))
 
+# Zone/role-based dynamic routing — read at invocation time (not module load)
+# to support Lambda env var updates without cold-start requirement.
+def _get_zone_config():
+    return os.environ.get("ZONE_CONFIG", "")
+
+def _get_role_config():
+    return os.environ.get("ROLE_CONFIG", "")
+
+def _get_feature_defaults():
+    return os.environ.get("FEATURE_DEFAULTS", "")
+
+def _get_group_prefix():
+    return os.environ.get("GROUP_PREFIX", "ccwb-")
+
+def _get_sso_start_url():
+    return os.environ.get("SSO_START_URL", "")
+
+def _get_sso_region():
+    return os.environ.get("SSO_REGION", "")
+
+def _get_sso_account_id():
+    return os.environ.get("SSO_ACCOUNT_ID", "")
+
+def _get_sso_role_name():
+    return os.environ.get("SSO_ROLE_NAME", "")
+
 # JWKS cache (module-level for Lambda container reuse)
 _jwks_client = None
 _jwks_cache = None
@@ -120,35 +146,87 @@ def _validate_token(token: str) -> dict:
         raise ValueError(f"Token validation failed: {str(e)}")
 
 
+def _resolve_zone(groups: list[str], zone_config: dict, prefix: str) -> dict | None:
+    """Resolve user's zone from their group memberships.
+
+    Matches the first group starting with prefix followed by a zone name.
+    E.g., groups=["ccwb-europe-beta"], zones={"europe": {...}} → returns europe config.
+    """
+    for group in groups:
+        if not group.startswith(prefix):
+            continue
+        suffix = group[len(prefix):]
+        for zone_name in zone_config:
+            if suffix.startswith(zone_name):
+                return {"name": zone_name, **zone_config[zone_name]}
+    return None
+
+
+def _resolve_role(groups: list[str], role_config: dict, prefix: str) -> dict | None:
+    """Resolve user's role from their group memberships.
+
+    Matches groups where the suffix after prefix equals or starts with a role name.
+    E.g., groups=["ccwb-consulting"], roles={"consulting": {...}} → returns consulting config.
+    """
+    for group in groups:
+        if not group.startswith(prefix):
+            continue
+        suffix = group[len(prefix):]
+        for role_name in role_config:
+            if suffix == role_name or suffix.startswith(role_name + "-"):
+                return {"name": role_name, **role_config[role_name]}
+    return None
+
+
 def _build_config_response(claims: dict) -> dict:
     """Build the configuration response for a validated user.
 
-    Args:
-        claims: Decoded JWT claims
+    When ZONE_CONFIG is set, resolves the user's zone from their group claims
+    to determine the Bedrock region. When ROLE_CONFIG is set, resolves models
+    and feature policies from role groups.
 
-    Returns:
-        Configuration dict for the CoWork client
+    Falls back to static defaults when zone/role config is not provided,
+    maintaining backward compatibility with upstream behavior.
     """
     user_sub = claims.get("sub", "unknown")
     user_email = claims.get("email", claims.get("preferred_username", user_sub))
+    groups = claims.get("groups", [])
 
-    # Calculate expiration (1 hour from now)
     expires_at = int(time.time()) + 3600
 
-    # Build OTLP headers with user identity
-    otlp_headers = {}
-    if OTLP_ENDPOINT:
-        otlp_headers = {
-            "x-user-id": user_sub,
-            "x-user-email": user_email,
-        }
+    # Read dynamic config from environment at invocation time
+    zone_config_raw = _get_zone_config()
+    role_config_raw = _get_role_config()
+    feature_defaults_raw = _get_feature_defaults()
+    prefix = _get_group_prefix()
+    sso_start_url = _get_sso_start_url()
+    sso_region_env = _get_sso_region()
+    sso_account_id = _get_sso_account_id()
+    sso_role_name = _get_sso_role_name()
 
-    # Parse models list
-    models = [m.strip() for m in DEFAULT_INFERENCE_MODELS.split(",") if m.strip()]
+    zone_config = json.loads(zone_config_raw) if zone_config_raw else {}
+    role_config = json.loads(role_config_raw) if role_config_raw else {}
+    feature_defaults = json.loads(feature_defaults_raw) if feature_defaults_raw else {}
+
+    # Resolve zone → determines region
+    resolved_zone = _resolve_zone(groups, zone_config, prefix) if zone_config else None
+    inference_region = resolved_zone["region"] if resolved_zone else DEFAULT_INFERENCE_REGION
+    sso_region = resolved_zone.get("sso_region", inference_region) if resolved_zone else sso_region_env
+
+    # Resolve role → determines models, spend caps, MCP servers
+    resolved_role = _resolve_role(groups, role_config, prefix) if role_config else None
+
+    # Determine models: role-specific (with zone prefix) > role-specific > default
+    if resolved_role and "models" in resolved_role:
+        model_prefix = resolved_zone.get("model_prefix", "us") if resolved_zone else "us"
+        models = [f"{model_prefix}.anthropic.{m}" if not m.startswith(model_prefix) else m
+                  for m in resolved_role["models"]]
+    else:
+        models = [m.strip() for m in DEFAULT_INFERENCE_MODELS.split(",") if m.strip()]
 
     config = {
         "inferenceProvider": "bedrock",
-        "inferenceRegion": DEFAULT_INFERENCE_REGION,
+        "inferenceBedrockRegion": inference_region,
         "inferenceModels": models,
         "inferenceSessionLifetimeSec": INFERENCE_SESSION_LIFETIME_SEC,
         "expiresAt": expires_at,
@@ -158,10 +236,43 @@ def _build_config_response(claims: dict) -> dict:
         },
     }
 
-    # Add OTEL configuration if endpoint is set
+    # IAM Identity Center SSO config (for Interactive sign-in on the client)
+    if sso_start_url:
+        config["inferenceBedrockSsoStartUrl"] = sso_start_url
+        config["inferenceBedrockSsoRegion"] = sso_region or sso_region_env
+        config["inferenceBedrockSsoAccountId"] = sso_account_id
+        config["inferenceBedrockSsoRoleName"] = sso_role_name
+
+    # Feature toggles (from defaults, overridable by role)
+    for key, value in feature_defaults.items():
+        config[key] = value
+    if resolved_role:
+        for key in ("max_tokens_per_window", "token_window_hours"):
+            if key in resolved_role:
+                camel_key = "inferenceMaxTokensPerWindow" if key == "max_tokens_per_window" else "inferenceTokenWindowHours"
+                config[camel_key] = str(resolved_role[key])
+        if "mcp_servers" in resolved_role:
+            config["managedMcpServers"] = json.dumps(resolved_role["mcp_servers"])
+        if "egress_allowed_hosts" in resolved_role:
+            config["coworkEgressAllowedHosts"] = json.dumps(resolved_role["egress_allowed_hosts"])
+
+    # OTel configuration
     if OTLP_ENDPOINT:
         config["otlpEndpoint"] = OTLP_ENDPOINT
-        config["otlpHeaders"] = otlp_headers
+        config["otlpProtocol"] = "http/protobuf"
+        config["otlpHeaders"] = {
+            "x-user-id": user_sub,
+            "x-user-email": user_email,
+        }
+
+    # Zone banner (visual indicator for the user)
+    if resolved_zone:
+        zone_display = resolved_zone["name"].upper()
+        config["banner"] = json.dumps({
+            "text": f"Claude Desktop — {zone_display} Zone",
+            "backgroundColor": "#1565c0",
+            "textColor": "#ffffff",
+        })
 
     return config
 

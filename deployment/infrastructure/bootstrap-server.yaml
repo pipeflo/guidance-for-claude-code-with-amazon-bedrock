@@ -48,6 +48,46 @@ Parameters:
     MinValue: 3600
     MaxValue: 86400
 
+  ZoneConfig:
+    Type: String
+    Description: "JSON mapping of zone names to region config (e.g. {\"usa\":{\"region\":\"us-east-1\",\"sso_region\":\"us-east-1\",\"model_prefix\":\"us\"}})"
+    Default: ""
+
+  RoleConfig:
+    Type: String
+    Description: "JSON mapping of role names to model/MCP config (e.g. {\"consulting\":{\"models\":[\"claude-opus-4-6-v1:0\"],\"max_tokens_per_window\":\"5000000\"}})"
+    Default: ""
+
+  FeatureDefaults:
+    Type: String
+    Description: "JSON of default feature toggles (e.g. {\"chatTabEnabled\":\"true\",\"coworkTabEnabled\":\"true\"})"
+    Default: ""
+
+  GroupPrefix:
+    Type: String
+    Description: "Okta group name prefix for zone/role matching"
+    Default: "ccwb-"
+
+  SsoStartUrl:
+    Type: String
+    Description: "IAM Identity Center start URL (e.g. https://d-xxxxxxxxxx.awsapps.com/start)"
+    Default: ""
+
+  SsoRegion:
+    Type: String
+    Description: "IAM Identity Center region"
+    Default: ""
+
+  SsoAccountId:
+    Type: String
+    Description: "AWS account ID for Bedrock access via Identity Center"
+    Default: ""
+
+  SsoRoleName:
+    Type: String
+    Description: "IAM Identity Center permission set role name"
+    Default: ""
+
 Resources:
   BootstrapFunction:
     Type: AWS::Lambda::Function
@@ -71,6 +111,14 @@ Resources:
           DEFAULT_INFERENCE_MODELS: !Ref DefaultInferenceModels
           OTLP_ENDPOINT: !Ref OtlpEndpoint
           INFERENCE_SESSION_LIFETIME_SEC: !Ref InferenceSessionLifetimeSec
+          ZONE_CONFIG: !Ref ZoneConfig
+          ROLE_CONFIG: !Ref RoleConfig
+          FEATURE_DEFAULTS: !Ref FeatureDefaults
+          GROUP_PREFIX: !Ref GroupPrefix
+          SSO_START_URL: !Ref SsoStartUrl
+          SSO_REGION: !Ref SsoRegion
+          SSO_ACCOUNT_ID: !Ref SsoAccountId
+          SSO_ROLE_NAME: !Ref SsoRoleName
       Role: !GetAtt BootstrapFunctionRole.Arn
       Tags:
         - Key: Application
