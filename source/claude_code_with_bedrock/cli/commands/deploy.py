@@ -1123,15 +1123,31 @@ class DeployCommand(Command):
                 max_session_duration = getattr(profile, "max_session_duration", 43200) or 43200
 
                 # Audience the JWT authorizer validates on the access token Claude
-                # Desktop sends. Explicit profile value wins; else for Okta the
-                # custom-auth-server access token carries aud="api://<server>"
-                # (api://default for the default server), NOT the client_id; other
-                # providers use the client_id as the access-token audience.
+                # Desktop sends. This is the audience the admin set on their Okta
+                # authorization server — an OPAQUE, admin-chosen value that is NOT
+                # derivable from the server ID and NOT in OIDC discovery. So:
+                #   1. explicit profile value (claude_desktop_token_audience) always wins
+                #   2. Okta 'default' server has a fixed, well-known audience api://default
+                #   3. a custom Okta server: we cannot guess — require the profile value
+                #   4. non-Okta providers: access-token aud is the client_id
                 token_audience = getattr(profile, "claude_desktop_token_audience", "") or ""
                 if not token_audience:
                     if profile.provider_type == "okta":
                         auth_server = getattr(profile, "okta_auth_server_id", "default") or "default"
-                        token_audience = "api://default" if auth_server == "default" else f"api://{auth_server}"
+                        if auth_server == "default":
+                            token_audience = "api://default"
+                        else:
+                            console.print(
+                                "[red]Claude Desktop bootstrap needs the audience of your Okta "
+                                "authorization server, which can't be derived automatically.[/red]"
+                            )
+                            console.print(
+                                f"[dim]Find it in Okta: Security → API → Authorization Servers → "
+                                f"(server {auth_server}) → Settings → Audience. Then set it in your "
+                                f"profile as \"claude_desktop_token_audience\" and re-run "
+                                f"'ccwb deploy bootstrap'.[/dim]"
+                            )
+                            return 1
                     else:
                         token_audience = profile.client_id
 

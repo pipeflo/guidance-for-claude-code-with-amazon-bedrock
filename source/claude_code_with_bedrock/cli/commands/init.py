@@ -880,6 +880,28 @@ class InitCommand(Command):
                         return None
                     config["okta_auth_server_id"] = cas_id.strip() or "default"
 
+                    # Audience of that authorization server — needed by the Claude
+                    # Desktop bootstrap JWT authorizer to validate the access token.
+                    # It's an admin-chosen value (Okta: Security → API → Authorization
+                    # Servers → <server> → Settings → Audience), NOT derivable from the
+                    # server ID. The 'default' server's audience is always api://default.
+                    default_aud = config.get("claude_desktop_token_audience", "") or (
+                        "api://default" if config["okta_auth_server_id"] == "default" else ""
+                    )
+                    token_aud = questionary.text(
+                        "Okta authorization server Audience (for Claude Desktop):",
+                        default=default_aud,
+                        instruction=(
+                            "(The 'Audience' value on that Okta authorization server. "
+                            "For the 'default' server it's api://default. For a custom server "
+                            "use exactly what your admin set — e.g. api://claude or a URL. "
+                            "Only used by Claude Desktop bootstrap; press Enter to skip if unsure.)"
+                        ),
+                    ).ask()
+                    if token_aud is None:
+                        return None
+                    config["claude_desktop_token_audience"] = token_aud.strip()
+
                 # GDPR per-zone inference-profile isolation. Only meaningful
                 # when attribution is already on (we need the principal tag
                 # path to deliver Zone alongside Project). Optional; default
@@ -2166,6 +2188,7 @@ class InitCommand(Command):
             "project_attribution_enabled": config_data.get("project_attribution_enabled", False),
             "cost_attribution_tag_key": config_data.get("cost_attribution_tag_key", "Project"),
             "okta_auth_server_id": config_data.get("okta_auth_server_id", "default"),
+            "claude_desktop_token_audience": config_data.get("claude_desktop_token_audience", ""),
             "enforce_project_isolation": config_data.get("enforce_project_isolation", False),
             "zones": config_data.get("zones", []) or [],
             "okta_group_prefix": config_data.get("okta_group_prefix"),
@@ -2578,6 +2601,9 @@ class InitCommand(Command):
                 profile, "cost_attribution_tag_key", "Project"
             )
             existing_config["okta_auth_server_id"] = getattr(profile, "okta_auth_server_id", "default")
+            existing_config["claude_desktop_token_audience"] = getattr(
+                profile, "claude_desktop_token_audience", ""
+            )
             existing_config["enforce_project_isolation"] = getattr(
                 profile, "enforce_project_isolation", False
             )
