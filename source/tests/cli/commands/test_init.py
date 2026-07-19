@@ -528,6 +528,32 @@ class TestExistingConfigRoundTrip:
         assert existing["okta_group_prefix"] == "ccwb-"
 
 
+class TestGatherConfigurationScoping:
+    """Regression: _gather_configuration must not reference `config_data`.
+
+    That name is the parameter of _save_configuration; inside the wizard the
+    dict is named `config`. A stray `config_data` reference only blows up on
+    the interactive path (needs a TTY), so unit tests can't reach it — this
+    static AST check catches it instead.
+    """
+
+    def test_no_config_data_reference(self):
+        import ast
+        import inspect
+
+        from claude_code_with_bedrock.cli.commands.init import InitCommand
+
+        src = inspect.getsource(InitCommand._gather_configuration)
+        tree = ast.parse(src.strip())
+        names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+
+        assert "config_data" not in names, (
+            "_gather_configuration references 'config_data' (undefined here — "
+            "the wizard dict is named 'config'). This raises NameError on the "
+            "interactive path."
+        )
+
+
 if __name__ == "__main__":
     # Run the tests
     pytest.main([__file__, "-v"])

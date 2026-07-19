@@ -1364,12 +1364,12 @@ class InitCommand(Command):
                         "for Bedrock credentials. We'll auto-populate what we can from your profile.[/dim]"
                     )
 
-                    # Auto-derive defaults from existing config_data
+                    # Auto-derive defaults from the in-progress config dict
                     saved_cd = config.get("claude_desktop", {})
-                    aws_region = config_data.get("aws", {}).get("region", "us-east-1")
+                    aws_region = config.get("aws", {}).get("region", "us-east-1")
 
                     # Account ID from federated_role_arn if present
-                    federated_arn = config_data.get("aws", {}).get("federated_role_arn", "")
+                    federated_arn = config.get("aws", {}).get("federated_role_arn", "")
                     derived_account = ""
                     if federated_arn and ":" in federated_arn:
                         parts = federated_arn.split(":")
@@ -1405,7 +1405,7 @@ class InitCommand(Command):
                     config["claude_desktop"]["sso_role_name"] = cd_sso_role_name
 
                     # Auto-build zone config if GDPR zones are already configured
-                    if config_data.get("enforce_project_isolation") and config_data.get("zones"):
+                    if config.get("enforce_project_isolation") and config.get("zones"):
                         zone_region_map = {
                             "usa": ("us-east-1", "us-east-1", "us"),
                             "us": ("us-east-1", "us-east-1", "us"),
@@ -1414,7 +1414,7 @@ class InitCommand(Command):
                             "apac": ("ap-northeast-1", "ap-northeast-1", "apac"),
                         }
                         zone_config_built = {}
-                        for z in config_data["zones"]:
+                        for z in config["zones"]:
                             if z in zone_region_map:
                                 region, sso_r, prefix = zone_region_map[z]
                                 zone_config_built[z] = {
