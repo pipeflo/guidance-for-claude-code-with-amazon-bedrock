@@ -46,9 +46,6 @@ INFERENCE_SESSION_LIFETIME_SEC = int(os.environ.get("INFERENCE_SESSION_LIFETIME_
 
 # Zone/role-based dynamic routing + broker config — read at invocation time
 # (not module load) so Lambda env var updates take effect without a cold start.
-def _get_zone_config():
-    return os.environ.get("ZONE_CONFIG", "")
-
 def _get_role_config():
     return os.environ.get("ROLE_CONFIG", "")
 
@@ -209,20 +206,39 @@ def _group_suffix(group: str, prefix: str) -> str | None:
     return rest.lstrip("-")  # drop the separator so remainder starts at the zone/role
 
 
-def _resolve_zone(groups: list[str], zone_config: dict, prefix: str) -> dict | None:
-    """Resolve user's zone from their group memberships.
+def _resolve_zone_name(claims: dict, prefix: str) -> str | None:
+    """Determine the user's zone name — the SAME value STS uses as the Zone
+    session tag, so routing and IAM enforcement always agree.
 
-    Matches the first group whose <prefix>-stripped remainder begins with a zone
-    name. E.g. groups=["ccwb-us-alpha"], zones={"us": {...}} → returns us config.
+    Primary source: the token's Zone tag claim
+    (https://aws.amazon.com/tags/principal_tags/<ZoneTagKey>) — this is what Okta
+    computed and what STS applies. Fallback: parse it from the group name
+    (<prefix>-<zone>-<project>) when the tag claim isn't present.
+
+    There is NO configured zone allow-list: the set of valid zones is defined by
+    which application inference profiles exist (created via `ccwb inference-zone
+    create`, discovered here by tag). Returns the zone name or None.
     """
-    for group in groups:
+    zone_tag_key = _get_zone_tag_key()
+    # 1. Flat tag claim (Okta access token): https://aws.amazon.com/tags/principal_tags/<key>
+    flat = claims.get(f"https://aws.amazon.com/tags/principal_tags/{zone_tag_key}")
+    if isinstance(flat, str) and flat.strip():
+        return flat.strip()
+    # 2. Nested tag claim: {"principal_tags": {"<key>": ["<zone>"]}}
+    nested = claims.get("https://aws.amazon.com/tags")
+    if isinstance(nested, dict):
+        vals = (nested.get("principal_tags") or {}).get(zone_tag_key)
+        if isinstance(vals, list) and vals:
+            return str(vals[0]).strip()
+        if isinstance(vals, str) and vals.strip():
+            return vals.strip()
+    # 3. Fallback: derive from the group name <prefix>-<zone>-<project>
+    for group in claims.get("groups", []) or []:
         suffix = _group_suffix(group, prefix)
-        if suffix is None:
-            continue
-        for zone_name in zone_config:
-            # match "<zone>" exactly or "<zone>-<project>"
-            if suffix == zone_name or suffix.startswith(zone_name + "-"):
-                return {"name": zone_name, **zone_config[zone_name]}
+        if suffix:
+            zone = suffix.split("-")[0]
+            if zone:
+                return zone
     return None
 
 
@@ -323,54 +339,41 @@ def _build_config_response(claims: dict, user_token: str) -> dict:
     """
     user_sub = claims.get("sub", "unknown")
     user_email = claims.get("email", claims.get("preferred_username", user_sub))
-    groups = claims.get("groups", [])
 
     # Read dynamic config from environment at invocation time
-    zone_config_raw = _get_zone_config()
     role_config_raw = _get_role_config()
     feature_defaults_raw = _get_feature_defaults()
     prefix = _get_group_prefix()
     role_arn = _get_federated_role_arn()
 
-    zone_config = json.loads(zone_config_raw) if zone_config_raw else {}
     role_config = json.loads(role_config_raw) if role_config_raw else {}
     feature_defaults = json.loads(feature_defaults_raw) if feature_defaults_raw else {}
 
     if not role_arn:
         raise RuntimeError("FEDERATED_ROLE_ARN is not configured on the bootstrap Lambda")
 
-    # Resolve the zone NAME from the user's groups. zone_config keys are the set of
-    # valid zone names (region/ARNs are discovered live, not read from here).
-    resolved_zone = _resolve_zone(groups, zone_config, prefix) if zone_config else None
-    resolved_role = _resolve_role(groups, role_config, prefix) if role_config else None
+    # The user's zone comes from the token's Zone tag claim (what STS uses as the
+    # session tag) — falling back to the group name. There is NO configured zone
+    # allow-list: valid zones are exactly the ones with inference profiles created
+    # via `ccwb inference-zone create`, discovered below by tag.
+    zone_name = _resolve_zone_name(claims, prefix)
+    resolved_role = _resolve_role(claims.get("groups", []) or [], role_config, prefix) if role_config else None
 
-    # Under GDPR isolation (zone routing configured) a user matching no zone is a
-    # hard error — never fall back to a CRIS default that Bedrock would AccessDeny.
-    if zone_config and not resolved_zone:
-        raise RuntimeError(
-            f"User groups {groups!r} match no configured zone "
-            f"(zones: {list(zone_config)}). Check the user's IdP group vs the "
-            f"configured zones / okta_group_prefix."
-        )
-
-    # Exchange the user's token for STS credentials ONCE. These same creds are used
-    # both to discover the zone's inference profiles and to mint the bearer token,
-    # so discovery runs as the user (respecting their zone-scoped permissions).
+    # Exchange the user's token for STS credentials ONCE. Same creds discover the
+    # zone's inference profiles and mint the bearer token, so discovery runs as the
+    # user (respecting their zone-scoped permissions).
     creds = _assume_role_with_token(user_token, role_arn, claims)
 
-    # Determine region + model list.
-    if resolved_zone:
-        # DISCOVER the zone's application-inference-profile ARNs live, by Zone tag,
-        # across the configured regions. Region for inference = where the profiles
-        # actually live (from the profile's ccwb:Region, i.e. the region we found
-        # them in). No static ARN snapshot => recreated/renamed profiles just work.
-        zone_name = resolved_zone["name"]
+    if zone_name:
+        # Discover the zone's application-inference-profile ARNs LIVE by Zone tag,
+        # across the configured regions. Region for inference = where they live.
+        # No static snapshot => created/recreated/renamed profiles just work.
         discovered_region, discovered_arns = _discover_zone_profiles(zone_name, creds)
         if not discovered_arns:
             raise RuntimeError(
                 f"No ACTIVE application inference profiles tagged {_get_zone_tag_key()}="
                 f"{zone_name!r} found in regions {_get_discovery_regions()}. "
-                f"Run 'ccwb inference-zone create' for this zone."
+                f"Create it with 'ccwb inference-zone create --zone {zone_name}'."
             )
         inference_region = discovered_region
         models = discovered_arns
@@ -435,10 +438,9 @@ def _build_config_response(claims: dict, user_token: str) -> dict:
         }
 
     # Zone banner (visual indicator for the user)
-    if resolved_zone:
-        zone_display = resolved_zone["name"].upper()
+    if zone_name:
         config["banner"] = json.dumps({
-            "text": f"Claude Desktop — {zone_display} Zone",
+            "text": f"Claude Desktop — {zone_name.upper()} Zone",
             "backgroundColor": "#1565c0",
             "textColor": "#ffffff",
         })

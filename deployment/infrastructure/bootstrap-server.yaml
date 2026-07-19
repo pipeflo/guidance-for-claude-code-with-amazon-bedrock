@@ -50,14 +50,6 @@ Parameters:
     MinValue: 3600
     MaxValue: 86400
 
-  ZoneConfig:
-    Type: String
-    Description: >
-      JSON object whose KEYS are the valid zone names (e.g. {"usa":{},"europe":{}}).
-      The per-zone inference-profile ARNs and region are discovered LIVE at request
-      time by the Zone tag (not stored here), so recreated/renamed profiles just work.
-    Default: ""
-
   DiscoveryRegions:
     Type: String
     Description: "Comma-separated regions to scan for zone-tagged application inference profiles (the profile's allowed_bedrock_regions)."
@@ -120,7 +112,6 @@ Resources:
           DEFAULT_INFERENCE_MODELS: !Ref DefaultInferenceModels
           OTLP_ENDPOINT: !Ref OtlpEndpoint
           INFERENCE_SESSION_LIFETIME_SEC: !Ref InferenceSessionLifetimeSec
-          ZONE_CONFIG: !Ref ZoneConfig
           DISCOVERY_REGIONS: !Ref DiscoveryRegions
           ZONE_TAG_KEY: !Ref ZoneTagKey
           ROLE_CONFIG: !Ref RoleConfig

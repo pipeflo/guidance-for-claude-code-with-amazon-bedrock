@@ -1080,21 +1080,12 @@ class DeployCommand(Command):
                 # Get inference models
                 inference_models = getattr(profile, "selected_model", "") or "us.anthropic.claude-sonnet-4-20250514-v1:0"
 
-                # Zone config = just the set of VALID ZONE NAMES. The Lambda
-                # discovers each zone's inference-profile ARNs + region LIVE at
-                # request time by the Zone tag, so recreated/renamed profiles are
-                # picked up automatically (no static ARN snapshot to drift).
-                # Explicit claude_desktop_zone_config keys win; otherwise use the
-                # profile's `zones` when GDPR isolation is enabled.
-                explicit_zone_config = getattr(profile, "claude_desktop_zone_config", {}) or {}
-                if explicit_zone_config:
-                    zone_names = list(explicit_zone_config.keys())
-                elif getattr(profile, "enforce_project_isolation", False):
-                    zone_names = list(getattr(profile, "zones", []) or [])
-                else:
-                    zone_names = []
-                zone_config = {z: {} for z in zone_names}
-
+                # No zone allow-list is sent. The user's zone comes from their
+                # token's Zone tag claim (the same value STS applies as the session
+                # tag), and the Lambda discovers that zone's inference-profile ARNs +
+                # region LIVE by the Zone tag. Zones are defined purely by which
+                # profiles exist (created via `ccwb inference-zone create`), so there
+                # is nothing here to drift against recreated/renamed profiles.
                 # Regions the Lambda scans to discover zone-tagged profiles.
                 discovery_regions = ",".join(getattr(profile, "allowed_bedrock_regions", []) or [profile.aws_region])
                 # The Zone tag key is fixed by the GDPR isolation design ("Zone").
@@ -1140,7 +1131,6 @@ class DeployCommand(Command):
                     f"DefaultInferenceRegion={profile.aws_region}",
                     f"DefaultInferenceModels={inference_models}",
                     f"OtlpEndpoint={otlp_endpoint}",
-                    f"ZoneConfig={json.dumps(zone_config) if zone_config else ''}",
                     f"DiscoveryRegions={discovery_regions}",
                     f"ZoneTagKey={zone_tag_key}",
                     f"RoleConfig={json.dumps(role_config) if role_config else ''}",

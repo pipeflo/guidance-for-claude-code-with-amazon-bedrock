@@ -374,10 +374,10 @@ class TestZoneRouting:
 
     @pytest.fixture
     def zone_env(self, monkeypatch, reload_handler):
-        # ZoneConfig is now just the set of VALID ZONE NAMES; ARNs + region are
-        # discovered live by the mock_sts bedrock factory (usa->us-west-2,
-        # europe->eu-west-3). DISCOVERY_REGIONS must cover both.
-        monkeypatch.setenv("ZONE_CONFIG", json.dumps({"usa": {}, "europe": {}}))
+        # There is NO zone allow-list. The zone name comes from the token's Zone
+        # tag claim (or the group name), and ARNs + region are discovered live by
+        # the mock_sts bedrock factory (usa->us-west-2, europe->eu-west-3).
+        # DISCOVERY_REGIONS must cover both.
         monkeypatch.setenv("DISCOVERY_REGIONS", "us-west-2,eu-west-3")
         monkeypatch.setenv("ZONE_TAG_KEY", "Zone")
         role_config = {
@@ -412,12 +412,34 @@ class TestZoneRouting:
         models = json.loads(config["inferenceModels"])
         assert models == ["arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/usa1"]
 
-    def test_unmatched_zone_under_isolation_fails_loudly(self, reload_handler, zone_env, mock_sts):
-        """With zone routing configured, a user matching no zone must NOT silently
-        fall back to a CRIS default (which Bedrock would AccessDeny under isolation)."""
+    def test_no_zone_falls_back_to_default_region(self, reload_handler, zone_env, mock_sts):
+        """A user whose groups yield no zone (and no Zone tag claim) gets the default
+        model list. There is no broker-side allow-list to reject them — GDPR isolation
+        fails closed at the IAM layer (DenyBedrockInvokeWithoutZone) at invoke time."""
         claims = {"sub": "u3", "email": "u3@ex.com", "groups": ["other-group"]}
-        with pytest.raises(RuntimeError, match="no configured zone"):
-            reload_handler._build_config_response(claims, "user.token")
+        config = reload_handler._build_config_response(claims, "user.token")
+
+        assert config["inferenceBedrockRegion"] == "us-west-2"  # DEFAULT_INFERENCE_REGION
+        models = json.loads(config["inferenceModels"])
+        # default CRIS models, not zone ARNs
+        assert all("application-inference-profile" not in m for m in models)
+        assert "banner" not in config  # no zone banner when no zone resolved
+
+    def test_zone_from_token_tag_claim_wins(self, reload_handler, zone_env, mock_sts):
+        """Primary source of the zone is the token's flat Zone tag claim — the same
+        value STS applies as the session tag — even if the group name would differ."""
+        claims = {
+            "sub": "u8",
+            "email": "u8@ex.com",
+            "groups": ["ccwb-usa-alpha"],  # group says usa...
+            # ...but the authoritative tag claim says europe
+            "https://aws.amazon.com/tags/principal_tags/Zone": "europe",
+        }
+        config = reload_handler._build_config_response(claims, "user.token")
+
+        assert config["inferenceBedrockRegion"] == "eu-west-3"
+        models = json.loads(config["inferenceModels"])
+        assert models == ["arn:aws:bedrock:eu-west-3:123456789012:application-inference-profile/euuu"]
 
     def test_prefix_without_hyphen_still_matches(self, reload_handler, zone_env, monkeypatch, mock_sts):
         """GROUP_PREFIX 'ccwb' (no trailing hyphen) must still match ccwb-usa-*."""
@@ -442,13 +464,13 @@ class TestZoneRouting:
         assert not any("anthropic." in m for m in models)
 
     def test_zone_with_no_discovered_profiles_raises(self, reload_handler, monkeypatch, mock_sts):
-        """A configured zone whose profiles can't be discovered fails loudly rather
-        than returning a model that would be AccessDenied under isolation."""
-        monkeypatch.setenv("ZONE_CONFIG", json.dumps({"apac": {}}))
+        """A zone resolved from the token whose profiles can't be discovered fails
+        loudly rather than returning a model that would be AccessDenied under isolation."""
         monkeypatch.setenv("DISCOVERY_REGIONS", "us-west-2,eu-west-3")  # no apac-tagged profile in mock
         monkeypatch.setenv("GROUP_PREFIX", "ccwb-")
         reload_handler._DISCOVERY_CACHE.clear()
 
+        # Zone 'apac' comes straight from the group name; discovery finds nothing.
         claims = {"sub": "u5", "groups": ["ccwb-apac-x"]}
         with pytest.raises(RuntimeError, match="No ACTIVE application inference profiles"):
             reload_handler._build_config_response(claims, "user.token")
