@@ -170,6 +170,12 @@ class Profile:
     # (no dynamic/wildcard ports for 127.0.0.1). This is the port Claude Desktop
     # uses for its PKCE callback; the admin registers http://127.0.0.1:<port>/callback.
     claude_desktop_redirect_port: int = 53180
+
+    # Audience the bootstrap JWT authorizer validates on the ACCESS token Claude
+    # Desktop sends. Okta custom authorization servers set aud to the SERVER's
+    # audience (e.g. "api://default"), not the client_id. Leave empty to default
+    # to client_id (correct for providers whose access-token aud is the client_id).
+    claude_desktop_token_audience: str = ""
     # DEPRECATED (IAM Identity Center path, superseded by the broker). Kept so
     # profile JSON written by earlier builds still loads; no longer populated or read.
     claude_desktop_sso_start_url: str = ""  # deprecated: broker path unused

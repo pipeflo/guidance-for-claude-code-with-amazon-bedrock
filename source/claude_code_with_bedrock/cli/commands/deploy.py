@@ -1122,9 +1122,22 @@ class DeployCommand(Command):
                 group_prefix = getattr(profile, "okta_group_prefix", None) or "ccwb-"
                 max_session_duration = getattr(profile, "max_session_duration", 43200) or 43200
 
+                # Audience the JWT authorizer validates on the access token Claude
+                # Desktop sends. Explicit profile value wins; else for Okta the
+                # custom-auth-server access token carries aud="api://<server>"
+                # (api://default for the default server), NOT the client_id; other
+                # providers use the client_id as the access-token audience.
+                token_audience = getattr(profile, "claude_desktop_token_audience", "") or ""
+                if not token_audience:
+                    if profile.provider_type == "okta":
+                        auth_server = getattr(profile, "okta_auth_server_id", "default") or "default"
+                        token_audience = "api://default" if auth_server == "default" else f"api://{auth_server}"
+                    else:
+                        token_audience = profile.client_id
+
                 params = [
                     f"OidcIssuerUrl={oidc_issuer_url}",
-                    f"OidcClientId={profile.client_id}",
+                    f"OidcAudience={token_audience}",
                     f"DefaultInferenceRegion={profile.aws_region}",
                     f"DefaultInferenceModels={inference_models}",
                     f"OtlpEndpoint={otlp_endpoint}",
@@ -1406,7 +1419,7 @@ class DeployCommand(Command):
             stack_name = profile.stack_names.get("bootstrap", f"{profile.identity_pool_name}-bootstrap")
             params = [
                 "OidcIssuerUrl=<from-oidc-config>",
-                f"OidcClientId={profile.client_id}",
+                "OidcAudience=<from-oidc-config>",
                 f"DefaultInferenceRegion={profile.aws_region}",
                 f"DefaultInferenceModels={getattr(profile, 'selected_model', '') or 'us.anthropic.claude-sonnet-4-20250514-v1:0'}",
                 f"OtlpEndpoint={getattr(profile, 'otel_collector_endpoint', '') or ''}",

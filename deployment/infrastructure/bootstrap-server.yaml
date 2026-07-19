@@ -18,9 +18,14 @@ Parameters:
     AllowedPattern: "^https://.*"
     ConstraintDescription: "Must be a valid HTTPS URL"
 
-  OidcClientId:
+  OidcAudience:
     Type: String
-    Description: "OIDC client ID — the JWT authorizer's audience"
+    Description: >
+      Audience the JWT authorizer validates on the ACCESS token Claude Desktop
+      sends. For an Okta custom authorization server this is the server's
+      audience (e.g. api://default), NOT the client ID. For providers whose
+      access-token audience is the client ID, set this to the client ID.
+      (The client ID itself is only needed client-side, in the MDM bootstrapOidc.)
     MinLength: 1
 
   DefaultInferenceRegion:
@@ -181,7 +186,7 @@ Resources:
       JwtConfiguration:
         Issuer: !Ref OidcIssuerUrl
         Audience:
-          - !Ref OidcClientId
+          - !Ref OidcAudience
 
   BootstrapApiRoute:
     Type: AWS::ApiGatewayV2::Route
