@@ -71,7 +71,12 @@ class InitCommand(Command):
             description="Configuration profile name (optional, will prompt if not specified)",
             flag=False,
             default=None,
-        )
+        ),
+        option(
+            "managed",
+            description="Default the settings deployment target to managed (OS-level org enforcement)",
+            flag=True,
+        ),
     ]
 
     def handle(self) -> int:
