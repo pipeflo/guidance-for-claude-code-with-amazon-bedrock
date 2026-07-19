@@ -477,6 +477,19 @@ class DeployCommand(Command):
                 params.append(f"FederationType={profile.federation_type}")
 
                 if provider_type == "okta":
+                    # Register Claude Desktop's access-token audience on the IAM OIDC
+                    # provider ONLY when the profile opts into dynamic CoWork delivery.
+                    # Empty otherwise → provider audience list stays byte-identical for
+                    # deployments not using Claude Desktop. Explicit override wins; else
+                    # the 'default' auth server's audience is api://default; a custom
+                    # server has no derivable audience so we leave it blank (the admin
+                    # sets claude_desktop_token_audience).
+                    cd_audience = ""
+                    if getattr(profile, "cowork_config_mode", "static") == "dynamic":
+                        cd_audience = getattr(profile, "claude_desktop_token_audience", "") or ""
+                        if not cd_audience:
+                            _as = getattr(profile, "okta_auth_server_id", None) or "default"
+                            cd_audience = "api://default" if _as == "default" else ""
                     params.extend(
                         [
                             f"OktaDomain={profile.provider_domain}",
@@ -486,6 +499,7 @@ class DeployCommand(Command):
                             # own default so first-time adoption of this change
                             # produces zero template diff.
                             f"OktaAuthServerId={getattr(profile, 'okta_auth_server_id', None) or 'default'}",
+                            f"ClaudeDesktopTokenAudience={cd_audience}",
                         ]
                     )
                 elif provider_type == "auth0":

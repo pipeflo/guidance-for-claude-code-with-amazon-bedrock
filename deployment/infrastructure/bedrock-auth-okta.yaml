@@ -77,11 +77,23 @@ Parameters:
       Pair with `ccwb inference-profile create` and the shell-function wrapper
       emitted by the installer. Default 'false' preserves today's behavior.
 
+  ClaudeDesktopTokenAudience:
+    Type: String
+    Default: ''
+    Description: >-
+      Optional. Additional audience to register on the IAM OIDC provider so STS
+      AssumeRoleWithWebIdentity accepts the token Claude Desktop sends. Claude
+      Desktop uses the OAuth ACCESS token, whose `aud` on an Okta authorization
+      server is the server's audience (e.g. api://default) rather than the
+      client id that the ID token carries. Leave empty (default) to keep the
+      provider's audience list unchanged for deployments not using Claude Desktop.
+
 Conditions:
   UseDirectIAM: !Equals [!Ref FederationType, direct]
   UseCognitoIdentity: !Equals [!Ref FederationType, cognito]
   MonitoringEnabled: !Equals [!Ref EnableMonitoring, 'true']
   IsolationEnforced: !Equals [!Ref EnforceProjectIsolation, 'true']
+  HasClaudeDesktopAudience: !Not [!Equals [!Ref ClaudeDesktopTokenAudience, '']]
   # Partition-aware conditions for Cognito Identity service principals
   IsGovCloudWest: !Equals [!Ref 'AWS::Region', 'us-gov-west-1']
   IsGovCloudEast: !Equals [!Ref 'AWS::Region', 'us-gov-east-1']
@@ -119,8 +131,15 @@ Resources:
         - IsolationEnforced
         - !Sub 'https://${OktaDomain}/oauth2/${OktaAuthServerId}'
         - !Sub 'https://${OktaDomain}'
-      ClientIdList:
-        - !Ref OktaClientId
+      # The ID token (Claude Code flow) carries aud=<client id>. Claude Desktop
+      # sends the ACCESS token, whose aud is the authorization server's audience.
+      # Register both so STS accepts either token. Additive + gated: empty
+      # ClaudeDesktopTokenAudience leaves the list byte-identical to before.
+      ClientIdList: !If
+        - HasClaudeDesktopAudience
+        - - !Ref OktaClientId
+          - !Ref ClaudeDesktopTokenAudience
+        - - !Ref OktaClientId
       ThumbprintList:
         - 9e99a48a9960b14926bb7f3b02e22da2b0ab7280  # Okta's thumbprint
       Tags:
