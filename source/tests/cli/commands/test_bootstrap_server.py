@@ -214,6 +214,17 @@ class TestExtractClaims:
         claims = reload_handler._extract_claims(event)
         assert claims["groups"] == ["ccwb-us-alpha", "ccwb-engineering"]
 
+    def test_normalizes_space_separated_groups(self, reload_handler):
+        """Okta access token flattens groups to a SPACE-separated string."""
+        event = _event(claims={"sub": "u1", "groups": "Everyone ccwb-us-alpha claude-power-users"})
+        claims = reload_handler._extract_claims(event)
+        assert claims["groups"] == ["Everyone", "ccwb-us-alpha", "claude-power-users"]
+
+    def test_normalizes_comma_separated_groups(self, reload_handler):
+        event = _event(claims={"sub": "u1", "groups": "ccwb-us-alpha, ccwb-eng"})
+        claims = reload_handler._extract_claims(event)
+        assert claims["groups"] == ["ccwb-us-alpha", "ccwb-eng"]
+
     def test_missing_groups_defaults_empty(self, reload_handler):
         event = _event(claims={"sub": "u1"})
         claims = reload_handler._extract_claims(event)

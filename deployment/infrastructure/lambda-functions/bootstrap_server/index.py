@@ -83,16 +83,31 @@ def _extract_claims(event: dict) -> dict:
         .get("claims", {})
     ) or {}
 
-    groups = claims.get("groups", [])
-    if isinstance(groups, str):
-        # API Gateway may serialize a multi-valued claim as "[a, b, c]".
-        stripped = groups.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            stripped = stripped[1:-1]
-        groups = [g.strip().strip('"') for g in stripped.split(",") if g.strip()]
     claims = dict(claims)
-    claims["groups"] = groups
+    claims["groups"] = _normalize_groups(claims.get("groups", []))
     return claims
+
+
+def _normalize_groups(groups):
+    """Normalize the multi-valued `groups` claim to a list of strings.
+
+    API Gateway's JWT authorizer flattens a multi-valued claim into a single
+    string, and different setups serialize it differently. Observed forms:
+      - a real JSON list: ["a", "b"]
+      - a bracketed string: "[a, b]"
+      - a SPACE-separated string: "Everyone ccwb-usa-Alpha ..."  (Okta access token)
+      - a comma-separated string: "a, b"
+    Handle all of them; split on commas if present, else on whitespace.
+    """
+    if isinstance(groups, list):
+        return [str(g).strip() for g in groups if str(g).strip()]
+    if isinstance(groups, str):
+        s = groups.strip()
+        if s.startswith("[") and s.endswith("]"):
+            s = s[1:-1]
+        parts = s.split(",") if "," in s else s.split()
+        return [p.strip().strip('"').strip("'") for p in parts if p.strip()]
+    return []
 
 
 def _extract_bearer_token(event: dict) -> str:
