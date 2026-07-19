@@ -97,9 +97,22 @@ class TestBuildTrustAnchorConfig:
         assert "groups" in config["bootstrapOidc"]["scopes"]
 
     def test_disable_deployment_chooser(self, okta_profile):
-        """End users don't see the provider selection screen."""
+        """End users don't see the provider selection screen. Per the config
+        reference all values are strings, including booleans."""
         config = build_trust_anchor_config(okta_profile, "https://b.example.com")
-        assert config["disableDeploymentModeChooser"] is True
+        assert config["disableDeploymentModeChooser"] == "true"
+
+    def test_bootstrap_enabled_string_true(self, okta_profile):
+        """bootstrapEnabled must be present and the string 'true'."""
+        config = build_trust_anchor_config(okta_profile, "https://b.example.com")
+        assert config["bootstrapEnabled"] == "true"
+
+    def test_okta_oidc_endpoints(self, okta_profile):
+        """Okta authorization/token URLs are derived from the issuer."""
+        config = build_trust_anchor_config(okta_profile, "https://b.example.com")
+        oidc = config["bootstrapOidc"]
+        assert oidc["authorizationUrl"].endswith("/v1/authorize")
+        assert oidc["tokenUrl"].endswith("/v1/token")
 
 
 class TestGenerateJson:
@@ -160,8 +173,8 @@ class TestGenerateRegFile:
         assert "Windows Registry Editor Version 5.00" in content
         # Correct registry key path
         assert r"HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Anthropic\Claude Desktop" in content
-        # Boolean rendered as DWORD
-        assert '"disableDeploymentModeChooser"=dword:00000001' in content
+        # Per the config reference all values are strings, including booleans.
+        assert '"disableDeploymentModeChooser"="true"' in content
         # URL string rendered with quotes
         assert '"bootstrapUrl"="https://b.example.com"' in content
 
@@ -179,6 +192,13 @@ class TestGenerateRegFile:
         content = path.read_text()
         # JSON-encoded dict with escaped quotes
         assert '\\"clientId\\"' in content
+
+    def test_native_bool_still_renders_as_dword(self, tmp_path):
+        """The renderer keeps its bool→DWORD branch for genuinely-boolean keys."""
+        config = {"bootstrapUrl": "https://example.com", "someFlag": True}
+        path = generate_reg_file(tmp_path, config)
+        content = path.read_text()
+        assert '"someFlag"=dword:00000001' in content
 
 
 class TestGenerateAll:

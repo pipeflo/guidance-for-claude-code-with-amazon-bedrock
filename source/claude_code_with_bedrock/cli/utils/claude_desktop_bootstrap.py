@@ -57,14 +57,29 @@ def build_trust_anchor_config(profile, bootstrap_endpoint: str) -> dict:
         or profile.client_id
     )
 
+    # bootstrapOidc sub-fields per the Claude Desktop configuration reference:
+    # clientId, issuer, authorizationUrl, tokenUrl (+ scopes for the groups claim).
+    # Providing explicit endpoints avoids relying on OIDC discovery.
+    oidc = {
+        "issuer": issuer,
+        "clientId": client_id,
+        "scopes": "openid profile groups",
+    }
+    if issuer:
+        if profile.provider_type == "okta":
+            oidc["authorizationUrl"] = f"{issuer}/v1/authorize"
+            oidc["tokenUrl"] = f"{issuer}/v1/token"
+        else:
+            # Standard OIDC discovery paths for the remaining providers.
+            oidc["authorizationUrl"] = f"{issuer.rstrip('/')}/authorize"
+            oidc["tokenUrl"] = f"{issuer.rstrip('/')}/token"
+
+    # Per the config reference, ALL values are strings — including booleans.
     return {
+        "bootstrapEnabled": "true",
         "bootstrapUrl": bootstrap_endpoint,
-        "bootstrapOidc": {
-            "issuer": issuer,
-            "clientId": client_id,
-            "scopes": "openid profile groups",
-        },
-        "disableDeploymentModeChooser": True,
+        "bootstrapOidc": oidc,
+        "disableDeploymentModeChooser": "true",
     }
 
 
