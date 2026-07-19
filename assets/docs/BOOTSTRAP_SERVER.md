@@ -127,14 +127,31 @@ The bootstrap server works with any OIDC-compatible IdP:
 
 ---
 
-## Zone- and role-based dynamic routing
+## Per-user credential broker (Amazon Bedrock)
 
-The bootstrap Lambda also accepts a richer configuration that resolves the
-user's Bedrock **region**, **model list**, **MCP servers**, **spend caps**,
-and **feature toggles** from their OIDC `groups` claim. This is what makes
-the bootstrap server useful for organizations that need GDPR-style region
-isolation, role-based model access, or per-team MCP/policy without
-maintaining one MDM profile per (zone × role) combination.
+For Amazon Bedrock with direct STS federation, the bootstrap Lambda acts as a
+**per-user credential broker**. Instead of returning IAM Identity Center
+sign-in config, it:
+
+1. Validates the user's OIDC token (signature, issuer, audience, expiry).
+2. Forwards that **same token** to STS `AssumeRoleWithWebIdentity` against your
+   existing federated role. Session tags (`Zone`, `Project`/cost key) ride in
+   the token's `https://aws.amazon.com/tags` claim, so STS applies them
+   automatically — every existing GDPR Deny and cost-attribution IAM policy
+   fires unchanged.
+3. Mints a short-term Amazon Bedrock bearer token (SigV4 presign of
+   `CallWithBearerToken`) from those credentials, scoped to the user's zone
+   region, and returns it as `inferenceBedrockBearerToken`.
+
+This means **no end-user binary** — devices only need the MDM trust anchor, and
+users double-click Claude Desktop and sign in with their corporate identity.
+The broker is not in the inference data path; it only issues credentials at
+sign-in. Prompts flow directly from Claude Desktop to Bedrock.
+
+The Lambda resolves the user's Bedrock **region**, **model list**, **MCP
+servers**, **spend caps**, and **feature toggles** from their OIDC `groups`
+claim, enabling GDPR-style region isolation and role-based access without one
+MDM profile per (zone × role) combination.
 
 ### How resolution works
 
@@ -147,39 +164,33 @@ groups = ["ccwb-europe-beta", "ccwb-consulting"]
                  ▼                     ▼
        claude_desktop_zone_config   claude_desktop_role_config
        │
-       └─► {"europe": {"region": "eu-west-3", ...}}
+       └─► {"europe": {"region": "eu-west-3", "model_prefix": "eu"}}
                               │
                               ▼
                 inferenceBedrockRegion = "eu-west-3"
-                model_prefix = "eu"
+                bearer token minted for eu-west-3
 ```
 
-- **Zone match**: any group whose suffix (after the `okta_group_prefix`,
-  default `ccwb-`) starts with a zone name in `claude_desktop_zone_config`
-  → determines `inferenceBedrockRegion` + `inferenceBedrockSsoRegion`.
-- **Role match**: any group whose suffix equals or starts with a role name
-  + `-` in `claude_desktop_role_config` → determines `inferenceModels`,
-  `inferenceMaxTokensPerWindow`, `managedMcpServers`,
-  `coworkEgressAllowedHosts`.
+- **Zone match**: any group whose suffix (after `okta_group_prefix`, default
+  `ccwb-`) starts with a zone name in `claude_desktop_zone_config` → determines
+  `inferenceBedrockRegion` and the region the bearer token is signed for.
+- **Role match**: any group whose suffix equals or starts with a role name +
+  `-` in `claude_desktop_role_config` → determines `inferenceModels`,
+  `inferenceMaxTokensPerWindow`, `managedMcpServers`, `coworkEgressAllowedHosts`.
 
-Both matches are independent — a user can have zero, one, or both. The
-zone match also drives a `model_prefix` (e.g. `eu` vs `us`) that is
-prepended to role-provided model IDs to form full Bedrock model ARNs
-(`eu.anthropic.claude-opus-4-6-v1:0`).
+Both matches are independent — a user can have zero, one, or both. The zone
+match also drives a `model_prefix` (e.g. `eu` vs `us`) prepended to role model
+IDs to form full Bedrock model IDs (`eu.anthropic.claude-opus-4-6-v1:0`).
 
 ### Profile schema
 
 ```json
 {
   "cowork_config_mode": "dynamic",
-  "claude_desktop_sso_start_url": "https://d-1234567890.awsapps.com/start",
-  "claude_desktop_sso_region": "us-east-1",
-  "claude_desktop_sso_account_id": "716659702157",
-  "claude_desktop_sso_role_name": "ClaudeDesktopBedrock",
 
   "claude_desktop_zone_config": {
-    "usa":    {"region": "us-east-1", "sso_region": "us-east-1", "model_prefix": "us"},
-    "europe": {"region": "eu-west-3", "sso_region": "eu-west-1", "model_prefix": "eu"}
+    "usa":    {"region": "us-east-1", "model_prefix": "us"},
+    "europe": {"region": "eu-west-3", "model_prefix": "eu"}
   },
 
   "claude_desktop_role_config": {
@@ -208,26 +219,46 @@ prepended to role-provided model IDs to form full Bedrock model ARNs
 }
 ```
 
+The broker reuses `federated_role_arn`, `client_id`, `zones`, and
+`okta_group_prefix` from the profile — no dedicated SSO/IDC fields are needed.
+
+### Prerequisites
+
+- **Direct STS federation** (`federation_type: "direct"`) with a
+  `federated_role_arn`. `ccwb deploy bootstrap` refuses to deploy for Cognito
+  federation. The role's trust policy must already allow
+  `sts:AssumeRoleWithWebIdentity` (the ccwb Okta auth stack configures this).
+- **Reuse the existing OIDC app** — the token audience (`client_id`) is already
+  in the IAM OIDC provider's client-id list, so no new IAM OIDC config is needed.
+
 ### Auto-populated values
 
 `ccwb init` derives sensible defaults from your existing profile:
 
 | Field | Source |
 |-------|--------|
-| `claude_desktop_sso_region` | `aws_region` |
-| `claude_desktop_sso_account_id` | parsed from `federated_role_arn` |
+| `FederatedRoleArn` (stack param) | `federated_role_arn` |
+| `MaxSessionDuration` (stack param) | `max_session_duration` (default 43200) |
 | `claude_desktop_zone_config` | built from `zones[]` when `enforce_project_isolation` is true, using a built-in `usa→us-east-1` / `europe→eu-west-3` / `apac→ap-northeast-1` table |
 | `claude_desktop_feature_defaults` | `{chatTab, coworkTab, code} = "true"` |
 
 Role config is not collected interactively — admins edit the profile JSON
-directly (see schema above) or hand-edit before `ccwb deploy bootstrap`.
+directly (see schema above) before `ccwb deploy bootstrap`.
 
 ### Backward compatibility
 
-If `claude_desktop_zone_config` is empty, the Lambda falls back to the
-upstream behavior of returning a static `DEFAULT_INFERENCE_REGION` and
-`DEFAULT_INFERENCE_MODELS` for every user. The new fields are entirely
-opt-in and only become active once populated in the profile.
+If `claude_desktop_zone_config` is empty, the broker mints a token for the
+single `DEFAULT_INFERENCE_REGION` and returns `DEFAULT_INFERENCE_MODELS` for
+every user. Zone/role maps are opt-in and only take effect once populated.
+
+### Token lifetime & refresh
+
+The bearer token inherits the STS session lifetime (up to
+`MaxSessionDuration`, default 12h). `expiresAt` in the response is set just
+under that so Claude Desktop re-fetches before expiry. There is no mid-session
+silent refresh (that would require an end-user helper binary); when the session
+expires the user re-authenticates through the normal launch flow — the same
+cadence as the existing Claude Code deployment.
 
 ### Generating MDM trust-anchor profiles
 
@@ -244,10 +275,15 @@ Writes three files to `dist/<profile>/claude-desktop/`:
 - `claude-desktop-trust-anchor.mobileconfig` — push via Jamf / Kandji / etc.
 - `claude-desktop-trust-anchor.reg` — push via Group Policy / Intune
 
-The trust-anchor profile is identical for every user — only the bootstrap
-URL and OIDC settings are baked in. Per-user config is fetched at sign-in.
+The trust-anchor profile is identical for every user — only the bootstrap URL
+and OIDC settings (issuer + `client_id` + `groups` scope) are baked in. Per-user
+credentials and config are fetched at sign-in.
 
-See `customer-upgrade-guides/UPGRADE_TO_CLAUDE_DESKTOP_BOOTSTRAP.md` for a
-full deployment walkthrough.
+See `customer-upgrade-guides/UPGRADE_TO_CLAUDE_DESKTOP_BOOTSTRAP.md` for a full
+deployment walkthrough.
 
-> **Note**: IAM Identity Center (IDC) is not supported for bootstrap server in v1. Use static MDM profiles for IDC deployments.
+> **Note**: For organizations that use AWS IAM Identity Center as their primary
+> access model, Claude Desktop's built-in "in-app AWS sign-in" is an alternative
+> that needs no broker. The broker path documented here is for direct
+> Okta→STS federation (the ccwb default), where it preserves the existing
+> session-tag / GDPR / cost-attribution design end to end.

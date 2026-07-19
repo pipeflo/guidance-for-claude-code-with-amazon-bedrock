@@ -1,12 +1,15 @@
-# ABOUTME: CloudFormation template for the CoWork Bootstrap Server
-# ABOUTME: Deploys an API Gateway HTTP API + Lambda that validates OIDC tokens
-# ABOUTME: and returns per-user configuration for Claude Desktop (CoWork) at sign-in
+# ABOUTME: CloudFormation template for the Claude Desktop Bootstrap Server (credential broker)
+# ABOUTME: Deploys an API Gateway HTTP API + Lambda that validates the user's OIDC token,
+# ABOUTME: brokers a per-user Bedrock bearer token via AssumeRoleWithWebIdentity, and returns
+# ABOUTME: per-user config at sign-in. No end-user binary; pure MDM trust anchor on devices.
 
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  CoWork Bootstrap Server — delivers per-user configuration dynamically at sign-in
-  as an alternative to static MDM profiles. Validates OIDC Bearer tokens and returns
-  configuration JSON including inference provider, region, models, and OTEL settings.
+  Claude Desktop Bootstrap Server — delivers per-user configuration dynamically at
+  sign-in as an alternative to static MDM profiles. Validates the user's OIDC token,
+  exchanges it for STS credentials (session tags intact), mints a short-term Amazon
+  Bedrock bearer token scoped to the user's zone, and returns it with region, models,
+  feature toggles, and OTEL settings.
 
 Parameters:
   OidcIssuerUrl:
@@ -68,25 +71,22 @@ Parameters:
     Description: "Okta group name prefix for zone/role matching"
     Default: "ccwb-"
 
-  SsoStartUrl:
+  FederatedRoleArn:
     Type: String
-    Description: "IAM Identity Center start URL (e.g. https://d-xxxxxxxxxx.awsapps.com/start)"
-    Default: ""
+    Description: >
+      ARN of the existing OIDC-federated IAM role the broker assumes on behalf
+      of each user (same role Claude Code uses for direct STS federation). Its
+      trust policy already permits sts:AssumeRoleWithWebIdentity + sts:TagSession
+      for the org OIDC provider and client-id audience.
+    AllowedPattern: "^arn:aws[a-zA-Z-]*:iam::[0-9]{12}:role/.+$"
+    ConstraintDescription: "Must be a valid IAM role ARN"
 
-  SsoRegion:
-    Type: String
-    Description: "IAM Identity Center region"
-    Default: ""
-
-  SsoAccountId:
-    Type: String
-    Description: "AWS account ID for Bedrock access via Identity Center"
-    Default: ""
-
-  SsoRoleName:
-    Type: String
-    Description: "IAM Identity Center permission set role name"
-    Default: ""
+  MaxSessionDuration:
+    Type: Number
+    Description: "STS session / Bedrock bearer-token lifetime in seconds (matches the role's max session duration)"
+    Default: 43200
+    MinValue: 900
+    MaxValue: 43200
 
 Resources:
   BootstrapFunction:
@@ -115,10 +115,8 @@ Resources:
           ROLE_CONFIG: !Ref RoleConfig
           FEATURE_DEFAULTS: !Ref FeatureDefaults
           GROUP_PREFIX: !Ref GroupPrefix
-          SSO_START_URL: !Ref SsoStartUrl
-          SSO_REGION: !Ref SsoRegion
-          SSO_ACCOUNT_ID: !Ref SsoAccountId
-          SSO_ROLE_NAME: !Ref SsoRoleName
+          FEDERATED_ROLE_ARN: !Ref FederatedRoleArn
+          MAX_SESSION_DURATION: !Ref MaxSessionDuration
       Role: !GetAtt BootstrapFunctionRole.Arn
       Tags:
         - Key: Application
@@ -126,6 +124,11 @@ Resources:
         - Key: Component
           Value: "bootstrap-server"
 
+  # Least privilege by design. The broker calls STS AssumeRoleWithWebIdentity
+  # UNSIGNED (with the user's OIDC token), which is authorized by the target
+  # role's trust policy — NOT by this execution role. Do NOT add sts:AssumeRole
+  # or bedrock:* grants here; they are unnecessary and would broaden the blast
+  # radius. CloudWatch Logs is the only permission required.
   BootstrapFunctionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -138,7 +141,7 @@ Resources:
               Service: lambda.amazonaws.com
             Action: "sts:AssumeRole"
       ManagedPolicyArns:
-        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 
   BootstrapApi:
     Type: AWS::ApiGatewayV2::Api
@@ -184,7 +187,7 @@ Resources:
       FunctionName: !Ref BootstrapFunction
       Action: "lambda:InvokeFunction"
       Principal: apigateway.amazonaws.com
-      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${BootstrapApi}/*"
+      SourceArn: !Sub "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${BootstrapApi}/*"
 
 Outputs:
   BootstrapUrl:

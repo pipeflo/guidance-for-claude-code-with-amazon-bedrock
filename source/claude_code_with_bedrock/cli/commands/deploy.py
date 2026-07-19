@@ -1014,20 +1014,33 @@ class DeployCommand(Command):
                 )
 
             elif stack_type == "bootstrap":
-                # CoWork Bootstrap Server for dynamic configuration delivery
+                # Claude Desktop Bootstrap Server — per-user Bedrock bearer-token broker.
                 template = project_root / "deployment" / "infrastructure" / "bootstrap-server.yaml"
                 stack_name = profile.stack_names.get(
                     "bootstrap", f"{profile.identity_pool_name}-bootstrap"
                 )
 
+                # The broker forwards the user's OIDC token to STS
+                # AssumeRoleWithWebIdentity, which requires a direct-STS federated
+                # role. Cognito Identity Pool federation is not supported here.
+                if getattr(profile, "federation_type", "cognito") != "direct" or not getattr(
+                    profile, "federated_role_arn", None
+                ):
+                    console.print(
+                        "[red]The Claude Desktop bootstrap broker requires Direct STS "
+                        "federation with a federated role ARN.[/red]"
+                    )
+                    console.print(
+                        "[dim]Your profile uses Cognito federation or has no federated_role_arn. "
+                        "Re-run 'ccwb init' and choose Direct STS, or deploy the auth stack first.[/dim]"
+                    )
+                    return 1
+
                 # Build OIDC issuer URL from provider config
                 oidc_issuer_url = getattr(profile, "oidc_issuer_url", None) or ""
                 if not oidc_issuer_url and profile.provider_type == "okta":
-                    okta_auth_server = getattr(profile, "okta_auth_server", "default")
-                    if okta_auth_server:
-                        oidc_issuer_url = f"https://{profile.provider_domain}/oauth2/{okta_auth_server}"
-                    else:
-                        oidc_issuer_url = f"https://{profile.provider_domain}"
+                    okta_auth_server = getattr(profile, "okta_auth_server_id", "default") or "default"
+                    oidc_issuer_url = f"https://{profile.provider_domain}/oauth2/{okta_auth_server}"
                 elif not oidc_issuer_url and profile.provider_type == "auth0":
                     oidc_issuer_url = f"https://{profile.provider_domain}/"
                 elif not oidc_issuer_url and profile.provider_type == "azure":
@@ -1071,39 +1084,27 @@ class DeployCommand(Command):
                 # Get inference models
                 inference_models = getattr(profile, "selected_model", "") or "us.anthropic.claude-sonnet-4-20250514-v1:0"
 
-                # Auto-derive SSO account ID from federated_role_arn when not set
-                sso_account_id = getattr(profile, "claude_desktop_sso_account_id", "") or ""
-                if not sso_account_id and getattr(profile, "federated_role_arn", None):
-                    # arn:aws:iam::716659702157:role/... \u2192 "716659702157"
-                    role_arn_parts = profile.federated_role_arn.split(":")
-                    if len(role_arn_parts) >= 5:
-                        sso_account_id = role_arn_parts[4]
-
-                # Auto-derive SSO region from profile.aws_region when not set
-                sso_region = getattr(profile, "claude_desktop_sso_region", "") or profile.aws_region
-
-                # Build zone config from existing GDPR isolation profile, if set
+                # Build zone config from existing GDPR isolation profile, if set.
+                # model_prefix routes zone-scoped model IDs (eu.* vs us.*); sso_region
+                # is retained in the map for readability but unused by the broker.
                 zone_config = getattr(profile, "claude_desktop_zone_config", {}) or {}
                 if not zone_config and getattr(profile, "enforce_project_isolation", False):
                     # Auto-populate from existing zones list with standard region mapping
                     zone_region_map = {
-                        "usa": ("us-east-1", "us-east-1", "us"),
-                        "us": ("us-east-1", "us-east-1", "us"),
-                        "europe": ("eu-west-3", "eu-west-1", "eu"),
-                        "eu": ("eu-west-1", "eu-west-1", "eu"),
+                        "usa": ("us-east-1", "us"),
+                        "us": ("us-east-1", "us"),
+                        "europe": ("eu-west-3", "eu"),
+                        "eu": ("eu-west-1", "eu"),
                     }
                     for z in getattr(profile, "zones", []) or []:
                         if z in zone_region_map:
-                            region, sso_r, prefix = zone_region_map[z]
-                            zone_config[z] = {
-                                "region": region,
-                                "sso_region": sso_r,
-                                "model_prefix": prefix,
-                            }
+                            region, prefix = zone_region_map[z]
+                            zone_config[z] = {"region": region, "model_prefix": prefix}
 
                 role_config = getattr(profile, "claude_desktop_role_config", {}) or {}
                 feature_defaults = getattr(profile, "claude_desktop_feature_defaults", {}) or {}
-                group_prefix = getattr(profile, "okta_group_prefix", "ccwb-") or "ccwb-"
+                group_prefix = getattr(profile, "okta_group_prefix", None) or "ccwb-"
+                max_session_duration = getattr(profile, "max_session_duration", 43200) or 43200
 
                 params = [
                     f"OidcIssuerUrl={oidc_issuer_url}",
@@ -1116,10 +1117,8 @@ class DeployCommand(Command):
                     f"RoleConfig={json.dumps(role_config) if role_config else ''}",
                     f"FeatureDefaults={json.dumps(feature_defaults) if feature_defaults else ''}",
                     f"GroupPrefix={group_prefix}",
-                    f"SsoStartUrl={getattr(profile, 'claude_desktop_sso_start_url', '') or ''}",
-                    f"SsoRegion={sso_region}",
-                    f"SsoAccountId={sso_account_id}",
-                    f"SsoRoleName={getattr(profile, 'claude_desktop_sso_role_name', '') or 'ClaudeDesktopBedrock'}",
+                    f"FederatedRoleArn={profile.federated_role_arn}",
+                    f"MaxSessionDuration={max_session_duration}",
                 ]
 
                 result = deploy_with_cf(
@@ -1127,7 +1126,7 @@ class DeployCommand(Command):
                     stack_name,
                     params,
                     ["CAPABILITY_NAMED_IAM"],
-                    task_description="Deploying CoWork Bootstrap Server...",
+                    task_description="Deploying Claude Desktop Bootstrap Server...",
                 )
 
                 # Display bootstrap URL on success and save to profile

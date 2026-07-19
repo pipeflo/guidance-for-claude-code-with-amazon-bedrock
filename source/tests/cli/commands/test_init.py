@@ -490,21 +490,21 @@ class TestExistingConfigRoundTrip:
         assert existing["sso_enabled"] is True
 
     def test_claude_desktop_bootstrap_preserved(self, monkeypatch):
-        """Bootstrap SSO + zone config survive the round-trip."""
+        """Bootstrap broker zone/role config survives the round-trip."""
         profile = self._make_profile(
             cowork_config_mode="dynamic",
-            claude_desktop_sso_start_url="https://d-123.awsapps.com/start",
-            claude_desktop_sso_account_id="716659702157",
             claude_desktop_zone_config={
-                "usa": {"region": "us-east-1", "sso_region": "us-east-1", "model_prefix": "us"}
+                "usa": {"region": "us-east-1", "model_prefix": "us"}
+            },
+            claude_desktop_role_config={
+                "engineering": {"models": ["claude-opus-4-6-v1:0"]}
             },
         )
         existing = self._build_existing_config(profile, monkeypatch)
 
         cd = existing["claude_desktop"]
-        assert cd["sso_start_url"] == "https://d-123.awsapps.com/start"
-        assert cd["sso_account_id"] == "716659702157"
         assert cd["zone_config"]["usa"]["region"] == "us-east-1"
+        assert cd["role_config"]["engineering"]["models"] == ["claude-opus-4-6-v1:0"]
 
     def test_quota_fields_preserved(self, monkeypatch):
         """Daily limit and enforcement modes survive (previously dropped)."""
