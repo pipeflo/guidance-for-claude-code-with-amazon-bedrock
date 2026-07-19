@@ -121,6 +121,12 @@ class Profile:
     # load-bearing at runtime.
     zones: list[str] = field(default_factory=list)
 
+    # IdP group-name prefix used for cost-attribution and zone routing
+    # (e.g. "ccwb-" so groups look like "ccwb-usa-alpha"). Threaded into the
+    # bootstrap Lambda's GroupPrefix parameter and the cost-attribution hint.
+    # Defaults to the profile name when unset (historical behavior).
+    okta_group_prefix: str | None = None
+
     # Bedrock cross-region model short-name used when suggesting a default
     # inference-profile name in `ccwb inference-profile create` output.
     # Not used at runtime; purely a convenience default.

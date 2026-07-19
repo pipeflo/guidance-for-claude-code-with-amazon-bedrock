@@ -2193,6 +2193,7 @@ class InitCommand(Command):
             "okta_auth_server_id": config_data.get("okta_auth_server_id", "default"),
             "enforce_project_isolation": config_data.get("enforce_project_isolation", False),
             "zones": config_data.get("zones", []) or [],
+            "okta_group_prefix": config_data.get("okta_group_prefix"),
             "sso_enabled": config_data.get("sso_enabled", True),
             "azure_auth_mode": config_data.get("azure_auth_mode"),
             "client_certificate_path": config_data.get("client_certificate_path"),
@@ -2585,7 +2586,44 @@ class InitCommand(Command):
                     "monthly_limit": getattr(profile, "monthly_token_limit", 300000000),
                     "warning_threshold_80": getattr(profile, "warning_threshold_80", 240000000),
                     "warning_threshold_90": getattr(profile, "warning_threshold_90", 270000000),
+                    "daily_limit": getattr(profile, "daily_token_limit", None),
+                    "burst_buffer_percent": getattr(profile, "burst_buffer_percent", 10),
+                    "daily_enforcement_mode": getattr(profile, "daily_enforcement_mode", "alert"),
+                    "monthly_enforcement_mode": getattr(profile, "monthly_enforcement_mode", "block"),
+                    "check_interval": getattr(profile, "quota_check_interval", 30),
                 }
+
+            # Preserve SSO toggle so re-running init doesn't silently flip it
+            existing_config["sso_enabled"] = getattr(profile, "sso_enabled", True)
+
+            # Preserve per-project cost attribution + GDPR zone isolation settings.
+            # These are read by the wizard as config.get(...) defaults; if omitted
+            # here they silently reset to off, changing the user's config without
+            # their awareness (e.g. disabling GDPR isolation on an existing profile).
+            existing_config["project_attribution_enabled"] = getattr(
+                profile, "project_attribution_enabled", False
+            )
+            existing_config["cost_attribution_tag_key"] = getattr(
+                profile, "cost_attribution_tag_key", "Project"
+            )
+            existing_config["okta_auth_server_id"] = getattr(profile, "okta_auth_server_id", "default")
+            existing_config["enforce_project_isolation"] = getattr(
+                profile, "enforce_project_isolation", False
+            )
+            existing_config["zones"] = getattr(profile, "zones", []) or []
+            if getattr(profile, "okta_group_prefix", None):
+                existing_config["okta_group_prefix"] = profile.okta_group_prefix
+
+            # Preserve Claude Desktop bootstrap (dynamic CoWork) settings
+            existing_config["claude_desktop"] = {
+                "sso_start_url": getattr(profile, "claude_desktop_sso_start_url", ""),
+                "sso_region": getattr(profile, "claude_desktop_sso_region", ""),
+                "sso_account_id": getattr(profile, "claude_desktop_sso_account_id", ""),
+                "sso_role_name": getattr(profile, "claude_desktop_sso_role_name", "ClaudeDesktopBedrock"),
+                "zone_config": getattr(profile, "claude_desktop_zone_config", {}) or {},
+                "role_config": getattr(profile, "claude_desktop_role_config", {}) or {},
+                "feature_defaults": getattr(profile, "claude_desktop_feature_defaults", {}) or {},
+            }
 
             # Add analytics configuration if present
             if hasattr(profile, "analytics_enabled"):

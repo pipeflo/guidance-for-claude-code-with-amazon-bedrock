@@ -425,6 +425,109 @@ class TestNamedFunctionsIntegration:
         assert callable(init_module.validate_cognito_user_pool_id)
 
 
+class TestExistingConfigRoundTrip:
+    """Regression: re-running `ccwb init` must surface existing profile values
+    as wizard defaults. If _check_existing_deployment omits a field, the wizard
+    silently resets it (e.g. flipping GDPR isolation off without user awareness).
+    """
+
+    def _make_profile(self, **overrides):
+        from claude_code_with_bedrock.config import Profile
+
+        base = dict(
+            name="demo",
+            provider_domain="example.okta.com",
+            client_id="0oaEXAMPLECLIENTID",
+            credential_storage="session",
+            aws_region="us-east-1",
+            identity_pool_name="claude-code",
+            federation_type="direct",
+        )
+        base.update(overrides)
+        return Profile(**base)
+
+    def _build_existing_config(self, profile, monkeypatch):
+        """Invoke _check_existing_deployment with AWS + Config mocked out."""
+        from unittest.mock import MagicMock
+
+        import claude_code_with_bedrock.cli.commands.init as init_module
+
+        cmd = init_module.InitCommand()
+
+        # Mock Config.load().get_profile() to return our profile
+        fake_config = MagicMock()
+        fake_config.get_profile.return_value = profile
+        monkeypatch.setattr(init_module.Config, "load", lambda: fake_config)
+
+        # Avoid any real AWS calls — pretend the stack check is inconclusive
+        monkeypatch.setattr(cmd, "_stack_exists", lambda *a, **k: False)
+
+        return cmd._check_existing_deployment("demo")
+
+    def test_gdpr_isolation_preserved(self, monkeypatch):
+        """enforce_project_isolation=True must survive the load round-trip."""
+        profile = self._make_profile(
+            enforce_project_isolation=True,
+            zones=["usa", "europe"],
+            project_attribution_enabled=True,
+            cost_attribution_tag_key="CostCenter",
+        )
+        existing = self._build_existing_config(profile, monkeypatch)
+
+        assert existing["enforce_project_isolation"] is True
+        assert existing["zones"] == ["usa", "europe"]
+        assert existing["project_attribution_enabled"] is True
+        assert existing["cost_attribution_tag_key"] == "CostCenter"
+
+    def test_defaults_when_unset(self, monkeypatch):
+        """A vanilla profile reports the documented defaults, not None."""
+        profile = self._make_profile()
+        existing = self._build_existing_config(profile, monkeypatch)
+
+        assert existing["enforce_project_isolation"] is False
+        assert existing["cost_attribution_tag_key"] == "Project"
+        assert existing["okta_auth_server_id"] == "default"
+        assert existing["sso_enabled"] is True
+
+    def test_claude_desktop_bootstrap_preserved(self, monkeypatch):
+        """Bootstrap SSO + zone config survive the round-trip."""
+        profile = self._make_profile(
+            cowork_config_mode="dynamic",
+            claude_desktop_sso_start_url="https://d-123.awsapps.com/start",
+            claude_desktop_sso_account_id="716659702157",
+            claude_desktop_zone_config={
+                "usa": {"region": "us-east-1", "sso_region": "us-east-1", "model_prefix": "us"}
+            },
+        )
+        existing = self._build_existing_config(profile, monkeypatch)
+
+        cd = existing["claude_desktop"]
+        assert cd["sso_start_url"] == "https://d-123.awsapps.com/start"
+        assert cd["sso_account_id"] == "716659702157"
+        assert cd["zone_config"]["usa"]["region"] == "us-east-1"
+
+    def test_quota_fields_preserved(self, monkeypatch):
+        """Daily limit and enforcement modes survive (previously dropped)."""
+        profile = self._make_profile(
+            quota_monitoring_enabled=True,
+            daily_token_limit=8_250_000,
+            daily_enforcement_mode="block",
+            monthly_enforcement_mode="block",
+        )
+        existing = self._build_existing_config(profile, monkeypatch)
+
+        assert existing["quota"]["daily_limit"] == 8_250_000
+        assert existing["quota"]["daily_enforcement_mode"] == "block"
+        assert existing["quota"]["monthly_enforcement_mode"] == "block"
+
+    def test_group_prefix_preserved(self, monkeypatch):
+        """okta_group_prefix survives when explicitly set."""
+        profile = self._make_profile(okta_group_prefix="ccwb-")
+        existing = self._build_existing_config(profile, monkeypatch)
+
+        assert existing["okta_group_prefix"] == "ccwb-"
+
+
 if __name__ == "__main__":
     # Run the tests
     pytest.main([__file__, "-v"])
