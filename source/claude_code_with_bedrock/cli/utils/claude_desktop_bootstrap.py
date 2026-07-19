@@ -79,8 +79,14 @@ def build_trust_anchor_config(profile, bootstrap_endpoint: str) -> dict:
     # Pin redirectPort so Claude Desktop always uses http://127.0.0.1:<port>/callback
     # and the admin can register exactly that URI. Configurable per profile;
     # defaults to 53180 (the value in Anthropic's docs).
+    #
+    # NOTE: redirectPort is an INTEGER inside the bootstrapOidc object. The
+    # "all values are strings" rule applies only to top-level MDM keys, not to
+    # fields inside this object-typed value. Emitting it as a string makes
+    # Claude Desktop fail to parse bootstrapOidc and silently fall back to
+    # device-code mode (.well-known/oauth-authorization-server 404).
     if profile.provider_type == "okta":
-        oidc["redirectPort"] = str(getattr(profile, "claude_desktop_redirect_port", None) or "53180")
+        oidc["redirectPort"] = int(getattr(profile, "claude_desktop_redirect_port", None) or 53180)
 
     # Per the config reference, ALL values are strings — including booleans.
     return {

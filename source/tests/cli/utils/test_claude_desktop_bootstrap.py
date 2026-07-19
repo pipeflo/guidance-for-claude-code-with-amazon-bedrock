@@ -115,14 +115,17 @@ class TestBuildTrustAnchorConfig:
         assert oidc["tokenUrl"].endswith("/v1/token")
 
     def test_okta_fixed_redirect_port(self, okta_profile):
-        """Okta needs a fixed loopback port (no dynamic ports); default 53180."""
+        """Okta needs a fixed loopback port (no dynamic ports); default 53180.
+        redirectPort is an INTEGER inside the bootstrapOidc object (not a string —
+        a string makes Claude Desktop fall back to device-code mode)."""
         config = build_trust_anchor_config(okta_profile, "https://b.example.com")
-        assert config["bootstrapOidc"]["redirectPort"] == "53180"
+        assert config["bootstrapOidc"]["redirectPort"] == 53180
+        assert isinstance(config["bootstrapOidc"]["redirectPort"], int)
 
     def test_redirect_port_configurable(self, okta_profile):
         okta_profile.claude_desktop_redirect_port = 8123
         config = build_trust_anchor_config(okta_profile, "https://b.example.com")
-        assert config["bootstrapOidc"]["redirectPort"] == "8123"
+        assert config["bootstrapOidc"]["redirectPort"] == 8123
 
 
 class TestGenerateJson:
