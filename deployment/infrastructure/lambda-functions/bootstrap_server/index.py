@@ -224,23 +224,24 @@ def _mint_bedrock_bearer_token(user_token: str, region: str, role_arn: str, clai
     expiration_epoch = int(expiration.timestamp()) if hasattr(expiration, "timestamp") else int(time.time()) + duration
 
     # Mint the Bedrock bearer token, byte-for-byte matching the official
-    # aws-bedrock-token-generator algorithm (any deviation => Bedrock rejects with
-    # "Invalid API Key format: Must start with pre-defined prefix"):
-    #   1. SigV4-PRESIGN a GET on https://bedrock.<region>.amazonaws.com/
-    #      ?Action=CallWithBearerToken  (service "bedrock", regional host)
-    #   2. take the presigned URL, drop the "https://" scheme, append "&Version=1"
-    #   3. URL-SAFE base64, strip "=" padding
-    #   4. prepend the literal prefix "bedrock-api-key-"
+    # aws-bedrock-token-generator (aws_bedrock_token_generator/token_generator.py):
+    #   - SigV4-PRESIGN a POST on the GLOBAL host https://bedrock.amazonaws.com/
+    #     with params Action=CallWithBearerToken (service "bedrock", signed for
+    #     the target region)
+    #   - drop the "https://" scheme, append "&Version=1"
+    #   - STANDARD base64 (base64.b64encode, WITH "=" padding — Bedrock's decoder
+    #     requires the padding; url-safe/stripped padding => "Base64 decoding failed")
+    #   - prepend the literal prefix "bedrock-api-key-"
     botocore_creds = Credentials(creds["AccessKeyId"], creds["SecretAccessKey"], creds["SessionToken"])
-    host = f"bedrock.{region}.amazonaws.com"
     request = AWSRequest(
-        method="GET",
-        url=f"https://{host}/?Action=CallWithBearerToken",
-        headers={"host": host},
+        method="POST",
+        url="https://bedrock.amazonaws.com/",
+        headers={"host": "bedrock.amazonaws.com"},
+        params={"Action": "CallWithBearerToken"},
     )
     SigV4QueryAuth(botocore_creds, "bedrock", region, expires=duration).add_auth(request)
-    presigned = request.url[len("https://"):] + "&Version=1"
-    encoded = base64.urlsafe_b64encode(presigned.encode("utf-8")).decode("utf-8").rstrip("=")
+    presigned_url = request.url.replace("https://", "") + "&Version=1"
+    encoded = base64.b64encode(presigned_url.encode("utf-8")).decode("utf-8")
     token = "bedrock-api-key-" + encoded
 
     return token, expiration_epoch
