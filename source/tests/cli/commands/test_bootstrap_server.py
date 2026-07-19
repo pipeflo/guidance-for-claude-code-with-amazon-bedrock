@@ -90,13 +90,44 @@ def reload_handler(set_env_vars):
 
 @pytest.fixture
 def mock_sts(reload_handler):
-    """Patch the handler's boto3.client so STS returns canned credentials.
+    """Patch the handler's boto3.client: STS returns canned credentials, and any
+    'bedrock' client returns a discovery mock that surfaces one ACTIVE profile
+    per zone tag (usa/us/eu/europe/apac) so zone discovery resolves in tests.
 
-    Returns the mock STS client so tests can assert on the assume-role call args.
+    Returns the STS mock so tests can assert on the assume-role call args.
     """
     sts_client = MagicMock()
     sts_client.assume_role_with_web_identity.return_value = _fake_sts_credentials()
-    with patch.object(reload_handler.boto3, "client", return_value=sts_client):
+
+    # Zone ARNs keyed by the region they physically live in, so the mock is
+    # region-aware (a profile only appears when scanning ITS region).
+    _region_arns = {
+        "us-west-2": {
+            "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/usa1": "usa",
+            "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/us1": "us",
+            "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/eu1": "eu",
+        },
+        "eu-west-3": {
+            "arn:aws:bedrock:eu-west-3:123456789012:application-inference-profile/euuu": "europe",
+        },
+    }
+
+    def _bedrock_client(region):
+        c = MagicMock()
+        entries = _region_arns.get(region, {})
+        summaries = [{"inferenceProfileArn": arn, "status": "ACTIVE"} for arn in entries]
+        paginator = MagicMock()
+        paginator.paginate.return_value = [{"inferenceProfileSummaries": summaries}]
+        c.get_paginator.return_value = paginator
+        c.list_tags_for_resource.side_effect = lambda resourceARN: {
+            "tags": [{"key": "Zone", "value": entries.get(resourceARN, "")}]
+        }
+        return c
+
+    def factory(service, region_name=None, **kw):
+        return sts_client if service == "sts" else _bedrock_client(region_name)
+
+    with patch.object(reload_handler.boto3, "client", side_effect=factory):
         yield sts_client
 
 
@@ -265,8 +296,8 @@ class TestMintBedrockBearerToken:
     def test_token_format(self, reload_handler, mock_sts):
         import base64
 
-        token, exp = reload_handler._mint_bedrock_bearer_token(
-            "user.token", "us-west-2", "arn:aws:iam::123456789012:role/R", {"email": "a@ex.com"}
+        token, exp = reload_handler._mint_bedrock_bearer_token_from_creds(
+            _fake_sts_credentials()["Credentials"], "us-west-2"
         )
         # exact prefix
         assert token.startswith("bedrock-api-key-")
@@ -283,8 +314,8 @@ class TestMintBedrockBearerToken:
     def test_signed_for_target_region(self, reload_handler, mock_sts):
         import base64
 
-        token, _ = reload_handler._mint_bedrock_bearer_token(
-            "t", "eu-west-3", "arn:aws:iam::123456789012:role/R", {"email": "b@ex.com"}
+        token, _ = reload_handler._mint_bedrock_bearer_token_from_creds(
+            _fake_sts_credentials()["Credentials"], "eu-west-3"
         )
         payload = token[len("bedrock-api-key-"):]
         decoded = base64.b64decode(payload).decode("utf-8")
@@ -342,59 +373,44 @@ class TestZoneRouting:
     """Tests for zone/role-based dynamic routing in the broker."""
 
     @pytest.fixture
-    def zone_env(self, monkeypatch):
-        # GDPR shape: each zone carries the real application-inference-profile
-        # ARN(s) + the region parsed from the ARN. model_prefix is only used for
-        # non-isolated zones that route by CRIS prefix (see test below).
-        zone_config = {
-            "usa": {
-                "region": "us-west-2",
-                "models": ["arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/usaaa"],
-                "model_prefix": "us",
-            },
-            "europe": {
-                "region": "eu-west-3",
-                "models": ["arn:aws:bedrock:eu-west-3:123456789012:application-inference-profile/euuu"],
-                "model_prefix": "eu",
-            },
-        }
+    def zone_env(self, monkeypatch, reload_handler):
+        # ZoneConfig is now just the set of VALID ZONE NAMES; ARNs + region are
+        # discovered live by the mock_sts bedrock factory (usa->us-west-2,
+        # europe->eu-west-3). DISCOVERY_REGIONS must cover both.
+        monkeypatch.setenv("ZONE_CONFIG", json.dumps({"usa": {}, "europe": {}}))
+        monkeypatch.setenv("DISCOVERY_REGIONS", "us-west-2,eu-west-3")
+        monkeypatch.setenv("ZONE_TAG_KEY", "Zone")
         role_config = {
-            "consulting": {
-                "models": ["claude-opus-4-6-v1:0", "claude-sonnet-4-6-v1:0"],
-                "max_tokens_per_window": "5000000",
-            },
+            "consulting": {"models": ["claude-opus-4-6-v1:0"], "max_tokens_per_window": "5000000"},
             "engineering": {
-                "models": ["claude-opus-4-6-v1:0", "claude-sonnet-4-6-v1:0", "claude-haiku-4-5-v1:0"],
+                "models": ["claude-opus-4-6-v1:0", "claude-haiku-4-5-v1:0"],
                 "max_tokens_per_window": "10000000",
                 "mcp_servers": [{"name": "github", "url": "https://mcp.example.com/github"}],
             },
         }
-        feature_defaults = {
-            "chatTabEnabled": "true",
-            "coworkTabEnabled": "true",
-            "isClaudeCodeForDesktopEnabled": "true",
-        }
-        monkeypatch.setenv("ZONE_CONFIG", json.dumps(zone_config))
+        feature_defaults = {"chatTabEnabled": "true", "coworkTabEnabled": "true", "isClaudeCodeForDesktopEnabled": "true"}
         monkeypatch.setenv("ROLE_CONFIG", json.dumps(role_config))
         monkeypatch.setenv("FEATURE_DEFAULTS", json.dumps(feature_defaults))
         monkeypatch.setenv("GROUP_PREFIX", "ccwb-")
+        reload_handler._DISCOVERY_CACHE.clear()
 
     def test_europe_zone_routing(self, reload_handler, zone_env, mock_sts):
-        """User in ccwb-europe-beta group gets eu-west-3 region and token signed for it."""
+        """User in ccwb-europe-beta group → europe zone discovered in eu-west-3."""
         claims = {"sub": "u1", "email": "u@ex.com", "groups": ["ccwb-europe-beta"]}
         config = reload_handler._build_config_response(claims, "user.token")
 
         assert config["inferenceBedrockRegion"] == "eu-west-3"
-        # boto3.client called with region_name=eu-west-3 for the STS/broker step
-        _, kwargs = reload_handler.boto3.client.call_args
-        assert kwargs.get("region_name") == "eu-west-3"
+        models = json.loads(config["inferenceModels"])
+        assert models == ["arn:aws:bedrock:eu-west-3:123456789012:application-inference-profile/euuu"]
 
     def test_usa_zone_routing(self, reload_handler, zone_env, mock_sts):
-        """User in ccwb-usa-alpha group gets the zone's ARN region (us-west-2)."""
+        """User in ccwb-usa-alpha group → usa zone discovered in us-west-2."""
         claims = {"sub": "u2", "email": "u2@ex.com", "groups": ["ccwb-usa-alpha"]}
         config = reload_handler._build_config_response(claims, "user.token")
 
         assert config["inferenceBedrockRegion"] == "us-west-2"
+        models = json.loads(config["inferenceModels"])
+        assert models == ["arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/usa1"]
 
     def test_unmatched_zone_under_isolation_fails_loudly(self, reload_handler, zone_env, mock_sts):
         """With zone routing configured, a user matching no zone must NOT silently
@@ -403,21 +419,18 @@ class TestZoneRouting:
         with pytest.raises(RuntimeError, match="no configured zone"):
             reload_handler._build_config_response(claims, "user.token")
 
-    def test_prefix_without_hyphen_still_matches(self, reload_handler, monkeypatch, mock_sts):
-        """GROUP_PREFIX 'ccwb' (no trailing hyphen) must still match ccwb-us-*."""
-        monkeypatch.setenv(
-            "ZONE_CONFIG",
-            json.dumps({"us": {"region": "us-west-2", "models": ["arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/uuu"]}}),
-        )
+    def test_prefix_without_hyphen_still_matches(self, reload_handler, zone_env, monkeypatch, mock_sts):
+        """GROUP_PREFIX 'ccwb' (no trailing hyphen) must still match ccwb-usa-*."""
         monkeypatch.setenv("GROUP_PREFIX", "ccwb")  # no trailing hyphen, like the real profile
-        claims = {"sub": "u", "groups": ["ccwb-us-alpha"]}
+        reload_handler._DISCOVERY_CACHE.clear()
+        claims = {"sub": "u", "groups": ["ccwb-usa-alpha"]}
         config = reload_handler._build_config_response(claims, "user.token")
         assert config["inferenceBedrockRegion"] == "us-west-2"
-        assert "application-inference-profile/uuu" in config["inferenceModels"]
+        assert "application-inference-profile/usa1" in config["inferenceModels"]
 
     def test_zone_arns_are_authoritative_models_under_isolation(self, reload_handler, zone_env, mock_sts):
-        """Under GDPR isolation, zone application-inference-profile ARNs are the
-        models — they carry the Zone tag; a role's CRIS models must NOT override."""
+        """Under GDPR isolation, the discovered zone ARNs are the models (they carry
+        the Zone tag); a role's CRIS models must NOT override."""
         claims = {"sub": "u4", "groups": ["ccwb-europe-beta", "ccwb-consulting"]}
         config = reload_handler._build_config_response(claims, "user.token")
 
@@ -428,19 +441,17 @@ class TestZoneRouting:
         # CRIS ids must not leak in
         assert not any("anthropic." in m for m in models)
 
-    def test_role_prefix_models_when_zone_has_no_arns(self, reload_handler, monkeypatch, mock_sts):
-        """A zone with only model_prefix (no ARNs) falls back to prefixed role models."""
-        zone_config = {"apac": {"region": "ap-northeast-1", "model_prefix": "apac"}}
-        role_config = {"engineering": {"models": ["claude-opus-4-6-v1:0"]}}
-        monkeypatch.setenv("ZONE_CONFIG", json.dumps(zone_config))
-        monkeypatch.setenv("ROLE_CONFIG", json.dumps(role_config))
+    def test_zone_with_no_discovered_profiles_raises(self, reload_handler, monkeypatch, mock_sts):
+        """A configured zone whose profiles can't be discovered fails loudly rather
+        than returning a model that would be AccessDenied under isolation."""
+        monkeypatch.setenv("ZONE_CONFIG", json.dumps({"apac": {}}))
+        monkeypatch.setenv("DISCOVERY_REGIONS", "us-west-2,eu-west-3")  # no apac-tagged profile in mock
         monkeypatch.setenv("GROUP_PREFIX", "ccwb-")
+        reload_handler._DISCOVERY_CACHE.clear()
 
-        claims = {"sub": "u5", "groups": ["ccwb-apac-x", "ccwb-engineering"]}
-        config = reload_handler._build_config_response(claims, "user.token")
-
-        assert config["inferenceBedrockRegion"] == "ap-northeast-1"
-        assert "apac.anthropic.claude-opus-4-6-v1:0" in json.loads(config["inferenceModels"])
+        claims = {"sub": "u5", "groups": ["ccwb-apac-x"]}
+        with pytest.raises(RuntimeError, match="No ACTIVE application inference profiles"):
+            reload_handler._build_config_response(claims, "user.token")
 
     def test_role_sets_spend_cap(self, reload_handler, zone_env, mock_sts):
         claims = {"sub": "u6", "groups": ["ccwb-usa-alpha", "ccwb-consulting"]}
@@ -473,56 +484,59 @@ class TestZoneRouting:
         assert "EUROPE" in banner["text"]
 
 
-class TestBuildClaudeDesktopZoneConfig:
-    """Tests for deploy-side derivation of zone_config from inference profiles."""
+class TestZoneDiscovery:
+    """Live discovery of a zone's inference-profile ARNs by Zone tag."""
 
-    def _fn(self):
-        from claude_code_with_bedrock.cli.commands.deploy import build_claude_desktop_zone_config
+    def _mock_bedrock(self, profiles_by_region):
+        """Build a fake boto3.client factory returning per-region bedrock clients.
+        profiles_by_region: {region: [(arn, {tagkey: tagval})]}"""
+        def factory(service, region_name=None, **kw):
+            client = MagicMock()
+            entries = profiles_by_region.get(region_name, [])
+            paginator = MagicMock()
+            paginator.paginate.return_value = [
+                {"inferenceProfileSummaries": [
+                    {"inferenceProfileArn": arn, "status": "ACTIVE"} for arn, _ in entries
+                ]}
+            ]
+            client.get_paginator.return_value = paginator
+            tag_lookup = {arn: [{"key": k, "value": v} for k, v in tags.items()] for arn, tags in entries}
+            client.list_tags_for_resource.side_effect = lambda resourceARN: {"tags": tag_lookup.get(resourceARN, [])}
+            return client
+        return factory
 
-        return build_claude_desktop_zone_config
+    def test_discovers_arns_by_zone_tag(self, reload_handler, monkeypatch):
+        monkeypatch.setenv("DISCOVERY_REGIONS", "us-west-2")
+        monkeypatch.setenv("ZONE_TAG_KEY", "Zone")
+        reload_handler._DISCOVERY_CACHE.clear()
+        factory = self._mock_bedrock({
+            "us-west-2": [
+                ("arn:aws:bedrock:us-west-2:1:application-inference-profile/usa1", {"Zone": "usa"}),
+                ("arn:aws:bedrock:us-west-2:1:application-inference-profile/other", {"Zone": "eu"}),
+            ]
+        })
+        with patch.object(reload_handler.boto3, "client", side_effect=factory):
+            region, arns = reload_handler._discover_zone_profiles("usa", {"AccessKeyId": "a", "SecretAccessKey": "b", "SessionToken": "c"})
+        assert region == "us-west-2"
+        assert arns == ["arn:aws:bedrock:us-west-2:1:application-inference-profile/usa1"]
 
-    def test_derives_region_and_arns_from_profiles(self):
-        """Region is parsed from the ARN; models are the actual ARNs."""
-        zones = ["us", "eu"]
-        zip_map = {
-            "us": {"opus-4-6": "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/uuu"},
-            "eu": {"opus-4-6": "arn:aws:bedrock:eu-west-3:123456789012:application-inference-profile/eee"},
-        }
-        zone_config, skipped = self._fn()(zones, zip_map, "us-east-1")
+    def test_scans_multiple_regions(self, reload_handler, monkeypatch):
+        monkeypatch.setenv("DISCOVERY_REGIONS", "us-west-2,eu-west-3")
+        monkeypatch.setenv("ZONE_TAG_KEY", "Zone")
+        reload_handler._DISCOVERY_CACHE.clear()
+        factory = self._mock_bedrock({
+            "us-west-2": [("arn:aws:bedrock:us-west-2:1:application-inference-profile/usa1", {"Zone": "usa"})],
+            "eu-west-3": [("arn:aws:bedrock:eu-west-3:1:application-inference-profile/eu1", {"Zone": "europe"})],
+        })
+        with patch.object(reload_handler.boto3, "client", side_effect=factory):
+            region, arns = reload_handler._discover_zone_profiles("europe", {"AccessKeyId": "a", "SecretAccessKey": "b", "SessionToken": "c"})
+        assert region == "eu-west-3"
+        assert arns == ["arn:aws:bedrock:eu-west-3:1:application-inference-profile/eu1"]
 
-        assert zone_config["us"]["region"] == "us-west-2"
-        assert zone_config["us"]["models"] == [
-            "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/uuu"
-        ]
-        assert zone_config["eu"]["region"] == "eu-west-3"
-        assert skipped == []
-
-    def test_zone_without_profile_is_skipped(self):
-        """A declared zone with no inference profile is reported, not silently dropped."""
-        zones = ["us", "eu", "ap"]
-        zip_map = {
-            "us": {"opus-4-6": "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/uuu"},
-            "eu": {"opus-4-6": "arn:aws:bedrock:eu-west-3:123456789012:application-inference-profile/eee"},
-        }
-        zone_config, skipped = self._fn()(zones, zip_map, "us-east-1")
-
-        assert "ap" not in zone_config
-        assert skipped == ["ap"]
-
-    def test_multiple_arns_per_zone_all_included(self):
-        """A zone with several model profiles surfaces all of them."""
-        zones = ["us"]
-        zip_map = {
-            "us": {
-                "opus-4-6": "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/a",
-                "sonnet-4-5": "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/b",
-            }
-        }
-        zone_config, _ = self._fn()(zones, zip_map, "us-east-1")
-
-        assert len(zone_config["us"]["models"]) == 2
-
-    def test_empty_inputs(self):
-        zone_config, skipped = self._fn()([], {}, "us-east-1")
-        assert zone_config == {}
-        assert skipped == []
+    def test_no_match_returns_empty(self, reload_handler, monkeypatch):
+        monkeypatch.setenv("DISCOVERY_REGIONS", "us-west-2")
+        reload_handler._DISCOVERY_CACHE.clear()
+        factory = self._mock_bedrock({"us-west-2": [("arn:...:/x", {"Zone": "usa"})]})
+        with patch.object(reload_handler.boto3, "client", side_effect=factory):
+            region, arns = reload_handler._discover_zone_profiles("apac", {"AccessKeyId": "a", "SecretAccessKey": "b", "SessionToken": "c"})
+        assert region is None and arns == []

@@ -67,6 +67,77 @@ def _get_max_session_duration():
     except ValueError:
         return 43200
 
+def _get_discovery_regions():
+    """Regions to scan for zone-tagged application inference profiles.
+    Sourced from the profile's allowed_bedrock_regions (comma-separated env),
+    falling back to the default region."""
+    raw = os.environ.get("DISCOVERY_REGIONS", "")
+    regions = [r.strip() for r in raw.split(",") if r.strip()]
+    return regions or [DEFAULT_INFERENCE_REGION]
+
+def _get_zone_tag_key():
+    return os.environ.get("ZONE_TAG_KEY", "Zone")
+
+
+# Zone-discovery cache: {zone_lower: (region, [arns], epoch_seconds)}. Module scope
+# so warm Lambda containers reuse it; refreshed when older than _DISCOVERY_TTL.
+_DISCOVERY_CACHE = {}
+_DISCOVERY_TTL = 300  # 5 minutes
+
+
+def _discover_zone_profiles(zone, assumed_creds):
+    """Discover a zone's application-inference-profile ARNs LIVE, by tag.
+
+    Scans each configured region for APPLICATION inference profiles whose
+    `<ZONE_TAG_KEY>` tag equals `zone`, using the user's assumed-role credentials
+    (the federated role already grants ListInferenceProfiles/GetInferenceProfile/
+    ListTagsForResource). This replaces any static ARN snapshot, so recreated or
+    renamed profiles are picked up automatically.
+
+    Returns (region, [arns]) for the first region that has matching profiles, or
+    (None, []) if none found. Result cached per-zone for _DISCOVERY_TTL seconds.
+    """
+    zkey = (zone or "").lower()
+    cached = _DISCOVERY_CACHE.get(zkey)
+    if cached and (time.time() - cached[2]) < _DISCOVERY_TTL:
+        return cached[0], cached[1]
+
+    zone_tag_key = _get_zone_tag_key()
+    found_region, found_arns = None, []
+    for region in _get_discovery_regions():
+        client = boto3.client(
+            "bedrock",
+            region_name=region,
+            aws_access_key_id=assumed_creds["AccessKeyId"],
+            aws_secret_access_key=assumed_creds["SecretAccessKey"],
+            aws_session_token=assumed_creds["SessionToken"],
+        )
+        arns = []
+        try:
+            paginator = client.get_paginator("list_inference_profiles")
+            pages = paginator.paginate(typeEquals="APPLICATION")
+        except Exception:
+            # Fall back to a single call if pagination isn't supported
+            pages = [client.list_inference_profiles(typeEquals="APPLICATION")]
+        for page in pages:
+            for prof in page.get("inferenceProfileSummaries", []):
+                arn = prof.get("inferenceProfileArn")
+                if not arn:
+                    continue
+                try:
+                    tags = client.list_tags_for_resource(resourceARN=arn).get("tags", [])
+                except Exception:
+                    continue
+                tag_map = {t["key"]: t["value"] for t in tags}
+                if tag_map.get(zone_tag_key, "").lower() == zkey and prof.get("status", "ACTIVE") == "ACTIVE":
+                    arns.append(arn)
+        if arns:
+            found_region, found_arns = region, arns
+            break
+
+    _DISCOVERY_CACHE[zkey] = (found_region, found_arns, time.time())
+    return found_region, found_arns
+
 
 def _extract_claims(event: dict) -> dict:
     """Read the JWT claims the API Gateway authorizer attached to the request.
@@ -189,49 +260,44 @@ def _derive_session_name(claims: dict) -> str:
     return "claude-desktop"
 
 
-def _mint_bedrock_bearer_token(user_token: str, region: str, role_arn: str, claims: dict):
-    """Exchange the user's OIDC token for a short-term Bedrock bearer token.
+def _assume_role_with_token(user_token: str, role_arn: str, claims: dict):
+    """Exchange the user's OIDC token for STS credentials via
+    AssumeRoleWithWebIdentity. Session tags (Zone/Project) ride in the token's
+    https://aws.amazon.com/tags claim and STS applies them automatically.
 
-    Forwards the user's token to STS AssumeRoleWithWebIdentity (NOT the Lambda's
-    own identity) so the token's https://aws.amazon.com/tags claim delivers the
-    Zone/Project session tags. Then SigV4-presigns a CallWithBearerToken request
-    to produce the `bedrock-api-key-<base64>` token Claude Desktop expects.
-
-    Returns (token_string, expiration_epoch_seconds).
-    Raises on any STS or signing failure (caller maps to 403).
+    Returns the STS Credentials dict (AccessKeyId/SecretAccessKey/SessionToken/
+    Expiration). Raises on failure (caller maps to 403).
     """
     duration = _get_max_session_duration()
-
-    # AssumeRoleWithWebIdentity is authorized by the target role's trust policy
-    # plus the web-identity token — it needs no caller credentials. We use an
-    # UNSIGNED STS client so the Lambda's own execution-role credentials are not
-    # attached (mirrors the credential-process binary clearing AWS_* env vars).
-    # Session tags are NOT passed as a parameter; they ride in the token's
-    # https://aws.amazon.com/tags claim and STS applies them automatically.
-    sts = boto3.client(
-        "sts",
-        region_name=region,
-        config=BotoConfig(signature_version=UNSIGNED),
-    )
+    # UNSIGNED STS client so the Lambda's own execution-role credentials aren't
+    # attached — AssumeRoleWithWebIdentity is authorized by the target role's
+    # trust policy + the web-identity token, not the caller.
+    sts = boto3.client("sts", config=BotoConfig(signature_version=UNSIGNED))
     resp = sts.assume_role_with_web_identity(
         RoleArn=role_arn,
         RoleSessionName=_derive_session_name(claims),
         WebIdentityToken=user_token,
         DurationSeconds=duration,
     )
-    creds = resp["Credentials"]
-    expiration = creds["Expiration"]
+    return resp["Credentials"]
+
+
+def _mint_bedrock_bearer_token_from_creds(creds: dict, region: str):
+    """Mint a short-term Bedrock bearer token from STS credentials, byte-for-byte
+    matching the official aws-bedrock-token-generator:
+      - SigV4-PRESIGN a POST on the GLOBAL host https://bedrock.amazonaws.com/
+        with params Action=CallWithBearerToken (service "bedrock", signed for `region`)
+      - drop the "https://" scheme, append "&Version=1"
+      - STANDARD base64 (WITH "=" padding — url-safe/stripped padding => Bedrock
+        "Base64 decoding failed")
+      - prepend the literal prefix "bedrock-api-key-"
+
+    Returns (token_string, expiration_epoch_seconds).
+    """
+    duration = _get_max_session_duration()
+    expiration = creds.get("Expiration")
     expiration_epoch = int(expiration.timestamp()) if hasattr(expiration, "timestamp") else int(time.time()) + duration
 
-    # Mint the Bedrock bearer token, byte-for-byte matching the official
-    # aws-bedrock-token-generator (aws_bedrock_token_generator/token_generator.py):
-    #   - SigV4-PRESIGN a POST on the GLOBAL host https://bedrock.amazonaws.com/
-    #     with params Action=CallWithBearerToken (service "bedrock", signed for
-    #     the target region)
-    #   - drop the "https://" scheme, append "&Version=1"
-    #   - STANDARD base64 (base64.b64encode, WITH "=" padding — Bedrock's decoder
-    #     requires the padding; url-safe/stripped padding => "Base64 decoding failed")
-    #   - prepend the literal prefix "bedrock-api-key-"
     botocore_creds = Credentials(creds["AccessKeyId"], creds["SecretAccessKey"], creds["SessionToken"])
     request = AWSRequest(
         method="POST",
@@ -243,7 +309,6 @@ def _mint_bedrock_bearer_token(user_token: str, region: str, role_arn: str, clai
     presigned_url = request.url.replace("https://", "") + "&Version=1"
     encoded = base64.b64encode(presigned_url.encode("utf-8")).decode("utf-8")
     token = "bedrock-api-key-" + encoded
-
     return token, expiration_epoch
 
 
@@ -271,45 +336,55 @@ def _build_config_response(claims: dict, user_token: str) -> dict:
     role_config = json.loads(role_config_raw) if role_config_raw else {}
     feature_defaults = json.loads(feature_defaults_raw) if feature_defaults_raw else {}
 
-    # Resolve zone → determines region and (under GDPR isolation) the exact
-    # application-inference-profile ARNs the user is allowed to invoke.
-    resolved_zone = _resolve_zone(groups, zone_config, prefix) if zone_config else None
-    inference_region = resolved_zone["region"] if resolved_zone else DEFAULT_INFERENCE_REGION
+    if not role_arn:
+        raise RuntimeError("FEDERATED_ROLE_ARN is not configured on the bootstrap Lambda")
 
-    # Resolve role → spend caps, MCP servers (and models when no zone ARNs apply).
+    # Resolve the zone NAME from the user's groups. zone_config keys are the set of
+    # valid zone names (region/ARNs are discovered live, not read from here).
+    resolved_zone = _resolve_zone(groups, zone_config, prefix) if zone_config else None
     resolved_role = _resolve_role(groups, role_config, prefix) if role_config else None
 
-    # When zone routing is configured (GDPR isolation) but the user's groups match
-    # no zone, do NOT fall back to a CRIS default — under isolation that model has
-    # no Zone tag and Bedrock would AccessDeny it, masking the real cause. Fail
-    # loudly so the operator sees "user's groups map to no configured zone".
+    # Under GDPR isolation (zone routing configured) a user matching no zone is a
+    # hard error — never fall back to a CRIS default that Bedrock would AccessDeny.
     if zone_config and not resolved_zone:
         raise RuntimeError(
             f"User groups {groups!r} match no configured zone "
-            f"(zones: {list(zone_config)}). Check the user's IdP group vs "
-            f"claude_desktop_zone_config / okta_group_prefix."
+            f"(zones: {list(zone_config)}). Check the user's IdP group vs the "
+            f"configured zones / okta_group_prefix."
         )
 
-    # Model precedence:
-    #   1. Zone application-inference-profile ARNs (GDPR isolation) — authoritative,
-    #      they carry the Zone resource tag the IAM AllowBedrockInvokeInZone policy
-    #      requires. A CRIS model ID would be denied under isolation.
-    #   2. Role model list, prefixed with the zone's model_prefix (non-isolated
-    #      zone routing).
-    #   3. DEFAULT_INFERENCE_MODELS (only when no zone routing is configured at all).
-    if resolved_zone and resolved_zone.get("models"):
-        models = list(resolved_zone["models"])
+    # Exchange the user's token for STS credentials ONCE. These same creds are used
+    # both to discover the zone's inference profiles and to mint the bearer token,
+    # so discovery runs as the user (respecting their zone-scoped permissions).
+    creds = _assume_role_with_token(user_token, role_arn, claims)
+
+    # Determine region + model list.
+    if resolved_zone:
+        # DISCOVER the zone's application-inference-profile ARNs live, by Zone tag,
+        # across the configured regions. Region for inference = where the profiles
+        # actually live (from the profile's ccwb:Region, i.e. the region we found
+        # them in). No static ARN snapshot => recreated/renamed profiles just work.
+        zone_name = resolved_zone["name"]
+        discovered_region, discovered_arns = _discover_zone_profiles(zone_name, creds)
+        if not discovered_arns:
+            raise RuntimeError(
+                f"No ACTIVE application inference profiles tagged {_get_zone_tag_key()}="
+                f"{zone_name!r} found in regions {_get_discovery_regions()}. "
+                f"Run 'ccwb inference-zone create' for this zone."
+            )
+        inference_region = discovered_region
+        models = discovered_arns
     elif resolved_role and "models" in resolved_role:
-        model_prefix = resolved_zone.get("model_prefix", "us") if resolved_zone else "us"
+        # Non-isolated role routing: prefix CRIS model ids.
+        model_prefix = "us"
         models = [f"{model_prefix}.anthropic.{m}" if not m.startswith(model_prefix) else m
                   for m in resolved_role["models"]]
+        inference_region = DEFAULT_INFERENCE_REGION
     else:
         models = [m.strip() for m in DEFAULT_INFERENCE_MODELS.split(",") if m.strip()]
+        inference_region = DEFAULT_INFERENCE_REGION
 
-    # Broker a per-user Bedrock bearer token for the resolved region.
-    if not role_arn:
-        raise RuntimeError("FEDERATED_ROLE_ARN is not configured on the bootstrap Lambda")
-    bearer_token, token_expiry = _mint_bedrock_bearer_token(user_token, inference_region, role_arn, claims)
+    bearer_token, token_expiry = _mint_bedrock_bearer_token_from_creds(creds, inference_region)
 
     # Re-fetch slightly before the STS session expires so the client always has
     # a live token. 5-minute skew.

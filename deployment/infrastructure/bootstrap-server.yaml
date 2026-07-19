@@ -52,8 +52,21 @@ Parameters:
 
   ZoneConfig:
     Type: String
-    Description: "JSON mapping of zone names to region config (e.g. {\"usa\":{\"region\":\"us-east-1\",\"sso_region\":\"us-east-1\",\"model_prefix\":\"us\"}})"
+    Description: >
+      JSON object whose KEYS are the valid zone names (e.g. {"usa":{},"europe":{}}).
+      The per-zone inference-profile ARNs and region are discovered LIVE at request
+      time by the Zone tag (not stored here), so recreated/renamed profiles just work.
     Default: ""
+
+  DiscoveryRegions:
+    Type: String
+    Description: "Comma-separated regions to scan for zone-tagged application inference profiles (the profile's allowed_bedrock_regions)."
+    Default: ""
+
+  ZoneTagKey:
+    Type: String
+    Description: "The resource-tag key that identifies a profile's zone. Matches the GDPR isolation Zone tag."
+    Default: "Zone"
 
   RoleConfig:
     Type: String
@@ -108,6 +121,8 @@ Resources:
           OTLP_ENDPOINT: !Ref OtlpEndpoint
           INFERENCE_SESSION_LIFETIME_SEC: !Ref InferenceSessionLifetimeSec
           ZONE_CONFIG: !Ref ZoneConfig
+          DISCOVERY_REGIONS: !Ref DiscoveryRegions
+          ZONE_TAG_KEY: !Ref ZoneTagKey
           ROLE_CONFIG: !Ref RoleConfig
           FEATURE_DEFAULTS: !Ref FeatureDefaults
           GROUP_PREFIX: !Ref GroupPrefix

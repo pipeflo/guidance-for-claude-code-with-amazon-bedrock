@@ -28,32 +28,6 @@ from claude_code_with_bedrock.cli.utils.cloudformation import CloudFormationMana
 from claude_code_with_bedrock.config import Config
 
 
-def build_claude_desktop_zone_config(zones, zone_inference_profiles, default_region):
-    """Derive the Claude Desktop bootstrap zone_config from real inference profiles.
-
-    Under GDPR isolation, each zone's users must invoke that zone's
-    application-inference-profile ARN (which carries the Zone resource tag the IAM
-    policy checks) in the ARN's own region. This reads those ARNs from the profile's
-    ``zone_inference_profiles`` rather than guessing regions, so the broker always
-    routes to where the profile actually lives.
-
-    Returns ``(zone_config, skipped)`` where zone_config maps zone -> {region, models}
-    and skipped is the list of declared zones that have no inference profile yet.
-    """
-    zone_config = {}
-    skipped = []
-    zip_map = zone_inference_profiles or {}
-    for zone in zones or []:
-        arns = list((zip_map.get(zone) or {}).values())
-        if not arns:
-            skipped.append(zone)
-            continue
-        # ARN shape: arn:aws:bedrock:<region>:<acct>:application-inference-profile/<id>
-        region = arns[0].split(":")[3] if arns[0].count(":") >= 4 else default_region
-        zone_config[zone] = {"region": region, "models": arns}
-    return zone_config, skipped
-
-
 class DeployCommand(Command):
     name = "deploy"
     description = "Deploy AWS infrastructure (auth, monitoring, dashboards)"
@@ -1106,30 +1080,25 @@ class DeployCommand(Command):
                 # Get inference models
                 inference_models = getattr(profile, "selected_model", "") or "us.anthropic.claude-sonnet-4-20250514-v1:0"
 
-                # Build zone config. Prefer an explicit claude_desktop_zone_config if the
-                # admin hand-edited one; otherwise DERIVE it from the real per-zone
-                # application-inference-profile ARNs (zone_inference_profiles). Under GDPR
-                # isolation, users must invoke the zone's application-inference-profile ARN
-                # (which carries the Zone resource tag the IAM AllowBedrockInvokeInZone
-                # policy checks) and in the ARN's own region — a CRIS model ID would be
-                # denied. Region is parsed from the ARN so it always matches where the
-                # profile actually lives; no hardcoded region guesses.
-                zone_config = getattr(profile, "claude_desktop_zone_config", {}) or {}
-                if not zone_config and getattr(profile, "enforce_project_isolation", False):
-                    zone_config, skipped_zones = build_claude_desktop_zone_config(
-                        getattr(profile, "zones", []) or [],
-                        getattr(profile, "zone_inference_profiles", {}) or {},
-                        profile.aws_region,
-                    )
-                    for z in skipped_zones:
-                        console.print(
-                            f"[yellow]⚠ Zone '{z}' has no application inference profile — "
-                            f"skipping it in Claude Desktop routing.[/yellow]"
-                        )
-                        console.print(
-                            f"[dim]  Run 'ccwb inference-profile create --zone {z} --model <m>' "
-                            f"then re-run 'ccwb deploy bootstrap' to add it.[/dim]"
-                        )
+                # Zone config = just the set of VALID ZONE NAMES. The Lambda
+                # discovers each zone's inference-profile ARNs + region LIVE at
+                # request time by the Zone tag, so recreated/renamed profiles are
+                # picked up automatically (no static ARN snapshot to drift).
+                # Explicit claude_desktop_zone_config keys win; otherwise use the
+                # profile's `zones` when GDPR isolation is enabled.
+                explicit_zone_config = getattr(profile, "claude_desktop_zone_config", {}) or {}
+                if explicit_zone_config:
+                    zone_names = list(explicit_zone_config.keys())
+                elif getattr(profile, "enforce_project_isolation", False):
+                    zone_names = list(getattr(profile, "zones", []) or [])
+                else:
+                    zone_names = []
+                zone_config = {z: {} for z in zone_names}
+
+                # Regions the Lambda scans to discover zone-tagged profiles.
+                discovery_regions = ",".join(getattr(profile, "allowed_bedrock_regions", []) or [profile.aws_region])
+                # The Zone tag key is fixed by the GDPR isolation design ("Zone").
+                zone_tag_key = "Zone"
 
                 role_config = getattr(profile, "claude_desktop_role_config", {}) or {}
                 feature_defaults = getattr(profile, "claude_desktop_feature_defaults", {}) or {}
@@ -1172,6 +1141,8 @@ class DeployCommand(Command):
                     f"DefaultInferenceModels={inference_models}",
                     f"OtlpEndpoint={otlp_endpoint}",
                     f"ZoneConfig={json.dumps(zone_config) if zone_config else ''}",
+                    f"DiscoveryRegions={discovery_regions}",
+                    f"ZoneTagKey={zone_tag_key}",
                     f"RoleConfig={json.dumps(role_config) if role_config else ''}",
                     f"FeatureDefaults={json.dumps(feature_defaults) if feature_defaults else ''}",
                     f"GroupPrefix={group_prefix}",

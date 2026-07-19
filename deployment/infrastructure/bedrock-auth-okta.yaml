@@ -328,6 +328,7 @@ Resources:
                 - 'bedrock:GetFoundationModelAvailability'
                 - 'bedrock:ListInferenceProfiles'
                 - 'bedrock:GetInferenceProfile'
+                - 'bedrock:ListTagsForResource'
               Resource: '*'
             - Sid: AllowBedrockListRegional
               Effect: Allow
@@ -337,6 +338,7 @@ Resources:
                 - 'bedrock:GetFoundationModelAvailability'
                 - 'bedrock:ListInferenceProfiles'
                 - 'bedrock:GetInferenceProfile'
+                - 'bedrock:ListTagsForResource'
               Resource: '*'
               Condition:
                 StringEquals:
@@ -352,6 +354,7 @@ Resources:
                 - 'bedrock:GetFoundationModelAvailability'
                 - 'bedrock:ListInferenceProfiles'
                 - 'bedrock:GetInferenceProfile'
+                - 'bedrock:ListTagsForResource'
               Resource: '*'
           - !If
             - MonitoringEnabled
