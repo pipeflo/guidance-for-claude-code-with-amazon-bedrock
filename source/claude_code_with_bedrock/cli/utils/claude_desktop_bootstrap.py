@@ -74,6 +74,14 @@ def build_trust_anchor_config(profile, bootstrap_endpoint: str) -> dict:
             oidc["authorizationUrl"] = f"{issuer.rstrip('/')}/authorize"
             oidc["tokenUrl"] = f"{issuer.rstrip('/')}/token"
 
+    # Okta requires the loopback redirect URI to use a FIXED port registered on
+    # the Native app (it doesn't allow dynamic/wildcard ports for 127.0.0.1).
+    # Pin redirectPort so Claude Desktop always uses http://127.0.0.1:<port>/callback
+    # and the admin can register exactly that URI. Configurable per profile;
+    # defaults to 53180 (the value in Anthropic's docs).
+    if profile.provider_type == "okta":
+        oidc["redirectPort"] = str(getattr(profile, "claude_desktop_redirect_port", None) or "53180")
+
     # Per the config reference, ALL values are strings — including booleans.
     return {
         "bootstrapEnabled": "true",

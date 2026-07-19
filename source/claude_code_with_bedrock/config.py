@@ -166,6 +166,10 @@ class Profile:
     # per-user config the bootstrap Lambda returns.
     claude_desktop_bootstrap_endpoint: str | None = None  # saved from deploy output
     claude_desktop_bootstrap_oidc_client_id: str | None = None  # defaults to profile client_id
+    # Okta requires a FIXED loopback redirect port registered on the Native app
+    # (no dynamic/wildcard ports for 127.0.0.1). This is the port Claude Desktop
+    # uses for its PKCE callback; the admin registers http://127.0.0.1:<port>/callback.
+    claude_desktop_redirect_port: int = 53180
     # DEPRECATED (IAM Identity Center path, superseded by the broker). Kept so
     # profile JSON written by earlier builds still loads; no longer populated or read.
     claude_desktop_sso_start_url: str = ""  # deprecated: broker path unused

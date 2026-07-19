@@ -114,6 +114,16 @@ class TestBuildTrustAnchorConfig:
         assert oidc["authorizationUrl"].endswith("/v1/authorize")
         assert oidc["tokenUrl"].endswith("/v1/token")
 
+    def test_okta_fixed_redirect_port(self, okta_profile):
+        """Okta needs a fixed loopback port (no dynamic ports); default 53180."""
+        config = build_trust_anchor_config(okta_profile, "https://b.example.com")
+        assert config["bootstrapOidc"]["redirectPort"] == "53180"
+
+    def test_redirect_port_configurable(self, okta_profile):
+        okta_profile.claude_desktop_redirect_port = 8123
+        config = build_trust_anchor_config(okta_profile, "https://b.example.com")
+        assert config["bootstrapOidc"]["redirectPort"] == "8123"
+
 
 class TestGenerateJson:
     def test_writes_indented_json(self, okta_profile, tmp_path):
