@@ -191,12 +191,12 @@ class DeployCommand(Command):
                         "Run 'poetry run ccwb init' and select 'Dynamic' for CoWork configuration delivery."
                     )
                     return 1
-                if profile.effective_auth_type != "oidc":
+                if not getattr(profile, "sso_enabled", True):
                     console.print(
-                        "[yellow]Bootstrap server requires OIDC authentication.[/yellow]"
+                        "[yellow]Bootstrap server requires OIDC/SSO authentication (sso_enabled).[/yellow]"
                     )
                     return 1
-                stacks_to_deploy.append(("bootstrap", "CoWork Bootstrap Server"))
+                stacks_to_deploy.append(("bootstrap", "Claude Desktop Bootstrap Server"))
             else:
                 console.print(f"[red]Unknown stack: {stack_arg}[/red]")
                 console.print(
@@ -253,8 +253,8 @@ class DeployCommand(Command):
 
             # Check if bootstrap server is enabled (dynamic CoWork config delivery)
             if getattr(profile, "cowork_config_mode", "static") == "dynamic":
-                if profile.effective_auth_type == "oidc":
-                    stacks_to_deploy.append(("bootstrap", "CoWork Bootstrap Server"))
+                if getattr(profile, "sso_enabled", True):
+                    stacks_to_deploy.append(("bootstrap", "Claude Desktop Bootstrap Server"))
 
         # Initialize CloudFormation manager
         cf_manager = CloudFormationManager(region=profile.aws_region)
