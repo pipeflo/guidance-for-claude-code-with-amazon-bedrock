@@ -192,19 +192,25 @@ def _mint_bedrock_bearer_token(user_token: str, region: str, role_arn: str, clai
     expiration = creds["Expiration"]
     expiration_epoch = int(expiration.timestamp()) if hasattr(expiration, "timestamp") else int(time.time()) + duration
 
-    # Mint the Bedrock bearer token by SigV4-presigning CallWithBearerToken.
-    # The token inherits the STS session (and therefore the session tags), so it
-    # is a per-user credential scoped to the user's zone.
+    # Mint the Bedrock bearer token, byte-for-byte matching the official
+    # aws-bedrock-token-generator algorithm (any deviation => Bedrock rejects with
+    # "Invalid API Key format: Must start with pre-defined prefix"):
+    #   1. SigV4-PRESIGN a GET on https://bedrock.<region>.amazonaws.com/
+    #      ?Action=CallWithBearerToken  (service "bedrock", regional host)
+    #   2. take the presigned URL, drop the "https://" scheme, append "&Version=1"
+    #   3. URL-SAFE base64, strip "=" padding
+    #   4. prepend the literal prefix "bedrock-api-key-"
     botocore_creds = Credentials(creds["AccessKeyId"], creds["SecretAccessKey"], creds["SessionToken"])
+    host = f"bedrock.{region}.amazonaws.com"
     request = AWSRequest(
-        method="POST",
-        url="https://bedrock.amazonaws.com/",
-        headers={"host": "bedrock.amazonaws.com"},
-        params={"Action": "CallWithBearerToken"},
+        method="GET",
+        url=f"https://{host}/?Action=CallWithBearerToken",
+        headers={"host": host},
     )
     SigV4QueryAuth(botocore_creds, "bedrock", region, expires=duration).add_auth(request)
-    presigned = request.url.replace("https://", "") + "&Version=1"
-    token = "bedrock-api-key-" + base64.b64encode(presigned.encode()).decode()
+    presigned = request.url[len("https://"):] + "&Version=1"
+    encoded = base64.urlsafe_b64encode(presigned.encode("utf-8")).decode("utf-8").rstrip("=")
+    token = "bedrock-api-key-" + encoded
 
     return token, expiration_epoch
 

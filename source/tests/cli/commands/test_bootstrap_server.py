@@ -246,6 +246,45 @@ class TestDeriveSessionName:
         assert len(reload_handler._derive_session_name({"email": long_email})) <= 64
 
 
+class TestMintBedrockBearerToken:
+    """The Bedrock API key format must match aws-bedrock-token-generator exactly,
+    or Bedrock rejects with 'Invalid API Key format: Must start with pre-defined
+    prefix'. Validates prefix + URL-safe base64 payload decoding to a
+    CallWithBearerToken presigned URL."""
+
+    def test_token_format(self, reload_handler, mock_sts):
+        import base64
+
+        token, exp = reload_handler._mint_bedrock_bearer_token(
+            "user.token", "us-west-2", "arn:aws:iam::123456789012:role/R", {"email": "a@ex.com"}
+        )
+        # 1. exact prefix
+        assert token.startswith("bedrock-api-key-")
+        payload = token[len("bedrock-api-key-"):]
+
+        # 2. payload must be URL-safe base64 (no +, /, or = padding chars)
+        assert "+" not in payload and "/" not in payload and "=" not in payload
+
+        # 3. decodes (with padding restored) to the presigned CallWithBearerToken URL
+        padded = payload + "=" * (-len(payload) % 4)
+        decoded = base64.urlsafe_b64decode(padded).decode("utf-8")
+        assert decoded.startswith("bedrock.us-west-2.amazonaws.com/?Action=CallWithBearerToken")
+        assert decoded.endswith("&Version=1")
+        assert "X-Amz-Signature=" in decoded  # it was actually SigV4-presigned
+        assert "X-Amz-Security-Token=" in decoded  # STS session token carried
+
+    def test_region_in_host(self, reload_handler, mock_sts):
+        import base64
+
+        token, _ = reload_handler._mint_bedrock_bearer_token(
+            "t", "eu-west-3", "arn:aws:iam::123456789012:role/R", {"email": "b@ex.com"}
+        )
+        payload = token[len("bedrock-api-key-"):]
+        decoded = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)).decode("utf-8")
+        # token is signed for the resolved zone's region
+        assert decoded.startswith("bedrock.eu-west-3.amazonaws.com/")
+
+
 class TestBuildConfigResponse:
     """Tests for _build_config_response (default / no-zone path)."""
 
