@@ -516,6 +516,17 @@ class InitCommand(Command):
             config = progress.get_saved_data() or {}
         last_step = progress.get_last_step()
 
+        # When updating an existing profile, prefix prompts with the current
+        # value so the user can just press Enter to confirm rather than having
+        # to infer it from the (Y/n) capitalization. No-op for new profiles.
+        updating_existing = bool(existing_config)
+
+        def _current(label: str) -> str:
+            """Return a '[current: X]' annotation for the given saved value."""
+            if not updating_existing:
+                return ""
+            return f" [current: {label}]"
+
         # Skip completed steps only if we're not updating existing config
         if existing_config:
             # When updating existing config, don't skip any steps
@@ -544,7 +555,7 @@ class InitCommand(Command):
             console.print("  • No user authentication required\n")
 
             sso_enabled = questionary.confirm(
-                "Enable SSO authentication?",
+                "Enable SSO authentication?" + _current("Yes" if config.get("sso_enabled", True) else "No"),
                 default=config.get("sso_enabled", True),
             ).ask()
 
@@ -806,7 +817,8 @@ class InitCommand(Command):
             # mention of identity-provider-side configuration.
             if federation_type == "direct":
                 attribution_enabled = questionary.confirm(
-                    "Enable per-project cost attribution?",
+                    "Enable per-project cost attribution?"
+                    + _current("Yes" if config.get("project_attribution_enabled", False) else "No"),
                     default=config.get("project_attribution_enabled", False),
                     instruction=(
                         "(Optional. Tags Bedrock spend with the user's project via IdP group, "
@@ -828,7 +840,7 @@ class InitCommand(Command):
                 # extraction all key on the same string.
                 if attribution_enabled:
                     cost_tag_key = questionary.text(
-                        "Cost-attribution session-tag key:",
+                        "Cost-attribution session-tag key:" + _current(config.get("cost_attribution_tag_key", "Project")),
                         default=config.get("cost_attribution_tag_key", "Project"),
                         instruction=(
                             "(Press Enter for 'Project' — matches upstream and historical docs. "
@@ -869,7 +881,8 @@ class InitCommand(Command):
                 # off so existing wizards see no behavior change.
                 if attribution_enabled:
                     isolation_enabled = questionary.confirm(
-                        "Enforce per-zone inference-profile isolation (GDPR)?",
+                        "Enforce per-zone inference-profile isolation (GDPR)?"
+                        + _current("Yes" if config.get("enforce_project_isolation", False) else "No"),
                         default=config.get("enforce_project_isolation", False),
                         instruction=(
                             "(Optional. Each Okta group is routed to a separate Bedrock "
@@ -885,7 +898,8 @@ class InitCommand(Command):
 
                     if isolation_enabled:
                         zones_raw = questionary.text(
-                            "Compliance zones (space-separated, lowercase recommended):",
+                            "Compliance zones (space-separated, lowercase recommended):"
+                            + _current(" ".join(config.get("zones") or []) or "none"),
                             default=" ".join(config.get("zones") or []),
                             instruction=(
                                 "(e.g. 'eu us' — these become the Zone session-tag values "
