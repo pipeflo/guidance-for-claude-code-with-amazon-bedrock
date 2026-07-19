@@ -289,15 +289,24 @@ def _build_config_response(claims: dict, user_token: str) -> dict:
     role_config = json.loads(role_config_raw) if role_config_raw else {}
     feature_defaults = json.loads(feature_defaults_raw) if feature_defaults_raw else {}
 
-    # Resolve zone → determines region
+    # Resolve zone → determines region and (under GDPR isolation) the exact
+    # application-inference-profile ARNs the user is allowed to invoke.
     resolved_zone = _resolve_zone(groups, zone_config, prefix) if zone_config else None
     inference_region = resolved_zone["region"] if resolved_zone else DEFAULT_INFERENCE_REGION
 
-    # Resolve role → determines models, spend caps, MCP servers
+    # Resolve role → spend caps, MCP servers (and models when no zone ARNs apply).
     resolved_role = _resolve_role(groups, role_config, prefix) if role_config else None
 
-    # Determine models: role-specific (with zone prefix) > default list
-    if resolved_role and "models" in resolved_role:
+    # Model precedence:
+    #   1. Zone application-inference-profile ARNs (GDPR isolation) — authoritative,
+    #      they carry the Zone resource tag the IAM AllowBedrockInvokeInZone policy
+    #      requires. A CRIS model ID would be denied under isolation.
+    #   2. Role model list, prefixed with the zone's model_prefix (non-isolated
+    #      zone routing).
+    #   3. DEFAULT_INFERENCE_MODELS.
+    if resolved_zone and resolved_zone.get("models"):
+        models = list(resolved_zone["models"])
+    elif resolved_role and "models" in resolved_role:
         model_prefix = resolved_zone.get("model_prefix", "us") if resolved_zone else "us"
         models = [f"{model_prefix}.anthropic.{m}" if not m.startswith(model_prefix) else m
                   for m in resolved_role["models"]]

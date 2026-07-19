@@ -364,9 +364,20 @@ class TestZoneRouting:
 
     @pytest.fixture
     def zone_env(self, monkeypatch):
+        # GDPR shape: each zone carries the real application-inference-profile
+        # ARN(s) + the region parsed from the ARN. model_prefix is only used for
+        # non-isolated zones that route by CRIS prefix (see test below).
         zone_config = {
-            "usa": {"region": "us-east-1", "model_prefix": "us"},
-            "europe": {"region": "eu-west-3", "model_prefix": "eu"},
+            "usa": {
+                "region": "us-west-2",
+                "models": ["arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/usaaa"],
+                "model_prefix": "us",
+            },
+            "europe": {
+                "region": "eu-west-3",
+                "models": ["arn:aws:bedrock:eu-west-3:123456789012:application-inference-profile/euuu"],
+                "model_prefix": "eu",
+            },
         }
         role_config = {
             "consulting": {
@@ -400,11 +411,11 @@ class TestZoneRouting:
         assert kwargs.get("region_name") == "eu-west-3"
 
     def test_usa_zone_routing(self, reload_handler, zone_env, mock_sts):
-        """User in ccwb-usa-alpha group gets us-east-1 region."""
+        """User in ccwb-usa-alpha group gets the zone's ARN region (us-west-2)."""
         claims = {"sub": "u2", "email": "u2@ex.com", "groups": ["ccwb-usa-alpha"]}
         config = reload_handler._build_config_response(claims, "user.token")
 
-        assert config["inferenceBedrockRegion"] == "us-east-1"
+        assert config["inferenceBedrockRegion"] == "us-west-2"
 
     def test_no_zone_uses_default(self, reload_handler, zone_env, mock_sts):
         """User with no matching zone group gets default region."""
@@ -413,19 +424,31 @@ class TestZoneRouting:
 
         assert config["inferenceBedrockRegion"] == "us-west-2"
 
-    def test_role_sets_models_with_zone_prefix(self, reload_handler, zone_env, mock_sts):
-        """Consulting role in Europe zone gets eu-prefixed models."""
+    def test_zone_arns_are_authoritative_models_under_isolation(self, reload_handler, zone_env, mock_sts):
+        """Under GDPR isolation, zone application-inference-profile ARNs are the
+        models — they carry the Zone tag; a role's CRIS models must NOT override."""
         claims = {"sub": "u4", "groups": ["ccwb-europe-beta", "ccwb-consulting"]}
         config = reload_handler._build_config_response(claims, "user.token")
 
-        assert "eu.anthropic.claude-opus-4-6-v1:0" in config["inferenceModels"]
+        assert config["inferenceModels"] == [
+            "arn:aws:bedrock:eu-west-3:123456789012:application-inference-profile/euuu"
+        ]
+        # CRIS ids must not leak in
+        assert not any("anthropic." in m for m in config["inferenceModels"])
 
-    def test_role_sets_models_with_us_prefix(self, reload_handler, zone_env, mock_sts):
-        """Engineering role in USA zone gets us-prefixed models."""
-        claims = {"sub": "u5", "groups": ["ccwb-usa-alpha", "ccwb-engineering"]}
+    def test_role_prefix_models_when_zone_has_no_arns(self, reload_handler, monkeypatch, mock_sts):
+        """A zone with only model_prefix (no ARNs) falls back to prefixed role models."""
+        zone_config = {"apac": {"region": "ap-northeast-1", "model_prefix": "apac"}}
+        role_config = {"engineering": {"models": ["claude-opus-4-6-v1:0"]}}
+        monkeypatch.setenv("ZONE_CONFIG", json.dumps(zone_config))
+        monkeypatch.setenv("ROLE_CONFIG", json.dumps(role_config))
+        monkeypatch.setenv("GROUP_PREFIX", "ccwb-")
+
+        claims = {"sub": "u5", "groups": ["ccwb-apac-x", "ccwb-engineering"]}
         config = reload_handler._build_config_response(claims, "user.token")
 
-        assert "us.anthropic.claude-haiku-4-5-v1:0" in config["inferenceModels"]
+        assert config["inferenceBedrockRegion"] == "ap-northeast-1"
+        assert "apac.anthropic.claude-opus-4-6-v1:0" in config["inferenceModels"]
 
     def test_role_sets_spend_cap(self, reload_handler, zone_env, mock_sts):
         claims = {"sub": "u6", "groups": ["ccwb-usa-alpha", "ccwb-consulting"]}
@@ -461,3 +484,58 @@ class TestZoneRouting:
         config = reload_handler._build_config_response(claims, "user.token")
 
         assert "banner" not in config
+
+
+class TestBuildClaudeDesktopZoneConfig:
+    """Tests for deploy-side derivation of zone_config from inference profiles."""
+
+    def _fn(self):
+        from claude_code_with_bedrock.cli.commands.deploy import build_claude_desktop_zone_config
+
+        return build_claude_desktop_zone_config
+
+    def test_derives_region_and_arns_from_profiles(self):
+        """Region is parsed from the ARN; models are the actual ARNs."""
+        zones = ["us", "eu"]
+        zip_map = {
+            "us": {"opus-4-6": "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/uuu"},
+            "eu": {"opus-4-6": "arn:aws:bedrock:eu-west-3:123456789012:application-inference-profile/eee"},
+        }
+        zone_config, skipped = self._fn()(zones, zip_map, "us-east-1")
+
+        assert zone_config["us"]["region"] == "us-west-2"
+        assert zone_config["us"]["models"] == [
+            "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/uuu"
+        ]
+        assert zone_config["eu"]["region"] == "eu-west-3"
+        assert skipped == []
+
+    def test_zone_without_profile_is_skipped(self):
+        """A declared zone with no inference profile is reported, not silently dropped."""
+        zones = ["us", "eu", "ap"]
+        zip_map = {
+            "us": {"opus-4-6": "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/uuu"},
+            "eu": {"opus-4-6": "arn:aws:bedrock:eu-west-3:123456789012:application-inference-profile/eee"},
+        }
+        zone_config, skipped = self._fn()(zones, zip_map, "us-east-1")
+
+        assert "ap" not in zone_config
+        assert skipped == ["ap"]
+
+    def test_multiple_arns_per_zone_all_included(self):
+        """A zone with several model profiles surfaces all of them."""
+        zones = ["us"]
+        zip_map = {
+            "us": {
+                "opus-4-6": "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/a",
+                "sonnet-4-5": "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/b",
+            }
+        }
+        zone_config, _ = self._fn()(zones, zip_map, "us-east-1")
+
+        assert len(zone_config["us"]["models"]) == 2
+
+    def test_empty_inputs(self):
+        zone_config, skipped = self._fn()([], {}, "us-east-1")
+        assert zone_config == {}
+        assert skipped == []
