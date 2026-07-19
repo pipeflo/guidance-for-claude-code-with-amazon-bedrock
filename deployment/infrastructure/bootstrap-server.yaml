@@ -20,14 +20,8 @@ Parameters:
 
   OidcClientId:
     Type: String
-    Description: "OIDC client ID for token audience validation"
+    Description: "OIDC client ID — the JWT authorizer's audience"
     MinLength: 1
-
-  OidcJwksEndpoint:
-    Type: String
-    Description: "JWKS endpoint URL for JWT signature verification"
-    AllowedPattern: "^https://.*"
-    ConstraintDescription: "Must be a valid HTTPS URL"
 
   DefaultInferenceRegion:
     Type: String
@@ -97,16 +91,13 @@ Resources:
       Handler: index.lambda_handler
       Timeout: 10
       MemorySize: 256
-      Code:
-        ZipFile: |
-          # Inline placeholder — real code deployed via package command
-          def lambda_handler(event, context):
-              return {"statusCode": 500, "body": "Not deployed"}
+      # Relative dir uploaded to S3 by `aws cloudformation package` at deploy time
+      # (the real handler is ~18KB, over the 4KB inline ZipFile limit).
+      Code: ./lambda-functions/bootstrap_server/
       Environment:
         Variables:
-          OIDC_ISSUER_URL: !Ref OidcIssuerUrl
-          OIDC_CLIENT_ID: !Ref OidcClientId
-          OIDC_JWKS_ENDPOINT: !Ref OidcJwksEndpoint
+          # The API Gateway JWT authorizer validates iss/aud/exp/signature before
+          # invoking this function, so no OIDC validation env vars are needed here.
           DEFAULT_INFERENCE_REGION: !Ref DefaultInferenceRegion
           DEFAULT_INFERENCE_MODELS: !Ref DefaultInferenceModels
           OTLP_ENDPOINT: !Ref OtlpEndpoint
@@ -174,12 +165,32 @@ Resources:
       IntegrationUri: !GetAtt BootstrapFunction.Arn
       PayloadFormatVersion: "2.0"
 
+  # Native JWT authorizer — validates the Okta token's signature (against the
+  # issuer's JWKS via OIDC discovery), issuer, audience, and expiry BEFORE the
+  # Lambda runs. Decoded claims (incl. groups + the aws.amazon.com/tags claim)
+  # arrive at the Lambda in event.requestContext.authorizer.jwt.claims. The raw
+  # token remains in the Authorization header for the STS broker step.
+  BootstrapJwtAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref BootstrapApi
+      AuthorizerType: JWT
+      Name: !Sub "${AWS::StackName}-jwt"
+      IdentitySource:
+        - "$request.header.Authorization"
+      JwtConfiguration:
+        Issuer: !Ref OidcIssuerUrl
+        Audience:
+          - !Ref OidcClientId
+
   BootstrapApiRoute:
     Type: AWS::ApiGatewayV2::Route
     Properties:
       ApiId: !Ref BootstrapApi
       RouteKey: "GET /config"
       Target: !Sub "integrations/${BootstrapApiIntegration}"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref BootstrapJwtAuthorizer
 
   BootstrapApiPermission:
     Type: AWS::Lambda::Permission

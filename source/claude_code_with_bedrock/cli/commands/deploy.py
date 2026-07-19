@@ -1083,26 +1083,8 @@ class DeployCommand(Command):
                 elif not oidc_issuer_url and profile.provider_type == "google":
                     oidc_issuer_url = "https://accounts.google.com"
 
-                # Build JWKS endpoint from issuer
-                jwks_endpoint = getattr(profile, "oidc_jwks_uri", None) or ""
-                if not jwks_endpoint and oidc_issuer_url:
-                    # Standard OIDC discovery: issuer + /.well-known/openid-configuration
-                    # Most providers put JWKS at issuer/keys or /protocol/openid-connect/certs
-                    # For simplicity, use well-known pattern
-                    jwks_endpoint = oidc_issuer_url.rstrip("/") + "/.well-known/jwks.json"
-                    if profile.provider_type == "okta":
-                        jwks_endpoint = oidc_issuer_url.rstrip("/") + "/v1/keys"
-                    elif profile.provider_type == "azure":
-                        tenant_id = _extract_azure_tenant_id(profile.provider_domain)
-                        jwks_endpoint = (
-                            f"https://login.microsoftonline.com/{tenant_id}/discovery/v2.0/keys"
-                        )
-                    elif profile.provider_type == "cognito":
-                        jwks_endpoint = oidc_issuer_url.rstrip("/") + "/.well-known/jwks.json"
-                    elif profile.provider_type == "google":
-                        jwks_endpoint = "https://www.googleapis.com/oauth2/v3/certs"
-                    elif profile.provider_type == "auth0":
-                        jwks_endpoint = oidc_issuer_url.rstrip("/") + "/.well-known/jwks.json"
+                # No JWKS endpoint needed: the API Gateway JWT authorizer discovers
+                # it from the issuer's OIDC metadata and validates signatures itself.
 
                 # Get OTEL endpoint from monitoring config if available
                 otlp_endpoint = getattr(profile, "otel_collector_endpoint", "") or ""
@@ -1143,7 +1125,6 @@ class DeployCommand(Command):
                 params = [
                     f"OidcIssuerUrl={oidc_issuer_url}",
                     f"OidcClientId={profile.client_id}",
-                    f"OidcJwksEndpoint={jwks_endpoint}",
                     f"DefaultInferenceRegion={profile.aws_region}",
                     f"DefaultInferenceModels={inference_models}",
                     f"OtlpEndpoint={otlp_endpoint}",
@@ -1155,13 +1136,62 @@ class DeployCommand(Command):
                     f"MaxSessionDuration={max_session_duration}",
                 ]
 
-                result = deploy_with_cf(
-                    template,
-                    stack_name,
-                    params,
-                    ["CAPABILITY_NAMED_IAM"],
-                    task_description="Deploying Claude Desktop Bootstrap Server...",
-                )
+                # The handler (~18KB) exceeds the 4KB inline-ZipFile limit, so the
+                # template references a local dir (Code: ./lambda-functions/...) and
+                # we upload it via `aws cloudformation package` (same pattern as the
+                # dashboard/quota stacks), then deploy the packaged template.
+                s3_stack_name = profile.stack_names.get("s3", f"{profile.identity_pool_name}-s3bucket")
+                s3_outputs = get_stack_outputs(s3_stack_name, profile.aws_region)
+                if not s3_outputs or not s3_outputs.get("CfnArtifactsBucket"):
+                    console.print("[red]Error: S3 artifacts bucket for packaging not found.[/red]")
+                    console.print(
+                        "[yellow]The bootstrap Lambda code is uploaded via CloudFormation package, "
+                        "which needs the artifacts bucket. Deploy the base stacks first.[/yellow]"
+                    )
+                    console.print("Run: [cyan]ccwb deploy networking[/cyan] (or [cyan]ccwb deploy[/cyan])")
+                    return 1
+                s3_bucket = s3_outputs["CfnArtifactsBucket"]
+
+                pkg_task = progress.add_task("Packaging bootstrap Lambda...", total=None)
+                packaged_template_path = None
+                try:
+                    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+                        packaged_template_path = f.name
+                    pkg_cmd = [
+                        "aws",
+                        "cloudformation",
+                        "package",
+                        "--template-file",
+                        str(template),
+                        "--s3-bucket",
+                        s3_bucket,
+                        "--s3-prefix",
+                        "claude-code/bootstrap",
+                        "--output-template-file",
+                        packaged_template_path,
+                        "--region",
+                        profile.aws_region,
+                    ]
+                    pkg_result = subprocess.run(pkg_cmd, capture_output=True, text=True)
+                    if pkg_result.returncode != 0:
+                        progress.update(pkg_task, completed=True)
+                        console.print(f"[red]Failed to package bootstrap Lambda: {pkg_result.stderr}[/red]")
+                        return 1
+                    progress.update(pkg_task, description="Bootstrap Lambda packaged", completed=True)
+
+                    result = deploy_with_cf(
+                        Path(packaged_template_path),
+                        stack_name,
+                        params,
+                        ["CAPABILITY_NAMED_IAM"],
+                        task_description="Deploying Claude Desktop Bootstrap Server...",
+                    )
+                finally:
+                    if packaged_template_path and os.path.exists(packaged_template_path):
+                        try:
+                            os.unlink(packaged_template_path)
+                        except OSError:
+                            pass
 
                 # Display bootstrap URL on success and save to profile
                 if result == 0:
@@ -1375,12 +1405,12 @@ class DeployCommand(Command):
             template = project_root / "deployment" / "infrastructure" / "bootstrap-server.yaml"
             stack_name = profile.stack_names.get("bootstrap", f"{profile.identity_pool_name}-bootstrap")
             params = [
-                f"OidcIssuerUrl=<from-oidc-config>",
+                "OidcIssuerUrl=<from-oidc-config>",
                 f"OidcClientId={profile.client_id}",
-                f"OidcJwksEndpoint=<from-oidc-config>",
                 f"DefaultInferenceRegion={profile.aws_region}",
                 f"DefaultInferenceModels={getattr(profile, 'selected_model', '') or 'us.anthropic.claude-sonnet-4-20250514-v1:0'}",
                 f"OtlpEndpoint={getattr(profile, 'otel_collector_endpoint', '') or ''}",
+                f"FederatedRoleArn={getattr(profile, 'federated_role_arn', '') or ''}",
             ]
             print_deploy_cmd(template, stack_name, params)
 

@@ -53,9 +53,7 @@ def _fake_sts_credentials():
 @pytest.fixture(autouse=True)
 def set_env_vars(monkeypatch):
     """Set required environment variables for all tests."""
-    monkeypatch.setenv("OIDC_ISSUER_URL", "https://example.okta.com/oauth2/default")
-    monkeypatch.setenv("OIDC_CLIENT_ID", "test-client-id")
-    monkeypatch.setenv("OIDC_JWKS_ENDPOINT", "https://example.okta.com/oauth2/default/v1/keys")
+    # No OIDC validation env vars — the API Gateway JWT authorizer handles that.
     monkeypatch.setenv("DEFAULT_INFERENCE_REGION", "us-west-2")
     monkeypatch.setenv(
         "DEFAULT_INFERENCE_MODELS",
@@ -66,6 +64,18 @@ def set_env_vars(monkeypatch):
     # Broker config: the federated role the Lambda assumes on the user's behalf.
     monkeypatch.setenv("FEDERATED_ROLE_ARN", "arn:aws:iam::123456789012:role/BedrockOktaFederatedRole")
     monkeypatch.setenv("MAX_SESSION_DURATION", "43200")
+
+
+def _event(claims=None, token="the.user.token"):
+    """Build an API Gateway v2 event as the JWT authorizer delivers it:
+    validated claims in requestContext.authorizer.jwt.claims, raw token in the
+    Authorization header (for the STS broker step)."""
+    event = {"headers": {}, "requestContext": {}}
+    if token is not None:
+        event["headers"]["authorization"] = f"Bearer {token}"
+    if claims is not None:
+        event["requestContext"]["authorizer"] = {"jwt": {"claims": claims}}
+    return event
 
 
 @pytest.fixture
@@ -91,87 +101,31 @@ def mock_sts(reload_handler):
 
 
 class TestLambdaHandler:
-    """Tests for lambda_handler function (auth + response envelope)."""
+    """Tests for lambda_handler (authorizer-based auth + response envelope).
 
-    def test_missing_authorization_header(self, reload_handler):
-        """Should return 401 when Authorization header is missing."""
-        event = {"headers": {}}
-        response = reload_handler.lambda_handler(event, None)
+    The API Gateway JWT authorizer validates the token before the Lambda runs,
+    so these tests deliver claims via requestContext.authorizer.jwt.claims.
+    """
 
-        assert response["statusCode"] == 401
-        body = json.loads(response["body"])
-        assert body["error"] == "unauthorized"
-        assert "Missing Authorization header" in body["message"]
-
-    def test_invalid_auth_scheme(self, reload_handler):
-        """Should return 401 when auth scheme is not Bearer."""
-        event = {"headers": {"authorization": "Basic dXNlcjpwYXNz"}}
-        response = reload_handler.lambda_handler(event, None)
-
-        assert response["statusCode"] == 401
-        body = json.loads(response["body"])
-        assert body["error"] == "unauthorized"
-        assert "Bearer" in body["message"]
-
-    @patch("index._validate_token")
-    def test_expired_token(self, mock_validate, reload_handler):
-        """Should return 401 with token_expired error for expired tokens."""
-        mock_validate.side_effect = ValueError("Token has expired")
-
-        event = {"headers": {"authorization": "Bearer expired.token.here"}}
-        response = reload_handler.lambda_handler(event, None)
-
-        assert response["statusCode"] == 401
-        body = json.loads(response["body"])
-        assert body["error"] == "token_expired"
-
-    @patch("index._validate_token")
-    def test_invalid_issuer(self, mock_validate, reload_handler):
-        """Should return 403 for invalid issuer."""
-        mock_validate.side_effect = ValueError("Invalid token issuer")
-
-        event = {"headers": {"authorization": "Bearer bad.issuer.token"}}
-        response = reload_handler.lambda_handler(event, None)
-
-        assert response["statusCode"] == 403
-        body = json.loads(response["body"])
-        assert body["error"] == "forbidden"
-
-    @patch("index._validate_token")
-    def test_invalid_audience(self, mock_validate, reload_handler):
-        """Should return 403 for invalid audience."""
-        mock_validate.side_effect = ValueError("Invalid token audience")
-
-        event = {"headers": {"authorization": "Bearer bad.audience.token"}}
-        response = reload_handler.lambda_handler(event, None)
-
-        assert response["statusCode"] == 403
-        body = json.loads(response["body"])
-        assert body["error"] == "forbidden"
-
-    @patch("index._validate_token")
-    def test_invalid_signature(self, mock_validate, reload_handler):
-        """Should return 401 for invalid signature."""
-        mock_validate.side_effect = ValueError("Invalid token signature")
-
-        event = {"headers": {"authorization": "Bearer bad.sig.token"}}
-        response = reload_handler.lambda_handler(event, None)
+    def test_missing_claims_returns_401(self, reload_handler):
+        """No authorizer claims on the request → 401 (defense in depth)."""
+        response = reload_handler.lambda_handler(_event(claims=None), None)
 
         assert response["statusCode"] == 401
         body = json.loads(response["body"])
         assert body["error"] == "unauthorized"
 
-    @patch("index._validate_token")
-    def test_successful_broker_response(self, mock_validate, reload_handler, mock_sts):
-        """Should return 200 with a per-user Bedrock bearer token for a valid token."""
-        mock_validate.return_value = {
-            "sub": "user123",
-            "email": "user@example.com",
-            "iss": "https://example.okta.com/oauth2/default",
-            "aud": "test-client-id",
-        }
+    def test_missing_token_returns_401(self, reload_handler):
+        """Claims present but no raw token → 401 (can't broker without it)."""
+        response = reload_handler.lambda_handler(
+            _event(claims={"sub": "user123", "email": "u@ex.com"}, token=None), None
+        )
 
-        event = {"headers": {"authorization": "Bearer valid.token.here"}}
+        assert response["statusCode"] == 401
+
+    def test_successful_broker_response(self, reload_handler, mock_sts):
+        """Should return 200 with a per-user Bedrock bearer token."""
+        event = _event(claims={"sub": "user123", "email": "user@example.com"})
         response = reload_handler.lambda_handler(event, None)
 
         assert response["statusCode"] == 200
@@ -181,36 +135,28 @@ class TestLambdaHandler:
         assert body["inferenceCredentialKind"] == "static"
         assert body["inferenceBedrockRegion"] == "us-west-2"  # default (no zone config)
         assert body["inferenceBedrockBearerToken"].startswith("bedrock-api-key-")
-        # No IAM Identity Center fields in the broker model
         assert "inferenceBedrockSsoStartUrl" not in body
         assert body["user"]["sub"] == "user123"
         assert body["user"]["email"] == "user@example.com"
 
-    @patch("index._validate_token")
-    def test_broker_forwards_user_token_to_sts(self, mock_validate, reload_handler, mock_sts):
+    def test_broker_forwards_user_token_to_sts(self, reload_handler, mock_sts):
         """The raw user token must be passed as WebIdentityToken (session tags ride in it)."""
-        mock_validate.return_value = {"sub": "user123", "email": "alice@example.com"}
-
-        event = {"headers": {"authorization": "Bearer the.user.token"}}
+        event = _event(claims={"sub": "user123", "email": "alice@example.com"}, token="the.user.token")
         reload_handler.lambda_handler(event, None)
 
         _, kwargs = mock_sts.assume_role_with_web_identity.call_args
         assert kwargs["WebIdentityToken"] == "the.user.token"
         assert kwargs["RoleArn"] == "arn:aws:iam::123456789012:role/BedrockOktaFederatedRole"
-        # RoleSessionName derived from email for CUR attribution
         assert kwargs["RoleSessionName"] == "alice@example.com"
 
-    @patch("index._validate_token")
-    def test_sts_failure_returns_403_without_leak(self, mock_validate, reload_handler):
+    def test_sts_failure_returns_403_without_leak(self, reload_handler):
         """STS/broker failure returns a generic 403 and never leaks the error text."""
-        mock_validate.return_value = {"sub": "user123", "email": "user@example.com"}
-
         failing_sts = MagicMock()
         failing_sts.assume_role_with_web_identity.side_effect = Exception(
             "AccessDenied: role arn:aws:iam::123456789012:role/Secret not assumable"
         )
         with patch.object(reload_handler.boto3, "client", return_value=failing_sts):
-            event = {"headers": {"authorization": "Bearer valid.token.here"}}
+            event = _event(claims={"sub": "user123", "email": "user@example.com"})
             response = reload_handler.lambda_handler(event, None)
 
         assert response["statusCode"] == 403
@@ -219,28 +165,14 @@ class TestLambdaHandler:
         assert "AccessDenied" not in body["message"]
         assert "arn:aws" not in body["message"]
 
-    @patch("index._validate_token")
-    def test_cache_control_header(self, mock_validate, reload_handler, mock_sts):
+    def test_cache_control_header(self, reload_handler, mock_sts):
         """Should include Cache-Control: no-store in all responses."""
-        mock_validate.return_value = {"sub": "user123", "email": "user@example.com"}
-
-        event = {"headers": {"authorization": "Bearer valid.token.here"}}
+        event = _event(claims={"sub": "user123", "email": "user@example.com"})
         response = reload_handler.lambda_handler(event, None)
 
         assert response["headers"]["Cache-Control"] == "no-store"
 
-    @patch("index._validate_token")
-    def test_content_type_header(self, mock_validate, reload_handler, mock_sts):
-        """Should return application/json content type."""
-        mock_validate.return_value = {"sub": "user123", "email": "user@example.com"}
-
-        event = {"headers": {"authorization": "Bearer valid.token.here"}}
-        response = reload_handler.lambda_handler(event, None)
-
-        assert response["headers"]["Content-Type"] == "application/json"
-
-    @patch("index._validate_token")
-    def test_no_otel_when_endpoint_empty(self, mock_validate, reload_handler, monkeypatch):
+    def test_no_otel_when_endpoint_empty(self, reload_handler, monkeypatch):
         """Should not include OTEL fields when endpoint is empty."""
         monkeypatch.setenv("OTLP_ENDPOINT", "")
         if "index" in sys.modules:
@@ -249,12 +181,8 @@ class TestLambdaHandler:
 
         sts_client = MagicMock()
         sts_client.assume_role_with_web_identity.return_value = _fake_sts_credentials()
-
-        mock_validate_new = MagicMock(return_value={"sub": "user123", "email": "user@example.com"})
-        with patch.object(handler, "_validate_token", mock_validate_new), patch.object(
-            handler.boto3, "client", return_value=sts_client
-        ):
-            event = {"headers": {"authorization": "Bearer valid.token.here"}}
+        with patch.object(handler.boto3, "client", return_value=sts_client):
+            event = _event(claims={"sub": "user123", "email": "user@example.com"})
             response = handler.lambda_handler(event, None)
 
         body = json.loads(response["body"])
@@ -262,43 +190,42 @@ class TestLambdaHandler:
         assert "otlpHeaders" not in body
 
     def test_unhandled_exception_returns_500(self, reload_handler):
-        """Should return 500 for unhandled exceptions without leaking details."""
-        with patch.object(reload_handler, "_validate_token", side_effect=RuntimeError("unexpected")):
-            event = {"headers": {"authorization": "Bearer valid.token.here"}}
-            response = reload_handler.lambda_handler(event, None)
+        """A malformed event (None) trips the outer guard → 500, no detail leak."""
+        response = reload_handler.lambda_handler(None, None)
 
-            assert response["statusCode"] == 500
-            body = json.loads(response["body"])
-            assert body["error"] == "internal_error"
-            assert "unexpected" not in body["message"]
-
-    def test_authorization_header_case_insensitive(self, reload_handler):
-        """Should handle Authorization header in different cases."""
-        event = {"headers": {"Authorization": ""}}
-        response = reload_handler.lambda_handler(event, None)
-
-        assert response["statusCode"] == 401
+        assert response["statusCode"] == 500
+        body = json.loads(response["body"])
+        assert body["error"] == "internal_error"
+        assert "message" in body and "internal" in body["message"].lower()
 
 
-class TestValidateToken:
-    """Tests for _validate_token function."""
+class TestExtractClaims:
+    """Tests for _extract_claims (reads + normalizes authorizer claims)."""
 
-    def test_empty_token_raises(self, reload_handler):
-        """Should raise ValueError for empty token."""
-        with pytest.raises(ValueError, match="No token provided"):
-            reload_handler._validate_token("")
+    def test_reads_claims_from_authorizer_context(self, reload_handler):
+        event = _event(claims={"sub": "u1", "email": "u1@ex.com", "groups": ["ccwb-us-a"]})
+        claims = reload_handler._extract_claims(event)
+        assert claims["sub"] == "u1"
+        assert claims["groups"] == ["ccwb-us-a"]
 
-    def test_none_token_raises(self, reload_handler):
-        """Should raise ValueError for None token."""
-        with pytest.raises(ValueError, match="No token provided"):
-            reload_handler._validate_token(None)
+    def test_normalizes_stringified_groups(self, reload_handler):
+        """API Gateway may serialize a multi-valued claim as '[a, b]'."""
+        event = _event(claims={"sub": "u1", "groups": "[ccwb-us-alpha, ccwb-engineering]"})
+        claims = reload_handler._extract_claims(event)
+        assert claims["groups"] == ["ccwb-us-alpha", "ccwb-engineering"]
 
-    def test_no_pyjwt_raises(self, reload_handler):
-        """Should raise ValueError when PyJWT is not available."""
-        reload_handler.HAS_PYJWT = False
-        with pytest.raises(ValueError, match="PyJWT library not available"):
-            reload_handler._validate_token("some.token.here")
-        reload_handler.HAS_PYJWT = True  # restore
+    def test_missing_groups_defaults_empty(self, reload_handler):
+        event = _event(claims={"sub": "u1"})
+        claims = reload_handler._extract_claims(event)
+        assert claims["groups"] == []
+
+    def test_no_authorizer_returns_empty(self, reload_handler):
+        claims = reload_handler._extract_claims({"requestContext": {}})
+        assert claims.get("sub") is None
+
+    def test_extract_bearer_token(self, reload_handler):
+        assert reload_handler._extract_bearer_token(_event(claims={}, token="abc.def")) == "abc.def"
+        assert reload_handler._extract_bearer_token({"headers": {}}) == ""
 
 
 class TestDeriveSessionName:

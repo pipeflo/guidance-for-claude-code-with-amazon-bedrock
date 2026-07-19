@@ -1,18 +1,21 @@
 # ABOUTME: Lambda handler for the Claude Desktop Bootstrap Server (credential broker)
-# ABOUTME: Validates the user's OIDC token, exchanges it for STS credentials via
-# ABOUTME: AssumeRoleWithWebIdentity (session tags intact), mints a short-term Bedrock
-# ABOUTME: bearer token, and returns per-user config. No end-user binary required.
+# ABOUTME: The API Gateway JWT authorizer validates the token; this function reads the
+# ABOUTME: authorizer claims, exchanges the raw token for STS credentials via
+# ABOUTME: AssumeRoleWithWebIdentity (session tags intact), and mints a Bedrock bearer token.
 
 """Claude Desktop Bootstrap Server — per-user Bedrock bearer-token broker.
 
 Flow per request:
   1. Claude Desktop signs the user into the org OIDC provider (Okta) via PKCE and
      sends the resulting token as `Authorization: Bearer <token>` to GET /config.
-  2. This Lambda validates the token's signature/claims against the provider JWKS.
-  3. It forwards that SAME token to STS AssumeRoleWithWebIdentity. Session tags
-     (Zone, Project/CostCenter) ride in the token's https://aws.amazon.com/tags
-     claim and STS applies them automatically — so every existing GDPR Deny and
-     cost-attribution IAM policy fires unchanged.
+  2. The API Gateway JWT authorizer validates the token's signature (against the
+     issuer's JWKS via OIDC discovery), issuer, audience, and expiry BEFORE this
+     function runs, and passes the decoded claims in
+     event.requestContext.authorizer.jwt.claims. No PyJWT dependency here.
+  3. This function forwards that SAME raw token to STS AssumeRoleWithWebIdentity.
+     Session tags (Zone, Project/CostCenter) ride in the token's
+     https://aws.amazon.com/tags claim and STS applies them automatically — so
+     every existing GDPR Deny and cost-attribution IAM policy fires unchanged.
   4. It mints a short-term Amazon Bedrock bearer token (SigV4 presign of
      CallWithBearerToken) from those credentials and returns it as
      `inferenceBedrockBearerToken`, scoped to the user's zone region.
@@ -26,7 +29,6 @@ import json
 import os
 import re
 import time
-import urllib.request
 
 # boto3 + botocore ship in the Lambda Python runtime.
 import boto3
@@ -36,20 +38,7 @@ from botocore.awsrequest import AWSRequest
 from botocore.config import Config as BotoConfig
 from botocore.credentials import Credentials
 
-# Optional: PyJWT with cryptography for RS256 verification
-# Falls back to manual verification if not available in Lambda layer
-try:
-    import jwt
-    from jwt import PyJWKClient
-
-    HAS_PYJWT = True
-except ImportError:
-    HAS_PYJWT = False
-
 # Configuration from environment variables
-OIDC_ISSUER_URL = os.environ.get("OIDC_ISSUER_URL", "")
-OIDC_CLIENT_ID = os.environ.get("OIDC_CLIENT_ID", "")
-OIDC_JWKS_ENDPOINT = os.environ.get("OIDC_JWKS_ENDPOINT", "")
 DEFAULT_INFERENCE_REGION = os.environ.get("DEFAULT_INFERENCE_REGION", "us-east-1")
 DEFAULT_INFERENCE_MODELS = os.environ.get("DEFAULT_INFERENCE_MODELS", "")
 OTLP_ENDPOINT = os.environ.get("OTLP_ENDPOINT", "")
@@ -78,90 +67,45 @@ def _get_max_session_duration():
     except ValueError:
         return 43200
 
-# JWKS cache (module-level for Lambda container reuse)
-_jwks_client = None
-_jwks_cache = None
-_jwks_cache_time = 0
-JWKS_CACHE_TTL = 3600  # Cache JWKS for 1 hour
 
+def _extract_claims(event: dict) -> dict:
+    """Read the JWT claims the API Gateway authorizer attached to the request.
 
-def _get_jwks_client():
-    """Get or create a cached PyJWKClient instance."""
-    global _jwks_client
-    if _jwks_client is None and HAS_PYJWT:
-        _jwks_client = PyJWKClient(OIDC_JWKS_ENDPOINT, cache_keys=True)
-    return _jwks_client
-
-
-def _fetch_jwks():
-    """Fetch JWKS from the configured endpoint with caching."""
-    global _jwks_cache, _jwks_cache_time
-
-    now = time.time()
-    if _jwks_cache and (now - _jwks_cache_time) < JWKS_CACHE_TTL:
-        return _jwks_cache
-
-    try:
-        req = urllib.request.Request(OIDC_JWKS_ENDPOINT)
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            _jwks_cache = json.loads(resp.read())
-            _jwks_cache_time = now
-            return _jwks_cache
-    except Exception as e:
-        raise ValueError(f"Failed to fetch JWKS: {str(e)}")
-
-
-def _validate_token(token: str) -> dict:
-    """Validate JWT token and return decoded claims.
-
-    Args:
-        token: Raw JWT Bearer token string
-
-    Returns:
-        Decoded token claims dict
-
-    Raises:
-        ValueError: If token is invalid, expired, or signature verification fails
+    HTTP API JWT authorizers place decoded claims at
+    event.requestContext.authorizer.jwt.claims. The `groups` claim may arrive as
+    a real list or as a stringified list (e.g. "[a, b]") depending on the
+    provider; normalize it to a list.
     """
-    if not token:
-        raise ValueError("No token provided")
+    claims = (
+        event.get("requestContext", {})
+        .get("authorizer", {})
+        .get("jwt", {})
+        .get("claims", {})
+    ) or {}
 
-    if not HAS_PYJWT:
-        raise ValueError("PyJWT library not available — cannot validate tokens")
+    groups = claims.get("groups", [])
+    if isinstance(groups, str):
+        # API Gateway may serialize a multi-valued claim as "[a, b, c]".
+        stripped = groups.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            stripped = stripped[1:-1]
+        groups = [g.strip().strip('"') for g in stripped.split(",") if g.strip()]
+    claims = dict(claims)
+    claims["groups"] = groups
+    return claims
 
-    try:
-        # Get the signing key from JWKS
-        jwks_client = _get_jwks_client()
-        signing_key = jwks_client.get_signing_key_from_jwt(token)
 
-        # Decode and validate the token
-        decoded = jwt.decode(
-            token,
-            signing_key.key,
-            algorithms=["RS256", "RS384", "RS512", "ES256", "ES384", "ES512"],
-            issuer=OIDC_ISSUER_URL,
-            audience=OIDC_CLIENT_ID,
-            options={
-                "verify_exp": True,
-                "verify_iss": True,
-                "verify_aud": True,
-                "require": ["exp", "iss", "sub"],
-            },
-        )
-        return decoded
+def _extract_bearer_token(event: dict) -> str:
+    """Return the raw bearer token from the Authorization header.
 
-    except jwt.ExpiredSignatureError:
-        raise ValueError("Token has expired")
-    except jwt.InvalidIssuerError:
-        raise ValueError("Invalid token issuer")
-    except jwt.InvalidAudienceError:
-        raise ValueError("Invalid token audience")
-    except jwt.InvalidSignatureError:
-        raise ValueError("Invalid token signature")
-    except jwt.DecodeError as e:
-        raise ValueError(f"Token decode error: {str(e)}")
-    except Exception as e:
-        raise ValueError(f"Token validation failed: {str(e)}")
+    The authorizer has already validated it; we forward it verbatim to STS as the
+    WebIdentityToken so the session-tag claim is applied.
+    """
+    headers = event.get("headers", {}) or {}
+    auth_header = headers.get("authorization", headers.get("Authorization", "")) or ""
+    if auth_header.startswith("Bearer "):
+        return auth_header[7:]
+    return ""
 
 
 def _resolve_zone(groups: list[str], zone_config: dict, prefix: str) -> dict | None:
@@ -402,56 +346,27 @@ def _response(status_code: int, body: dict, extra_headers: dict = None) -> dict:
 def lambda_handler(event, context):
     """Main Lambda handler for the Bootstrap Server.
 
-    Expects:
-        - GET /config with Authorization: Bearer <token> header
+    The API Gateway JWT authorizer has already validated the token
+    (signature/iss/aud/exp) before this runs, so we trust the claims it attached
+    and only need to read them + the raw token, then broker credentials.
 
     Returns:
         - 200: Configuration JSON on success
-        - 401: Invalid or missing token
-        - 403: User not authorized
+        - 401: No authorizer claims / token on the request (defense in depth)
+        - 403: Credential brokering failed (STS deny / misconfig)
         - 500: Internal server error
     """
     try:
-        # Extract Authorization header
-        headers = event.get("headers", {})
-        auth_header = headers.get("authorization", headers.get("Authorization", ""))
+        claims = _extract_claims(event)
+        token = _extract_bearer_token(event)
 
-        if not auth_header:
+        # Defense in depth: the authorizer should guarantee both, but never try
+        # to broker without a subject or the raw token.
+        if not claims.get("sub") or not token:
             return _response(401, {
                 "error": "unauthorized",
-                "message": "Missing Authorization header",
+                "message": "Missing authenticated identity",
             })
-
-        # Extract Bearer token
-        if not auth_header.startswith("Bearer "):
-            return _response(401, {
-                "error": "unauthorized",
-                "message": "Invalid authorization scheme — expected Bearer token",
-            })
-
-        token = auth_header[7:]  # Strip "Bearer " prefix
-
-        # Validate token
-        try:
-            claims = _validate_token(token)
-        except ValueError as e:
-            error_msg = str(e)
-            # Distinguish between auth errors
-            if "expired" in error_msg.lower():
-                return _response(401, {
-                    "error": "token_expired",
-                    "message": "Token has expired — please re-authenticate",
-                })
-            elif "issuer" in error_msg.lower() or "audience" in error_msg.lower():
-                return _response(403, {
-                    "error": "forbidden",
-                    "message": f"Token validation failed: {error_msg}",
-                })
-            else:
-                return _response(401, {
-                    "error": "unauthorized",
-                    "message": f"Token validation failed: {error_msg}",
-                })
 
         # Broker credentials and build configuration. Credential-brokering
         # failures (STS deny, misconfigured role, signing error) are logged in
