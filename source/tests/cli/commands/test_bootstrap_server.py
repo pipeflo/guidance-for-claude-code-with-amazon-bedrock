@@ -295,15 +295,20 @@ class TestBuildConfigResponse:
         assert config["inferenceProvider"] == "bedrock"
         assert config["inferenceBedrockRegion"] == "us-west-2"
         assert config["inferenceBedrockBearerToken"].startswith("bedrock-api-key-")
-        assert isinstance(config["inferenceModels"], list)
+        # inferenceModels is a JSON-encoded string per the config reference
+        assert isinstance(config["inferenceModels"], str)
+        assert isinstance(json.loads(config["inferenceModels"]), list)
+        # discovery disabled because we supply the model list
+        assert config["modelDiscoveryEnabled"] == "false"
         assert config["user"]["sub"] == "user1"
 
     def test_models_parsed_from_comma_separated(self, reload_handler, mock_sts):
         claims = {"sub": "u", "email": "e"}
         config = reload_handler._build_config_response(claims, "user.token")
 
-        assert len(config["inferenceModels"]) == 2
-        assert "us.anthropic.claude-sonnet-4-20250514-v1:0" in config["inferenceModels"]
+        models = json.loads(config["inferenceModels"])
+        assert len(models) == 2
+        assert "us.anthropic.claude-sonnet-4-20250514-v1:0" in models
 
     def test_fallback_to_sub_when_no_email(self, reload_handler, mock_sts):
         claims = {"sub": "user-sub-id"}
@@ -383,12 +388,24 @@ class TestZoneRouting:
 
         assert config["inferenceBedrockRegion"] == "us-west-2"
 
-    def test_no_zone_uses_default(self, reload_handler, zone_env, mock_sts):
-        """User with no matching zone group gets default region."""
+    def test_unmatched_zone_under_isolation_fails_loudly(self, reload_handler, zone_env, mock_sts):
+        """With zone routing configured, a user matching no zone must NOT silently
+        fall back to a CRIS default (which Bedrock would AccessDeny under isolation)."""
         claims = {"sub": "u3", "email": "u3@ex.com", "groups": ["other-group"]}
-        config = reload_handler._build_config_response(claims, "user.token")
+        with pytest.raises(RuntimeError, match="no configured zone"):
+            reload_handler._build_config_response(claims, "user.token")
 
+    def test_prefix_without_hyphen_still_matches(self, reload_handler, monkeypatch, mock_sts):
+        """GROUP_PREFIX 'ccwb' (no trailing hyphen) must still match ccwb-us-*."""
+        monkeypatch.setenv(
+            "ZONE_CONFIG",
+            json.dumps({"us": {"region": "us-west-2", "models": ["arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/uuu"]}}),
+        )
+        monkeypatch.setenv("GROUP_PREFIX", "ccwb")  # no trailing hyphen, like the real profile
+        claims = {"sub": "u", "groups": ["ccwb-us-alpha"]}
+        config = reload_handler._build_config_response(claims, "user.token")
         assert config["inferenceBedrockRegion"] == "us-west-2"
+        assert "application-inference-profile/uuu" in config["inferenceModels"]
 
     def test_zone_arns_are_authoritative_models_under_isolation(self, reload_handler, zone_env, mock_sts):
         """Under GDPR isolation, zone application-inference-profile ARNs are the
@@ -396,11 +413,12 @@ class TestZoneRouting:
         claims = {"sub": "u4", "groups": ["ccwb-europe-beta", "ccwb-consulting"]}
         config = reload_handler._build_config_response(claims, "user.token")
 
-        assert config["inferenceModels"] == [
+        models = json.loads(config["inferenceModels"])
+        assert models == [
             "arn:aws:bedrock:eu-west-3:123456789012:application-inference-profile/euuu"
         ]
         # CRIS ids must not leak in
-        assert not any("anthropic." in m for m in config["inferenceModels"])
+        assert not any("anthropic." in m for m in models)
 
     def test_role_prefix_models_when_zone_has_no_arns(self, reload_handler, monkeypatch, mock_sts):
         """A zone with only model_prefix (no ARNs) falls back to prefixed role models."""
@@ -414,7 +432,7 @@ class TestZoneRouting:
         config = reload_handler._build_config_response(claims, "user.token")
 
         assert config["inferenceBedrockRegion"] == "ap-northeast-1"
-        assert "apac.anthropic.claude-opus-4-6-v1:0" in config["inferenceModels"]
+        assert "apac.anthropic.claude-opus-4-6-v1:0" in json.loads(config["inferenceModels"])
 
     def test_role_sets_spend_cap(self, reload_handler, zone_env, mock_sts):
         claims = {"sub": "u6", "groups": ["ccwb-usa-alpha", "ccwb-consulting"]}
@@ -431,7 +449,8 @@ class TestZoneRouting:
         assert mcp[0]["name"] == "github"
 
     def test_feature_defaults_applied(self, reload_handler, zone_env, mock_sts):
-        claims = {"sub": "u9", "groups": []}
+        # user must match a zone (isolation active); features apply regardless of which
+        claims = {"sub": "u9", "groups": ["ccwb-usa-alpha"]}
         config = reload_handler._build_config_response(claims, "user.token")
 
         assert config["chatTabEnabled"] == "true"
@@ -444,12 +463,6 @@ class TestZoneRouting:
         assert "banner" in config
         banner = json.loads(config["banner"])
         assert "EUROPE" in banner["text"]
-
-    def test_no_banner_without_zone(self, reload_handler, zone_env, mock_sts):
-        claims = {"sub": "u11", "groups": ["unrelated"]}
-        config = reload_handler._build_config_response(claims, "user.token")
-
-        assert "banner" not in config
 
 
 class TestBuildClaudeDesktopZoneConfig:

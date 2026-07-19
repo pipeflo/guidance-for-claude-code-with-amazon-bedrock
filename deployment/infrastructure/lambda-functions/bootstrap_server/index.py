@@ -108,18 +108,34 @@ def _extract_bearer_token(event: dict) -> str:
     return ""
 
 
+def _group_suffix(group: str, prefix: str) -> str | None:
+    """Return the part of `group` after `prefix`, tolerant of the trailing hyphen.
+
+    Group names follow <prefix>-<zone>-<project> (e.g. ccwb-us-alpha). The
+    configured prefix may be written with or without the trailing '-'
+    ('ccwb' or 'ccwb-'); normalize both so matching is robust. Returns the
+    zone/role remainder ('us-alpha') or None if the group doesn't match.
+    """
+    base = prefix.rstrip("-")
+    if not group.startswith(base):
+        return None
+    rest = group[len(base):]
+    return rest.lstrip("-")  # drop the separator so remainder starts at the zone/role
+
+
 def _resolve_zone(groups: list[str], zone_config: dict, prefix: str) -> dict | None:
     """Resolve user's zone from their group memberships.
 
-    Matches the first group starting with prefix followed by a zone name.
-    E.g., groups=["ccwb-europe-beta"], zones={"europe": {...}} → returns europe config.
+    Matches the first group whose <prefix>-stripped remainder begins with a zone
+    name. E.g. groups=["ccwb-us-alpha"], zones={"us": {...}} → returns us config.
     """
     for group in groups:
-        if not group.startswith(prefix):
+        suffix = _group_suffix(group, prefix)
+        if suffix is None:
             continue
-        suffix = group[len(prefix):]
         for zone_name in zone_config:
-            if suffix.startswith(zone_name):
+            # match "<zone>" exactly or "<zone>-<project>"
+            if suffix == zone_name or suffix.startswith(zone_name + "-"):
                 return {"name": zone_name, **zone_config[zone_name]}
     return None
 
@@ -131,9 +147,9 @@ def _resolve_role(groups: list[str], role_config: dict, prefix: str) -> dict | N
     E.g., groups=["ccwb-consulting"], roles={"consulting": {...}} → returns consulting config.
     """
     for group in groups:
-        if not group.startswith(prefix):
+        suffix = _group_suffix(group, prefix)
+        if suffix is None:
             continue
-        suffix = group[len(prefix):]
         for role_name in role_config:
             if suffix == role_name or suffix.startswith(role_name + "-"):
                 return {"name": role_name, **role_config[role_name]}
@@ -247,13 +263,24 @@ def _build_config_response(claims: dict, user_token: str) -> dict:
     # Resolve role → spend caps, MCP servers (and models when no zone ARNs apply).
     resolved_role = _resolve_role(groups, role_config, prefix) if role_config else None
 
+    # When zone routing is configured (GDPR isolation) but the user's groups match
+    # no zone, do NOT fall back to a CRIS default — under isolation that model has
+    # no Zone tag and Bedrock would AccessDeny it, masking the real cause. Fail
+    # loudly so the operator sees "user's groups map to no configured zone".
+    if zone_config and not resolved_zone:
+        raise RuntimeError(
+            f"User groups {groups!r} match no configured zone "
+            f"(zones: {list(zone_config)}). Check the user's IdP group vs "
+            f"claude_desktop_zone_config / okta_group_prefix."
+        )
+
     # Model precedence:
     #   1. Zone application-inference-profile ARNs (GDPR isolation) — authoritative,
     #      they carry the Zone resource tag the IAM AllowBedrockInvokeInZone policy
     #      requires. A CRIS model ID would be denied under isolation.
     #   2. Role model list, prefixed with the zone's model_prefix (non-isolated
     #      zone routing).
-    #   3. DEFAULT_INFERENCE_MODELS.
+    #   3. DEFAULT_INFERENCE_MODELS (only when no zone routing is configured at all).
     if resolved_zone and resolved_zone.get("models"):
         models = list(resolved_zone["models"])
     elif resolved_role and "models" in resolved_role:
@@ -277,7 +304,12 @@ def _build_config_response(claims: dict, user_token: str) -> dict:
         "inferenceCredentialKind": "static",  # bearer-token credential
         "inferenceBedrockRegion": inference_region,
         "inferenceBedrockBearerToken": bearer_token,
-        "inferenceModels": models,
+        # Array values are JSON-encoded strings per the config reference.
+        "inferenceModels": json.dumps(models),
+        # We supply the exact model list/ARNs, so the client must NOT probe the
+        # Bedrock control plane (ListFoundationModels/ListInferenceProfiles) — the
+        # federated role has no control-plane list permission and it would 403.
+        "modelDiscoveryEnabled": "false",
         "inferenceSessionLifetimeSec": INFERENCE_SESSION_LIFETIME_SEC,
         "expiresAt": expires_at,
         "user": {
