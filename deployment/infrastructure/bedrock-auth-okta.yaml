@@ -171,6 +171,26 @@ Resources:
               StringNotEquals:
                 'aws:RequestedRegion': !Ref AllowedBedrockRegions
 
+          # Bedrock API-key (bearer-token) auth gate. Claude Desktop authenticates to
+          # Bedrock with a short-term bearer token minted from this role's STS session.
+          # Redeeming that token requires bedrock:CallWithBearerToken, which AWS
+          # evaluates against Resource "*" — it is the auth-METHOD gate, not a resource
+          # action. Granting it does NOT bypass GDPR zone isolation: a short-term key
+          # "inherits the permissions of the principal that generated it", so the model
+          # call is STILL authorized as bedrock[-runtime]:InvokeModel on the target
+          # profile ARN — subject to the DenyBedrockInvokeWithoutZone /
+          # DenyBedrockInvokeWithoutCostAttribution denies and the tag-matched
+          # AllowBedrockInvokeInZone below. Region is already bounded by
+          # DenyBedrockOutsideApprovedRegions above. Present in BOTH modes because
+          # Claude Desktop always uses bearer auth. This web-identity role can only ever
+          # hold SHORT_TERM keys (long-term keys need an IAM user +
+          # iam:CreateServiceSpecificCredential, which it cannot obtain), so no
+          # bedrock:bearerTokenType condition is required.
+          - Sid: AllowBedrockCallWithBearerToken
+            Effect: Allow
+            Action: 'bedrock:CallWithBearerToken'
+            Resource: '*'
+
           # --- Permissive Invoke statements (isolation OFF — today's behavior) ---
           - !If
             - IsolationEnforced
@@ -180,7 +200,6 @@ Resources:
               Action:
                 - 'bedrock:InvokeModel'
                 - 'bedrock:InvokeModelWithResponseStream'
-                - 'bedrock:CallWithBearerToken'
                 - 'bedrock:ListFoundationModels'
                 - 'bedrock:ListInferenceProfiles'
                 - 'bedrock-runtime:InvokeModel'
@@ -201,7 +220,6 @@ Resources:
               Action:
                 - 'bedrock:InvokeModel'
                 - 'bedrock:InvokeModelWithResponseStream'
-                - 'bedrock:CallWithBearerToken'
                 - 'bedrock:ListFoundationModels'
                 - 'bedrock:ListInferenceProfiles'
                 - 'bedrock-runtime:InvokeModel'

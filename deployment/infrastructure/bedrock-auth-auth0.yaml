@@ -118,6 +118,23 @@ Resources:
               StringNotEquals:
                 'aws:RequestedRegion': !Ref AllowedBedrockRegions
 
+          # Bedrock API-key (bearer-token) auth gate — required by the Claude Desktop
+          # bootstrap broker, which mints a short-term bearer token from this role's STS
+          # session. AWS evaluates bedrock:CallWithBearerToken against Resource "*"; it
+          # is the auth-METHOD gate, NOT a resource action. It does NOT bypass GDPR zone
+          # isolation: a short-term key "inherits the permissions of the principal that
+          # generated it", so the model call is STILL authorized as
+          # bedrock[-runtime]:InvokeModel on the target profile ARN — subject to the
+          # zone/cost denies and the tag-matched AllowBedrockInvokeInZone below. Region
+          # is already bounded by DenyBedrockOutsideApprovedRegions above. Present in
+          # BOTH modes because Claude Desktop always uses bearer auth. A web-identity
+          # role can only hold SHORT_TERM keys, so no bedrock:bearerTokenType condition
+          # is required.
+          - Sid: AllowBedrockCallWithBearerToken
+            Effect: Allow
+            Action: 'bedrock:CallWithBearerToken'
+            Resource: '*'
+
           # --- Permissive Invoke statements (isolation OFF) ---
           - !If
             - IsolationEnforced
@@ -127,7 +144,6 @@ Resources:
               Action:
                 - 'bedrock:InvokeModel'
                 - 'bedrock:InvokeModelWithResponseStream'
-                - 'bedrock:CallWithBearerToken'
                 - 'bedrock:ListFoundationModels'
                 - 'bedrock:ListInferenceProfiles'
                 - 'bedrock-runtime:InvokeModel'
@@ -148,7 +164,6 @@ Resources:
               Action:
                 - 'bedrock:InvokeModel'
                 - 'bedrock:InvokeModelWithResponseStream'
-                - 'bedrock:CallWithBearerToken'
                 - 'bedrock:ListFoundationModels'
                 - 'bedrock:ListInferenceProfiles'
                 - 'bedrock-runtime:InvokeModel'
