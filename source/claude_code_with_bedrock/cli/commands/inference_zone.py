@@ -85,60 +85,81 @@ def _zone_name_prompt_validator(value: str) -> bool | str:
 
 # Anthropic foundation-model-ID pattern. The suffix shape varies across
 # model releases and we've seen all of these in the wild:
-#   anthropic.claude-opus-4-7                            (newest format, no date, no -v)
-#   anthropic.claude-sonnet-4-6                          (newest format)
+#   anthropic.claude-opus-4-8                            (newest format, no date, no -v)
+#   anthropic.claude-sonnet-5                            (major only — NO minor version)
+#   anthropic.claude-fable-5                             (fable family, major only)
+#   anthropic.claude-sonnet-4-6                          (family + major + minor)
 #   anthropic.claude-opus-4-6-v1                         (has -v but no date)
 #   anthropic.claude-opus-4-5-20251101-v1:0              (has date + -v + :N)
 #   anthropic.claude-sonnet-4-5-20250929-v1:0            (date + -v + :N)
 #   anthropic.claude-haiku-4-5-20251001-v1:0             (date + -v + :N)
 # Cross-region (CRIS) ids add a zone prefix: us.anthropic..., eu.anthropic...
-# We accept all variants so future Anthropic releases with new suffix
-# shapes keep working without requiring code changes.
+# The family alternation matches the Claude Desktop bootstrap schema's
+# anthropicFamilyTier enum (opus/sonnet/haiku/fable/mythos). The minor version
+# is OPTIONAL — newer models like sonnet-5 and fable-5 ship without one — while
+# the negative lookahead still keeps an 8-digit date from being read as a minor.
+# We accept all variants so future Anthropic releases keep working without code
+# changes.
 _ANTHROPIC_MODEL_RE = re.compile(
     r"^(?:[a-z]{2,6}\.)?"                        # optional zone prefix "us.", "eu.", "apac.", "global."
     r"anthropic\."
-    r"claude-(?P<family>opus|sonnet|haiku)"
+    r"claude-(?P<family>opus|sonnet|haiku|fable|mythos)"
     r"-(?P<major>\d)"                            # single-digit major (4, 5, ...)
-    r"-(?P<minor>\d{1,2})"                       # 1-2 digit minor (1-99). Excludes 8-digit date
-    r"(?![\d])"                                   # boundary: next char must not be a digit
+    r"(?:-(?P<minor>\d{1,2})(?![\d]))?"          # OPTIONAL 1-2 digit minor; lookahead excludes 8-digit date
     r"(?:-\d{8})?"                                # optional date stamp
     r"(?:-v\d+)?"                                 # optional -v<rev>
     r"(?::\d+)?$"                                 # optional :N suffix on inference profile IDs
 )
 
 
+def _model_short(family: str, major: int, minor: int | None) -> str:
+    """Stable short id, e.g. 'opus-4-8', 'sonnet-5' (no minor). Used as the
+    profile-name suffix + ccwb:Model tag, so FM and CRIS discovery must agree."""
+    return f"{family}-{major}" + (f"-{minor}" if minor is not None else "")
+
+
+def _model_display(family: str, major: int, minor: int | None) -> str:
+    """Human label, e.g. 'Claude Opus 4.8', 'Claude Sonnet 5' (no minor)."""
+    version = f"{major}.{minor}" if minor is not None else f"{major}"
+    return f"Claude {family.capitalize()} {version}"
+
+
 @dataclass(frozen=True)
 class ModelChoice:
     """One Claude model available for selection."""
 
-    short_name: str            # e.g. "opus-4-6"
-    display_name: str          # e.g. "Claude Opus 4.6"
-    family: str                # opus | sonnet | haiku
+    short_name: str            # e.g. "opus-4-6", "sonnet-5"
+    display_name: str          # e.g. "Claude Opus 4.6", "Claude Sonnet 5"
+    family: str                # opus | sonnet | haiku | fable | mythos
     major: int
-    minor: int
+    minor: int | None          # None for major-only ids like sonnet-5 / fable-5
     foundation_arn_template: str  # arn pattern without partition/region filled
     cris_profile_id: str | None   # e.g. "us.anthropic.claude-opus-4-6-v1" if available
 
     def __lt__(self, other: ModelChoice) -> bool:
-        # Family order, then newer versions first
-        family_order = {"opus": 0, "sonnet": 1, "haiku": 2}
+        # Family order, then newer versions first. Treat a missing minor as -1
+        # so a major-only release (sonnet-5) sorts just under a x.y of the same
+        # major but above older majors.
+        family_order = {"opus": 0, "sonnet": 1, "haiku": 2, "fable": 3, "mythos": 4}
         return (
             family_order.get(self.family, 99),
             -self.major,
-            -self.minor,
+            -(self.minor if self.minor is not None else -1),
         ) < (
             family_order.get(other.family, 99),
             -other.major,
-            -other.minor,
+            -(other.minor if other.minor is not None else -1),
         )
 
 
-def _parse_model_id(model_id: str) -> tuple[str, int, int] | None:
-    """Return (family, major, minor) for a recognized Anthropic ID, else None."""
+def _parse_model_id(model_id: str) -> tuple[str, int, int | None] | None:
+    """Return (family, major, minor) for a recognized Anthropic ID, else None.
+    minor is None for major-only ids (e.g. sonnet-5, fable-5)."""
     m = _ANTHROPIC_MODEL_RE.match(model_id)
     if not m:
         return None
-    return m.group("family"), int(m.group("major")), int(m.group("minor"))
+    minor = m.group("minor")
+    return m.group("family"), int(m.group("major")), (int(minor) if minor is not None else None)
 
 
 def _discover_models_live(region: str) -> list[ModelChoice]:
@@ -179,7 +200,7 @@ def _discover_models_live(region: str) -> list[ModelChoice]:
         lifecycle = fm.get("modelLifecycle", {}).get("status", "ACTIVE")
         if lifecycle != "ACTIVE":
             continue
-        short = f"{family}-{major}-{minor}"
+        short = _model_short(family, major, minor)
         if short in by_short:
             continue  # already recorded
 
@@ -194,7 +215,7 @@ def _discover_models_live(region: str) -> list[ModelChoice]:
 
         by_short[short] = ModelChoice(
             short_name=short,
-            display_name=f"Claude {family.capitalize()} {major}.{minor}",
+            display_name=_model_display(family, major, minor),
             family=family,
             major=major,
             minor=minor,
@@ -230,10 +251,12 @@ def _discover_models_from_models_py() -> list[ModelChoice]:
         # The models.py dict includes govcloud overlays with suffixes
         # like "sonnet-4-5-govcloud" that should never surface in a
         # generic model picker — they belong in specialized govcloud flows.
-        m = re.match(r"^(opus|sonnet|haiku)-(\d)-(\d{1,2})$", short)
+        # Major-only ids (sonnet-5, fable-5) have no minor group.
+        m = re.match(r"^(opus|sonnet|haiku|fable|mythos)-(\d)(?:-(\d{1,2}))?$", short)
         if not m:
             continue
-        family, major, minor = m.group(1), int(m.group(2)), int(m.group(3))
+        family, major = m.group(1), int(m.group(2))
+        minor = int(m.group(3)) if m.group(3) is not None else None
         base_model = meta.get("base_model_id", "")
         profiles = meta.get("profiles", {}) or {}
         # Pick "us" as the preferred CRIS if present; caller can switch.
@@ -245,7 +268,7 @@ def _discover_models_from_models_py() -> list[ModelChoice]:
         out.append(
             ModelChoice(
                 short_name=short,
-                display_name=meta.get("name", f"Claude {family.capitalize()} {major}.{minor}"),
+                display_name=meta.get("name", _model_display(family, major, minor)),
                 family=family,
                 major=major,
                 minor=minor,
@@ -335,7 +358,7 @@ def _list_cris_in_region(region: str) -> list[CrisProfile]:
                 profile_id=sp_id,
                 profile_arn=sp_arn,
                 zone_prefix=prefix,
-                model_short=f"{family}-{major}-{minor}",
+                model_short=_model_short(family, major, minor),
             )
         )
     return out
