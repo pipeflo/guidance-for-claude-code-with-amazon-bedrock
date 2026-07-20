@@ -83,7 +83,7 @@ _DISCOVERY_TTL = 300  # 5 minutes
 
 
 def _discover_zone_profiles(zone, assumed_creds):
-    """Discover a zone's application-inference-profile ARNs LIVE, by tag.
+    """Discover a zone's application-inference-profiles LIVE, by tag.
 
     Scans each configured region for APPLICATION inference profiles whose
     `<ZONE_TAG_KEY>` tag equals `zone`, using the user's assumed-role credentials
@@ -91,8 +91,11 @@ def _discover_zone_profiles(zone, assumed_creds):
     ListTagsForResource). This replaces any static ARN snapshot, so recreated or
     renamed profiles are picked up automatically.
 
-    Returns (region, [arns]) for the first region that has matching profiles, or
-    (None, []) if none found. Result cached per-zone for _DISCOVERY_TTL seconds.
+    Returns (region, [profiles]) for the first region that has matching profiles,
+    or (None, []) if none found. Each profile is a dict:
+      {"arn", "name", "model" (ccwb:Model tag, may be ""), "description"}
+    from a single ListInferenceProfiles + ListTagsForResource pass (no extra
+    calls). Result cached per-zone for _DISCOVERY_TTL seconds.
     """
     zkey = (zone or "").lower()
     cached = _DISCOVERY_CACHE.get(zkey)
@@ -100,7 +103,7 @@ def _discover_zone_profiles(zone, assumed_creds):
         return cached[0], cached[1]
 
     zone_tag_key = _get_zone_tag_key()
-    found_region, found_arns = None, []
+    found_region, found_profiles = None, []
     for region in _get_discovery_regions():
         client = boto3.client(
             "bedrock",
@@ -109,7 +112,7 @@ def _discover_zone_profiles(zone, assumed_creds):
             aws_secret_access_key=assumed_creds["SecretAccessKey"],
             aws_session_token=assumed_creds["SessionToken"],
         )
-        arns = []
+        profiles = []
         try:
             paginator = client.get_paginator("list_inference_profiles")
             pages = paginator.paginate(typeEquals="APPLICATION")
@@ -127,13 +130,86 @@ def _discover_zone_profiles(zone, assumed_creds):
                     continue
                 tag_map = {t["key"]: t["value"] for t in tags}
                 if tag_map.get(zone_tag_key, "").lower() == zkey and prof.get("status", "ACTIVE") == "ACTIVE":
-                    arns.append(arn)
-        if arns:
-            found_region, found_arns = region, arns
+                    profiles.append({
+                        "arn": arn,
+                        "name": prof.get("inferenceProfileName", "") or "",
+                        # ccwb:Model tag is the short model name (e.g. "opus-4-1")
+                        # set by `ccwb inference-zone create`; may be absent for
+                        # profiles created another way.
+                        "model": tag_map.get("ccwb:Model", "") or "",
+                        "description": prof.get("description", "") or "",
+                    })
+        if profiles:
+            found_region, found_profiles = region, profiles
             break
 
-    _DISCOVERY_CACHE[zkey] = (found_region, found_arns, time.time())
-    return found_region, found_arns
+    _DISCOVERY_CACHE[zkey] = (found_region, found_profiles, time.time())
+    return found_region, found_profiles
+
+
+# Map a short model name / profile name to the schema's anthropicFamilyTier enum.
+_FAMILY_TIERS = ("opus", "sonnet", "haiku", "fable", "mythos")
+# Extract "opus" + version from strings like "opus-4-1", "usa-sonnet-4-5",
+# "claude-opus-4-1". Version parts drive newest-per-family default selection.
+_MODEL_HINT_RE = re.compile(
+    r"(?P<family>opus|sonnet|haiku|fable|mythos)(?:[-.]?(?P<major>\d+))?(?:[-.](?P<minor>\d+))?"
+)
+
+
+def _model_label_and_tier(profile: dict):
+    """Derive a friendly label, family tier, and version sort key for a profile.
+
+    Prefers the ccwb:Model tag (e.g. "opus-4-1"), then the profile name
+    (e.g. "usa-opus-4-1"). Returns (label, tier_or_None, (major, minor)).
+    label falls back to the profile name so the picker never shows a bare ARN.
+    """
+    hint = profile.get("model") or profile.get("name") or ""
+    m = _MODEL_HINT_RE.search(hint.lower())
+    if not m:
+        # No family recognized — use the profile name as the label, no tier.
+        return (profile.get("name") or hint or "Model"), None, (0, 0)
+
+    family = m.group("family")
+    major = int(m.group("major")) if m.group("major") else 0
+    minor = int(m.group("minor")) if m.group("minor") else 0
+    version = f"{major}.{minor}" if major else ""
+    label = f"Claude {family.capitalize()}{(' ' + version) if version else ''}".strip()
+    return label, family, (major, minor)
+
+
+def _build_inference_models(profiles: list) -> list:
+    """Turn discovered zone profiles into schema-compliant inferenceModels entries.
+
+    Each entry is an object: {name: <ARN>, labelOverride: <friendly>,
+    anthropicFamilyTier: <tier>, isFamilyDefault: <newest in family>} so the
+    Claude Desktop model picker shows "Claude Opus 4.1" instead of the raw ARN
+    (bootstrap-config-v2 schema). The newest version per family tier is marked
+    isFamilyDefault. Profiles with an unrecognized family still appear, labeled
+    by their profile name.
+    """
+    enriched = []
+    for p in profiles:
+        label, tier, ver = _model_label_and_tier(p)
+        enriched.append({"arn": p["arn"], "label": label, "tier": tier, "ver": ver})
+
+    # Pick the newest (major, minor) per tier as that family's default.
+    newest_by_tier = {}
+    for e in enriched:
+        if e["tier"] is None:
+            continue
+        cur = newest_by_tier.get(e["tier"])
+        if cur is None or e["ver"] > cur["ver"]:
+            newest_by_tier[e["tier"]] = e
+
+    models = []
+    for e in enriched:
+        entry = {"name": e["arn"], "labelOverride": e["label"]}
+        if e["tier"] in _FAMILY_TIERS:
+            entry["anthropicFamilyTier"] = e["tier"]
+            if newest_by_tier.get(e["tier"]) is e:
+                entry["isFamilyDefault"] = True
+        models.append(entry)
+    return models
 
 
 def _extract_claims(event: dict) -> dict:
@@ -365,18 +441,21 @@ def _build_config_response(claims: dict, user_token: str) -> dict:
     creds = _assume_role_with_token(user_token, role_arn, claims)
 
     if zone_name:
-        # Discover the zone's application-inference-profile ARNs LIVE by Zone tag,
+        # Discover the zone's application-inference-profiles LIVE by Zone tag,
         # across the configured regions. Region for inference = where they live.
         # No static snapshot => created/recreated/renamed profiles just work.
-        discovered_region, discovered_arns = _discover_zone_profiles(zone_name, creds)
-        if not discovered_arns:
+        discovered_region, discovered_profiles = _discover_zone_profiles(zone_name, creds)
+        if not discovered_profiles:
             raise RuntimeError(
                 f"No ACTIVE application inference profiles tagged {_get_zone_tag_key()}="
                 f"{zone_name!r} found in regions {_get_discovery_regions()}. "
                 f"Create it with 'ccwb inference-zone create --zone {zone_name}'."
             )
         inference_region = discovered_region
-        models = discovered_arns
+        # Model entries are objects with a friendly labelOverride + family tier so
+        # the picker shows "Claude Opus 4.1", not the raw profile ARN. The ARN is
+        # still the invocation identity (entry.name), preserving zone isolation.
+        models = _build_inference_models(discovered_profiles)
     elif resolved_role and "models" in resolved_role:
         # Non-isolated role routing: prefix CRIS model ids.
         model_prefix = "us"

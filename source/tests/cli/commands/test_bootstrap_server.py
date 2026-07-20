@@ -100,27 +100,48 @@ def mock_sts(reload_handler):
     sts_client.assume_role_with_web_identity.return_value = _fake_sts_credentials()
 
     # Zone ARNs keyed by the region they physically live in, so the mock is
-    # region-aware (a profile only appears when scanning ITS region).
+    # region-aware (a profile only appears when scanning ITS region). Each value
+    # is (zone, ccwb:Model short) — mirroring what `ccwb inference-zone create`
+    # tags, so the friendly-label logic is exercised.
     _region_arns = {
         "us-west-2": {
-            "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/usa1": "usa",
-            "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/us1": "us",
-            "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/eu1": "eu",
+            "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/usa1": ("usa", "opus-4-1"),
+            "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/us1": ("us", "sonnet-4-5"),
+            "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/eu1": ("eu", "haiku-4-5"),
         },
         "eu-west-3": {
-            "arn:aws:bedrock:eu-west-3:123456789012:application-inference-profile/euuu": "europe",
+            "arn:aws:bedrock:eu-west-3:123456789012:application-inference-profile/euuu": ("europe", "opus-4-1"),
         },
     }
 
     def _bedrock_client(region):
         c = MagicMock()
         entries = _region_arns.get(region, {})
-        summaries = [{"inferenceProfileArn": arn, "status": "ACTIVE"} for arn in entries]
+
+        def _zone_of(arn):
+            v = entries.get(arn, ("", ""))
+            return v[0] if isinstance(v, tuple) else v
+
+        def _model_of(arn):
+            v = entries.get(arn, ("", ""))
+            return v[1] if isinstance(v, tuple) and len(v) > 1 else ""
+
+        summaries = [
+            {
+                "inferenceProfileArn": arn,
+                "inferenceProfileName": f"{_zone_of(arn)}-{_model_of(arn)}",
+                "status": "ACTIVE",
+            }
+            for arn in entries
+        ]
         paginator = MagicMock()
         paginator.paginate.return_value = [{"inferenceProfileSummaries": summaries}]
         c.get_paginator.return_value = paginator
         c.list_tags_for_resource.side_effect = lambda resourceARN: {
-            "tags": [{"key": "Zone", "value": entries.get(resourceARN, "")}]
+            "tags": [
+                {"key": "Zone", "value": _zone_of(resourceARN)},
+                {"key": "ccwb:Model", "value": _model_of(resourceARN)},
+            ]
         }
         return c
 
@@ -395,13 +416,21 @@ class TestZoneRouting:
         reload_handler._DISCOVERY_CACHE.clear()
 
     def test_europe_zone_routing(self, reload_handler, zone_env, mock_sts):
-        """User in ccwb-europe-beta group → europe zone discovered in eu-west-3."""
+        """User in ccwb-europe-beta group → europe zone discovered in eu-west-3.
+        Model entries are objects: ARN in `name`, friendly `labelOverride`."""
         claims = {"sub": "u1", "email": "u@ex.com", "groups": ["ccwb-europe-beta"]}
         config = reload_handler._build_config_response(claims, "user.token")
 
         assert config["inferenceBedrockRegion"] == "eu-west-3"
         models = json.loads(config["inferenceModels"])
-        assert models == ["arn:aws:bedrock:eu-west-3:123456789012:application-inference-profile/euuu"]
+        assert models == [
+            {
+                "name": "arn:aws:bedrock:eu-west-3:123456789012:application-inference-profile/euuu",
+                "labelOverride": "Claude Opus 4.1",
+                "anthropicFamilyTier": "opus",
+                "isFamilyDefault": True,
+            }
+        ]
 
     def test_usa_zone_routing(self, reload_handler, zone_env, mock_sts):
         """User in ccwb-usa-alpha group → usa zone discovered in us-west-2."""
@@ -410,7 +439,13 @@ class TestZoneRouting:
 
         assert config["inferenceBedrockRegion"] == "us-west-2"
         models = json.loads(config["inferenceModels"])
-        assert models == ["arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/usa1"]
+        arns = [m["name"] for m in models]
+        assert "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/usa1" in arns
+        # Friendly labels, not raw ARNs, drive the picker display.
+        by_arn = {m["name"]: m for m in models}
+        usa1 = by_arn["arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/usa1"]
+        assert usa1["labelOverride"] == "Claude Opus 4.1"
+        assert usa1["anthropicFamilyTier"] == "opus"
 
     def test_no_zone_falls_back_to_default_region(self, reload_handler, zone_env, mock_sts):
         """A user whose groups yield no zone (and no Zone tag claim) gets the default
@@ -439,7 +474,9 @@ class TestZoneRouting:
 
         assert config["inferenceBedrockRegion"] == "eu-west-3"
         models = json.loads(config["inferenceModels"])
-        assert models == ["arn:aws:bedrock:eu-west-3:123456789012:application-inference-profile/euuu"]
+        assert [m["name"] for m in models] == [
+            "arn:aws:bedrock:eu-west-3:123456789012:application-inference-profile/euuu"
+        ]
 
     def test_prefix_without_hyphen_still_matches(self, reload_handler, zone_env, monkeypatch, mock_sts):
         """GROUP_PREFIX 'ccwb' (no trailing hyphen) must still match ccwb-usa-*."""
@@ -457,11 +494,11 @@ class TestZoneRouting:
         config = reload_handler._build_config_response(claims, "user.token")
 
         models = json.loads(config["inferenceModels"])
-        assert models == [
+        assert [m["name"] for m in models] == [
             "arn:aws:bedrock:eu-west-3:123456789012:application-inference-profile/euuu"
         ]
-        # CRIS ids must not leak in
-        assert not any("anthropic." in m for m in models)
+        # CRIS ids must not leak in — the ARN is the invocation identity.
+        assert not any("anthropic." in m["name"] for m in models)
 
     def test_zone_with_no_discovered_profiles_raises(self, reload_handler, monkeypatch, mock_sts):
         """A zone resolved from the token whose profiles can't be discovered fails
@@ -518,7 +555,12 @@ class TestZoneDiscovery:
             paginator = MagicMock()
             paginator.paginate.return_value = [
                 {"inferenceProfileSummaries": [
-                    {"inferenceProfileArn": arn, "status": "ACTIVE"} for arn, _ in entries
+                    {
+                        "inferenceProfileArn": arn,
+                        "inferenceProfileName": tags.get("ccwb:Model", arn.rsplit("/", 1)[-1]),
+                        "status": "ACTIVE",
+                    }
+                    for arn, tags in entries
                 ]}
             ]
             client.get_paginator.return_value = paginator
@@ -538,9 +580,9 @@ class TestZoneDiscovery:
             ]
         })
         with patch.object(reload_handler.boto3, "client", side_effect=factory):
-            region, arns = reload_handler._discover_zone_profiles("usa", {"AccessKeyId": "a", "SecretAccessKey": "b", "SessionToken": "c"})
+            region, profiles = reload_handler._discover_zone_profiles("usa", {"AccessKeyId": "a", "SecretAccessKey": "b", "SessionToken": "c"})
         assert region == "us-west-2"
-        assert arns == ["arn:aws:bedrock:us-west-2:1:application-inference-profile/usa1"]
+        assert [p["arn"] for p in profiles] == ["arn:aws:bedrock:us-west-2:1:application-inference-profile/usa1"]
 
     def test_scans_multiple_regions(self, reload_handler, monkeypatch):
         monkeypatch.setenv("DISCOVERY_REGIONS", "us-west-2,eu-west-3")
@@ -551,14 +593,58 @@ class TestZoneDiscovery:
             "eu-west-3": [("arn:aws:bedrock:eu-west-3:1:application-inference-profile/eu1", {"Zone": "europe"})],
         })
         with patch.object(reload_handler.boto3, "client", side_effect=factory):
-            region, arns = reload_handler._discover_zone_profiles("europe", {"AccessKeyId": "a", "SecretAccessKey": "b", "SessionToken": "c"})
+            region, profiles = reload_handler._discover_zone_profiles("europe", {"AccessKeyId": "a", "SecretAccessKey": "b", "SessionToken": "c"})
         assert region == "eu-west-3"
-        assert arns == ["arn:aws:bedrock:eu-west-3:1:application-inference-profile/eu1"]
+        assert [p["arn"] for p in profiles] == ["arn:aws:bedrock:eu-west-3:1:application-inference-profile/eu1"]
 
     def test_no_match_returns_empty(self, reload_handler, monkeypatch):
         monkeypatch.setenv("DISCOVERY_REGIONS", "us-west-2")
         reload_handler._DISCOVERY_CACHE.clear()
         factory = self._mock_bedrock({"us-west-2": [("arn:...:/x", {"Zone": "usa"})]})
         with patch.object(reload_handler.boto3, "client", side_effect=factory):
-            region, arns = reload_handler._discover_zone_profiles("apac", {"AccessKeyId": "a", "SecretAccessKey": "b", "SessionToken": "c"})
-        assert region is None and arns == []
+            region, profiles = reload_handler._discover_zone_profiles("apac", {"AccessKeyId": "a", "SecretAccessKey": "b", "SessionToken": "c"})
+        assert region is None and profiles == []
+
+
+class TestBuildInferenceModels:
+    """Friendly labels + family tiers for the Claude Desktop model picker."""
+
+    def test_label_and_tier_from_ccwb_model_tag(self, reload_handler):
+        models = reload_handler._build_inference_models([
+            {"arn": "arn:...:/a", "name": "usa-opus-4-1", "model": "opus-4-1", "description": ""},
+        ])
+        assert models == [{
+            "name": "arn:...:/a",
+            "labelOverride": "Claude Opus 4.1",
+            "anthropicFamilyTier": "opus",
+            "isFamilyDefault": True,
+        }]
+
+    def test_newest_version_per_family_is_default(self, reload_handler):
+        """Two Sonnet profiles → only the newest is isFamilyDefault."""
+        models = reload_handler._build_inference_models([
+            {"arn": "arn:...:/old", "name": "usa-sonnet-4-1", "model": "sonnet-4-1", "description": ""},
+            {"arn": "arn:...:/new", "name": "usa-sonnet-4-5", "model": "sonnet-4-5", "description": ""},
+        ])
+        by_arn = {m["name"]: m for m in models}
+        assert by_arn["arn:...:/new"].get("isFamilyDefault") is True
+        assert "isFamilyDefault" not in by_arn["arn:...:/old"]
+        assert by_arn["arn:...:/old"]["labelOverride"] == "Claude Sonnet 4.1"
+
+    def test_falls_back_to_profile_name_when_family_unknown(self, reload_handler):
+        """A profile whose name has no recognizable family still shows a label,
+        never a bare ARN, and carries no family tier."""
+        models = reload_handler._build_inference_models([
+            {"arn": "arn:...:/z", "name": "custom-zone-profile", "model": "", "description": ""},
+        ])
+        assert models[0]["name"] == "arn:...:/z"
+        assert models[0]["labelOverride"] == "custom-zone-profile"
+        assert "anthropicFamilyTier" not in models[0]
+
+    def test_label_derived_from_profile_name_without_tag(self, reload_handler):
+        """No ccwb:Model tag → family/version parsed from the profile name."""
+        models = reload_handler._build_inference_models([
+            {"arn": "arn:...:/h", "name": "europe-haiku-4-5", "model": "", "description": ""},
+        ])
+        assert models[0]["labelOverride"] == "Claude Haiku 4.5"
+        assert models[0]["anthropicFamilyTier"] == "haiku"
