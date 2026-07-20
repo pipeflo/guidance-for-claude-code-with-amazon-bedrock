@@ -648,3 +648,33 @@ class TestBuildInferenceModels:
         ])
         assert models[0]["labelOverride"] == "Claude Haiku 4.5"
         assert models[0]["anthropicFamilyTier"] == "haiku"
+
+    def test_supports1m_set_for_sonnet_5_and_4_6(self, reload_handler):
+        """Native-1M models (Sonnet 5, Sonnet 4.6) get supports1m=True."""
+        models = reload_handler._build_inference_models([
+            {"arn": "arn:...:/s5", "name": "usa-sonnet-5", "model": "sonnet-5", "description": ""},
+            {"arn": "arn:...:/s46", "name": "usa-sonnet-4-6", "model": "sonnet-4-6", "description": ""},
+        ])
+        by_arn = {m["name"]: m for m in models}
+        assert by_arn["arn:...:/s5"].get("supports1m") is True
+        assert by_arn["arn:...:/s46"].get("supports1m") is True
+
+    def test_major_only_label_has_no_trailing_zero(self, reload_handler):
+        """A major-only id renders as 'Claude Sonnet 5', not 'Claude Sonnet 5.0'."""
+        models = reload_handler._build_inference_models([
+            {"arn": "arn:...:/s5", "name": "usa-sonnet-5", "model": "sonnet-5", "description": ""},
+            {"arn": "arn:...:/f5", "name": "usa-fable-5", "model": "fable-5", "description": ""},
+        ])
+        by_arn = {m["name"]: m for m in models}
+        assert by_arn["arn:...:/s5"]["labelOverride"] == "Claude Sonnet 5"
+        assert by_arn["arn:...:/f5"]["labelOverride"] == "Claude Fable 5"
+
+    def test_supports1m_absent_for_200k_and_other_families(self, reload_handler):
+        """Sonnet 4.5 (200K) and non-sonnet families must NOT claim 1M."""
+        models = reload_handler._build_inference_models([
+            {"arn": "arn:...:/s45", "name": "usa-sonnet-4-5", "model": "sonnet-4-5", "description": ""},
+            {"arn": "arn:...:/o48", "name": "usa-opus-4-8", "model": "opus-4-8", "description": ""},
+            {"arn": "arn:...:/f5", "name": "usa-fable-5", "model": "fable-5", "description": ""},
+        ])
+        for m in models:
+            assert "supports1m" not in m

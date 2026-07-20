@@ -150,7 +150,8 @@ def _discover_zone_profiles(zone, assumed_creds):
 # Map a short model name / profile name to the schema's anthropicFamilyTier enum.
 _FAMILY_TIERS = ("opus", "sonnet", "haiku", "fable", "mythos")
 # Extract "opus" + version from strings like "opus-4-1", "usa-sonnet-4-5",
-# "claude-opus-4-1". Version parts drive newest-per-family default selection.
+# "sonnet-5" (major only), "claude-opus-4-1". The minor is OPTIONAL so major-only
+# ids (sonnet-5, fable-5) parse. Version parts drive newest-per-family selection.
 _MODEL_HINT_RE = re.compile(
     r"(?P<family>opus|sonnet|haiku|fable|mythos)(?:[-.]?(?P<major>\d+))?(?:[-.](?P<minor>\d+))?"
 )
@@ -162,6 +163,7 @@ def _model_label_and_tier(profile: dict):
     Prefers the ccwb:Model tag (e.g. "opus-4-1"), then the profile name
     (e.g. "usa-opus-4-1"). Returns (label, tier_or_None, (major, minor)).
     label falls back to the profile name so the picker never shows a bare ARN.
+    Major-only ids render without a trailing ".0" (e.g. "Claude Sonnet 5").
     """
     hint = profile.get("model") or profile.get("name") or ""
     m = _MODEL_HINT_RE.search(hint.lower())
@@ -171,10 +173,31 @@ def _model_label_and_tier(profile: dict):
 
     family = m.group("family")
     major = int(m.group("major")) if m.group("major") else 0
-    minor = int(m.group("minor")) if m.group("minor") else 0
-    version = f"{major}.{minor}" if major else ""
+    has_minor = m.group("minor") is not None
+    minor = int(m.group("minor")) if has_minor else 0
+    if not major:
+        version = ""
+    elif has_minor:
+        version = f"{major}.{minor}"
+    else:
+        version = f"{major}"
     label = f"Claude {family.capitalize()}{(' ' + version) if version else ''}".strip()
     return label, family, (major, minor)
+
+
+def _supports_1m(tier, ver) -> bool:
+    """Whether a model has a native 1M-token context window (per AWS model cards).
+
+    Confirmed native-1M (no beta header): Sonnet 4.6 and Sonnet 5. Sonnet 4.5 and
+    earlier are 200K. Opus/Haiku/Fable/Mythos are left unflagged until each is
+    verified against its model card — a wrong `supports1m` would misadvertise the
+    picker, so this errs on the side of NOT claiming 1M. `ver` is (major, minor);
+    a major-only id (e.g. sonnet-5) has minor 0.
+    """
+    if tier == "sonnet":
+        major, minor = ver
+        return major > 4 or (major == 4 and minor >= 6)
+    return False
 
 
 def _build_inference_models(profiles: list) -> list:
@@ -208,6 +231,10 @@ def _build_inference_models(profiles: list) -> list:
             entry["anthropicFamilyTier"] = e["tier"]
             if newest_by_tier.get(e["tier"]) is e:
                 entry["isFamilyDefault"] = True
+        # Advertise a native 1M context window where the model card confirms it,
+        # so the Claude Desktop picker can surface / prefer the 1M mode.
+        if _supports_1m(e["tier"], e["ver"]):
+            entry["supports1m"] = True
         models.append(entry)
     return models
 
