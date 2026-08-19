@@ -1,15 +1,34 @@
 # ABOUTME: CloudFormation template for the Claude Desktop Bootstrap Server (credential broker)
-# ABOUTME: Deploys an API Gateway HTTP API + Lambda that validates the user's OIDC token,
-# ABOUTME: brokers a per-user Bedrock bearer token via AssumeRoleWithWebIdentity, and returns
+# ABOUTME: Deploys an Application Load Balancer (internal or internet-facing) + Lambda that
+# ABOUTME: brokers a per-user Bedrock bearer token via AssumeRoleWithWebIdentity and returns
 # ABOUTME: per-user config at sign-in. No end-user binary; pure MDM trust anchor on devices.
+
+# WHY AN ALB AND NOT API GATEWAY
+#   An API Gateway HTTP API cannot be made private ("you can only configure REST
+#   APIs as private") and supports neither resource policies nor AWS WAF. With
+#   AlbScheme=internal the ALB has only private IPs, so the endpoint is reachable
+#   exclusively from inside the VPC or over the customer's own VPN / Direct
+#   Connect. This template provisions NO connectivity (no VPN, Direct Connect,
+#   Transit Gateway or peering) and NO hosted zone or certificate: the VPC,
+#   subnets, certificate and DNS are all customer-supplied inputs.
+#
+# WHERE TOKEN VALIDATION WENT
+#   There is no API Gateway JWT authorizer any more — an ALB cannot validate JWTs,
+#   and its authenticate-oidc action is a browser-redirect flow, which is the
+#   wrong shape for a bearer-token API call. The authoritative validator is STS:
+#   AssumeRoleWithWebIdentity verifies the token's signature against the IdP's
+#   JWKS plus iss/aud/exp before any credential is issued. The Lambda also runs a
+#   cheap signature-free pre-check on iss/aud/exp purely to fail fast. See the
+#   Lambda module docstring for the full argument.
 
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  Claude Desktop Bootstrap Server — delivers per-user configuration dynamically at
-  sign-in as an alternative to static MDM profiles. Validates the user's OIDC token,
-  exchanges it for STS credentials (session tags intact), mints a short-term Amazon
-  Bedrock bearer token scoped to the user's zone, and returns it with region, models,
-  feature toggles, and OTEL settings.
+  Claude Desktop Bootstrap Server (credential broker) — delivers per-user
+  configuration dynamically at sign-in as an alternative to static MDM profiles.
+  Exchanges the user's OIDC token for STS credentials (session tags intact), mints
+  a short-term Amazon Bedrock bearer token scoped to the user's zone, and returns
+  it with region, models, feature toggles and OTEL settings. Fronted by an
+  Application Load Balancer that can be internal (private) or internet-facing.
 
 Parameters:
   OidcIssuerUrl:
@@ -21,11 +40,13 @@ Parameters:
   OidcAudience:
     Type: String
     Description: >
-      Audience the JWT authorizer validates on the ACCESS token Claude Desktop
-      sends. For an Okta custom authorization server this is the server's
-      audience (e.g. api://default), NOT the client ID. For providers whose
-      access-token audience is the client ID, set this to the client ID.
+      Audience expected on the ACCESS token Claude Desktop sends. For an Okta
+      custom authorization server this is the server's audience (e.g.
+      api://default), NOT the client ID. For providers whose access-token
+      audience is the client ID, set this to the client ID.
       (The client ID itself is only needed client-side, in the MDM bootstrapOidc.)
+      Used by the Lambda's fail-fast pre-check; STS re-validates it against the
+      IAM OIDC provider's ClientIdList, which is the real enforcement point.
     MinLength: 1
 
   DefaultInferenceRegion:
@@ -92,6 +113,87 @@ Parameters:
     MinValue: 900
     MaxValue: 43200
 
+  # ---------------------------------------------------------------------------
+  # Endpoint (ALB) — customer-supplied networking. Nothing here creates
+  # connectivity; reaching an internal ALB is the customer's responsibility
+  # (VPN / Direct Connect / in-VPC clients).
+  # ---------------------------------------------------------------------------
+  AlbScheme:
+    Type: String
+    Description: >
+      internal = private endpoint, only reachable from within the VPC or over the
+      customer's own VPN/Direct Connect (recommended). internet-facing = public
+      ALB; if you choose this, front it with AWS WAF.
+    Default: internal
+    AllowedValues:
+      - internal
+      - internet-facing
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: "VPC to place the load balancer in"
+
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: >
+      At least two subnets in DIFFERENT Availability Zones for the load balancer.
+      For AlbScheme=internal use private subnets. No NAT is required: the ALB
+      needs no outbound access and the Lambda is invoked through the Lambda API
+      rather than from inside the subnet.
+
+  CertificateArn:
+    Type: String
+    Description: >
+      ACM certificate ARN for the HTTPS listener, in THIS region. Customer-supplied
+      (public ACM or ACM Private CA) — this template never issues one, because DNS
+      validation would block the stack. The certificate's domain must match the
+      hostname clients connect to, otherwise TLS verification fails.
+    AllowedPattern: "^arn:aws[a-zA-Z-]*:acm:[a-z0-9-]+:[0-9]{12}:certificate/.+$"
+    ConstraintDescription: "Must be an ACM certificate ARN in this region"
+
+  AlbIngressCidr:
+    Type: String
+    Description: >
+      CIDR allowed to reach the listener on 443 — normally the VPC CIDR. Use
+      0.0.0.0/0 only with AlbScheme=internet-facing.
+    Default: "10.0.0.0/8"
+    AllowedPattern: "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
+    ConstraintDescription: "Must be a valid IPv4 CIDR block"
+
+  AlbAdditionalIngressCidr:
+    Type: String
+    Description: >
+      Optional second CIDR allowed on 443 — typically the VPN client CIDR, which
+      is outside the VPC range. Leave empty if not needed.
+    Default: ""
+
+  DomainName:
+    Type: String
+    Description: >
+      Optional. Hostname clients use (must be covered by CertificateArn). Set this
+      together with HostedZoneId to have the stack create the alias record. Leave
+      both empty if your DNS is managed outside Route 53 — then point a CNAME at
+      the AlbDnsName output yourself.
+    Default: ""
+
+  HostedZoneId:
+    Type: String
+    Description: >
+      Optional. Route 53 hosted zone ID for DomainName. Works with either a PRIVATE
+      zone (recommended for AlbScheme=internal) or a public zone. A public zone
+      pointing at an internal ALB publishes your private IPs — valid, but some
+      security teams object.
+    Default: ""
+
+Conditions:
+  # Only create the DNS record when we have both halves; otherwise the admin
+  # wires DNS up themselves from the AlbDnsName output.
+  HasDns: !And
+    - !Not [!Equals [!Ref DomainName, ""]]
+    - !Not [!Equals [!Ref HostedZoneId, ""]]
+
+  HasAdditionalIngressCidr: !Not [!Equals [!Ref AlbAdditionalIngressCidr, ""]]
+
 Resources:
   BootstrapFunction:
     Type: AWS::Lambda::Function
@@ -106,8 +208,11 @@ Resources:
       Code: ./lambda-functions/bootstrap_server/
       Environment:
         Variables:
-          # The API Gateway JWT authorizer validates iss/aud/exp/signature before
-          # invoking this function, so no OIDC validation env vars are needed here.
+          # An ALB cannot validate JWTs, so the function does a cheap
+          # signature-free pre-check on iss/aud/exp to fail fast. The
+          # authoritative validation is STS AssumeRoleWithWebIdentity.
+          OIDC_ISSUER: !Ref OidcIssuerUrl
+          OIDC_AUDIENCE: !Ref OidcAudience
           DEFAULT_INFERENCE_REGION: !Ref DefaultInferenceRegion
           DEFAULT_INFERENCE_MODELS: !Ref DefaultInferenceModels
           OTLP_ENDPOINT: !Ref OtlpEndpoint
@@ -145,76 +250,137 @@ Resources:
       ManagedPolicyArns:
         - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 
-  BootstrapApi:
-    Type: AWS::ApiGatewayV2::Api
+  # ---------------------------------------------------------------------------
+  # Endpoint: Application Load Balancer -> Lambda target.
+  #
+  # Chosen over API Gateway because an HTTP API cannot be made private
+  # ("you can only configure REST APIs as private") and supports neither
+  # resource policies nor AWS WAF. With AlbScheme=internal the endpoint has only
+  # private IPs, so it is reachable exclusively from inside the VPC or over the
+  # customer's own VPN / Direct Connect.
+  # ---------------------------------------------------------------------------
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
     Properties:
-      Name: !Sub "${AWS::StackName}-api"
-      ProtocolType: HTTP
-      Description: "CoWork Bootstrap Server API"
-      CorsConfiguration:
-        AllowOrigins:
-          - "*"
-        AllowMethods:
-          - GET
-        AllowHeaders:
-          - Authorization
-          - Content-Type
-        MaxAge: 3600
+      GroupDescription: !Sub "${AWS::StackName} bootstrap ALB - HTTPS from approved CIDRs"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref AlbIngressCidr
+          Description: "HTTPS from approved CIDR"
+        - !If
+          - HasAdditionalIngressCidr
+          - IpProtocol: tcp
+            FromPort: 443
+            ToPort: 443
+            CidrIp: !Ref AlbAdditionalIngressCidr
+            Description: "HTTPS from additional approved CIDR (e.g. VPN clients)"
+          - !Ref AWS::NoValue
+      Tags:
+        - Key: Application
+          Value: "claude-code-with-bedrock"
+        - Key: Component
+          Value: "bootstrap-server"
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-bootstrap-alb-sg"
 
-  BootstrapApiStage:
-    Type: AWS::ApiGatewayV2::Stage
+  BootstrapAlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
-      ApiId: !Ref BootstrapApi
-      StageName: "$default"
-      AutoDeploy: true
+      Name: !Sub "${AWS::StackName}-bs-alb"
+      Type: application
+      Scheme: !Ref AlbScheme
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+      Subnets: !Ref SubnetIds
+      Tags:
+        - Key: Application
+          Value: "claude-code-with-bedrock"
+        - Key: Component
+          Value: "bootstrap-server"
 
-  BootstrapApiIntegration:
-    Type: AWS::ApiGatewayV2::Integration
-    Properties:
-      ApiId: !Ref BootstrapApi
-      IntegrationType: AWS_PROXY
-      IntegrationUri: !GetAtt BootstrapFunction.Arn
-      PayloadFormatVersion: "2.0"
-
-  # Native JWT authorizer — validates the Okta token's signature (against the
-  # issuer's JWKS via OIDC discovery), issuer, audience, and expiry BEFORE the
-  # Lambda runs. Decoded claims (incl. groups + the aws.amazon.com/tags claim)
-  # arrive at the Lambda in event.requestContext.authorizer.jwt.claims. The raw
-  # token remains in the Authorization header for the STS broker step.
-  BootstrapJwtAuthorizer:
-    Type: AWS::ApiGatewayV2::Authorizer
-    Properties:
-      ApiId: !Ref BootstrapApi
-      AuthorizerType: JWT
-      Name: !Sub "${AWS::StackName}-jwt"
-      IdentitySource:
-        - "$request.header.Authorization"
-      JwtConfiguration:
-        Issuer: !Ref OidcIssuerUrl
-        Audience:
-          - !Ref OidcAudience
-
-  BootstrapApiRoute:
-    Type: AWS::ApiGatewayV2::Route
-    Properties:
-      ApiId: !Ref BootstrapApi
-      RouteKey: "GET /config"
-      Target: !Sub "integrations/${BootstrapApiIntegration}"
-      AuthorizationType: JWT
-      AuthorizerId: !Ref BootstrapJwtAuthorizer
-
-  BootstrapApiPermission:
+  # Must exist before the target group registers the function.
+  BootstrapAlbPermission:
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !Ref BootstrapFunction
       Action: "lambda:InvokeFunction"
-      Principal: apigateway.amazonaws.com
-      SourceArn: !Sub "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${BootstrapApi}/*"
+      Principal: elasticloadbalancing.amazonaws.com
+      SourceArn: !Sub "arn:${AWS::Partition}:elasticloadbalancing:${AWS::Region}:${AWS::AccountId}:targetgroup/*"
+
+  BootstrapTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: BootstrapAlbPermission
+    Properties:
+      Name: !Sub "${AWS::StackName}-bs-tg"
+      TargetType: lambda
+      Targets:
+        - Id: !GetAtt BootstrapFunction.Arn
+      # MUST stay false. A health check would invoke the function with a
+      # synthetic request carrying no bearer token, get a 401, and mark the
+      # only target unhealthy -> the listener would return 503 to every client.
+      HealthCheckEnabled: false
+      Tags:
+        - Key: Application
+          Value: "claude-code-with-bedrock"
+
+  # Default action is a 404 so only the /config path reaches the function.
+  BootstrapHttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref BootstrapAlb
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: "404"
+            ContentType: "application/json"
+            MessageBody: '{"error":"not_found"}'
+
+  BootstrapConfigRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref BootstrapHttpsListener
+      Priority: 1
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values:
+              - "/config"
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref BootstrapTargetGroup
+
+  # Alias record. Behaves identically for a PRIVATE or a public hosted zone.
+  BootstrapDnsRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: HasDns
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt BootstrapAlb.DNSName
+        HostedZoneId: !GetAtt BootstrapAlb.CanonicalHostedZoneID
+        EvaluateTargetHealth: false
 
 Outputs:
   BootstrapUrl:
-    Description: "Bootstrap server endpoint URL for MDM bootstrapUrl key"
-    Value: !Sub "https://${BootstrapApi}.execute-api.${AWS::Region}.amazonaws.com/config"
+    Description: >
+      Bootstrap server endpoint URL for the MDM bootstrapUrl key. When no
+      DomainName/HostedZoneId was supplied this falls back to the raw ALB name,
+      which WILL fail TLS hostname verification against your certificate - use it
+      only for in-VPC smoke tests, and publish a real hostname before rollout.
+    Value: !If
+      - HasDns
+      - !Sub "https://${DomainName}/config"
+      - !Sub "https://${BootstrapAlb.DNSName}/config"
     Export:
       Name: !Sub "${AWS::StackName}-BootstrapUrl"
 
@@ -222,6 +388,14 @@ Outputs:
     Description: "Bootstrap Lambda function ARN"
     Value: !GetAtt BootstrapFunction.Arn
 
-  BootstrapApiId:
-    Description: "API Gateway HTTP API ID"
-    Value: !Ref BootstrapApi
+  AlbDnsName:
+    Description: "ALB DNS name - point your own CNAME here if DNS is managed outside Route 53"
+    Value: !GetAtt BootstrapAlb.DNSName
+
+  AlbCanonicalHostedZoneId:
+    Description: "ALB canonical hosted zone ID, for creating an alias record yourself"
+    Value: !GetAtt BootstrapAlb.CanonicalHostedZoneID
+
+  AlbScheme:
+    Description: "Whether the endpoint is private (internal) or public (internet-facing)"
+    Value: !Ref AlbScheme

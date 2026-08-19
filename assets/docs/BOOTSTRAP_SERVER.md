@@ -7,29 +7,61 @@ This enables organizations to change configuration centrally without re-deployin
 ## How It Works
 
 ```
-┌─────────────┐     1. Sign in (OIDC)      ┌──────────────┐
+┌─────────────┐     1. Sign in (OIDC)       ┌──────────────┐
 │  CoWork     │ ──────────────────────────► │  OIDC IdP    │
 │  (Client)   │ ◄────────────────────────── │  (Okta/Azure)│
 │             │     2. Receive token        └──────────────┘
 │             │
-│             │     3. GET /config           ┌──────────────┐
-│             │        Authorization:        │  Bootstrap   │
-│             │        Bearer <token>        │  Server      │
-│             │ ──────────────────────────► │  (Lambda)    │
-│             │                              │              │
-│             │     4. Validate JWT          │  - Verify    │
-│             │        against JWKS          │    signature │
-│             │                              │  - Check iss │
-│             │     5. Return config JSON    │  - Check aud │
-│             │ ◄────────────────────────── │  - Check exp │
-└─────────────┘                              └──────────────┘
+│             │     3. GET /config          ┌──────────────┐
+│             │        Authorization:       │     ALB      │
+│             │        Bearer <token>       │  (internal   │
+│             │ ──────────────────────────► │  or public)  │
+│             │                             └──────┬───────┘
+│             │                                    │
+│             │                             ┌──────▼───────┐
+│             │                             │  Bootstrap   │
+│             │                             │   Lambda     │
+│             │     5. Return config JSON   │              │
+│             │ ◄────────────────────────── │  4. Broker   │
+└─────────────┘                             └──────┬───────┘
+                                                   │
+                                            ┌──────▼───────┐
+                                            │     STS      │
+                                            │ validates the│
+                                            │ token + issues│
+                                            │ tagged creds │
+                                            └──────────────┘
 ```
 
 1. User signs into CoWork via OIDC (standard flow)
-2. CoWork receives an access/ID token from the IdP
+2. CoWork receives an access token from the IdP
 3. CoWork calls the bootstrap URL with the Bearer token
-4. Lambda validates the JWT signature against the IdP's JWKS
-5. Lambda returns per-user configuration JSON
+4. The Lambda screens the token cheaply, then hands it to STS
+   `AssumeRoleWithWebIdentity`, which **validates it** and applies the session
+   tags; the Lambda mints a short-lived Bedrock bearer token from the result
+5. The Lambda returns per-user configuration JSON
+
+### Where the JWT validation happens
+
+Earlier versions used an API Gateway HTTP API whose native JWT authorizer
+validated the token at the edge. That endpoint **could not be made private** —
+per AWS, *"you can only configure REST APIs as private"* — and supported neither
+resource policies nor AWS WAF. It was therefore replaced by an ALB, which cannot
+validate JWTs (its `authenticate-oidc` action is a browser-redirect flow, the
+wrong shape for a bearer-token API call).
+
+**STS is now the authoritative validator.** `AssumeRoleWithWebIdentity` verifies
+the signature against the IdP's published JWKS, checks `iss` against the IAM OIDC
+provider, checks `aud` against that provider's `ClientIdList`, and enforces `exp`.
+A forged, tampered, or expired token is rejected there, so the request returns
+403 and **no credential is ever issued**. The STS call happens before profile
+discovery and before any bearer token is minted.
+
+The Lambda additionally runs a signature-free pre-check on `iss` / `aud` / `exp`
+(60s clock skew). That exists to return a clean 401 and to avoid spending an STS
+call on junk traffic — **it is not the security boundary.** A consequence of this
+design is that the function needs no PyJWT/cryptography dependency and no Lambda
+layer: it runs on the boto3/botocore already in the runtime.
 
 ## Configuration Options
 
@@ -49,13 +81,80 @@ CoWork configuration delivery:
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `OidcIssuerUrl` | OIDC issuer URL for token validation | (from profile) |
-| `OidcClientId` | Client ID for audience validation | (from profile) |
-| `OidcJwksEndpoint` | JWKS endpoint for signature verification | (auto-derived) |
+| `OidcIssuerUrl` | OIDC issuer URL (pre-check) | (from profile) |
+| `OidcAudience` | Expected access-token audience, e.g. `api://default` (pre-check) | (from profile) |
 | `DefaultInferenceRegion` | AWS region for Bedrock inference | `us-east-1` |
 | `DefaultInferenceModels` | Comma-separated allowed model IDs | Sonnet |
 | `OtlpEndpoint` | OpenTelemetry collector endpoint | (optional) |
 | `InferenceSessionLifetimeSec` | Session lifetime before re-auth | `28800` (8h) |
+| `FederatedRoleArn` | Role the broker assumes for each user | (from profile) |
+| `AlbScheme` | `internal` (private) or `internet-facing` | `internal` |
+| `VpcId` | VPC for the load balancer | (required) |
+| `SubnetIds` | ≥2 subnets in different AZs | (required) |
+| `CertificateArn` | ACM certificate in this region | (required) |
+| `AlbIngressCidr` | CIDR allowed on 443, normally the VPC CIDR | `10.0.0.0/8` |
+| `AlbAdditionalIngressCidr` | Second allowed CIDR, e.g. VPN clients | (optional) |
+| `DomainName` | Hostname clients connect to | (optional) |
+| `HostedZoneId` | Route 53 zone for the alias record | (optional) |
+
+## Endpoint: private or public
+
+The bootstrap server sits behind an Application Load Balancer.
+
+- **`AlbScheme: internal`** (default, recommended) — the load balancer has only
+  private IPs, so the endpoint is reachable **exclusively** from inside the VPC or
+  over connectivity you already own.
+- **`AlbScheme: internet-facing`** — public endpoint. Attach an AWS WAF web ACL
+  (possible with an ALB; it never was with an HTTP API).
+
+> **This solution provisions no connectivity.** VPN, Direct Connect, Transit
+> Gateway and VPC peering are out of scope, as are hosted zones and certificates.
+> The VPC, subnets, certificate and DNS are inputs you supply. With
+> `AlbScheme: internal`, devices that cannot reach the VPC will fail at sign-in.
+
+### DNS is required — but it does not have to be public
+
+The load balancer's own name is `internal-…elb.amazonaws.com`, and ACM will not
+issue a certificate for a domain you don't own. If a client connects on the raw
+ALB hostname, the certificate cannot match it, TLS verification fails, and Claude
+Desktop refuses the connection. So **every deployment needs a DNS record** for a
+hostname the certificate covers. Three ways to get there:
+
+| Your DNS | What the stack does | Certificate |
+|---|---|---|
+| **Route 53 private zone** (recommended for `internal`) | Set `DomainName` + `HostedZoneId`; the stack creates the alias. Resolvable in-VPC, and from on-prem via a Resolver inbound endpoint. | A public ACM cert still works — validate with a CNAME in the **public** zone of a domain you own, even though the name itself resolves only privately. Or use ACM Private CA if that CA is already trusted on your devices. |
+| **Route 53 public zone** | Same, but the record is public and returns your **private** IPs. | Simplest validation. ⚠️ Publishes internal hostnames/IPs to anyone querying DNS. Not reachable from the internet, but some security teams treat it as information disclosure. |
+| **DNS outside Route 53** (Infoblox, BIND, AD DNS) | Leave `DomainName` and `HostedZoneId` empty; point your own CNAME at the `AlbDnsName` stack output. | Your own cert / internal CA. |
+
+### Stack outputs
+
+| Output | Use |
+|---|---|
+| `BootstrapUrl` | Value for the MDM `bootstrapUrl` key. Falls back to the raw ALB hostname when no DNS was configured — that form **fails TLS verification**, so treat it as an in-VPC smoke-test URL only. |
+| `AlbDnsName` | Target for your own CNAME when DNS lives outside Route 53. |
+| `AlbCanonicalHostedZoneId` | Needed if you create the alias record yourself. |
+| `AlbScheme` | Confirms whether the endpoint ended up private or public. |
+
+### Verifying it is actually private
+
+```bash
+# From OFF the network — must TIME OUT (not 401, not 403)
+curl -m 10 https://<your-domain>/config
+
+# From ON the network, no token — must return 401
+curl -s -o /dev/null -w '%{http_code}\n' https://<your-domain>/config
+```
+
+A timeout from outside is the test that proves the requirement is met; a 401 from
+outside means the endpoint is still publicly reachable.
+
+### Migrating from the API Gateway version
+
+The API Gateway resources were removed from the template, so the next
+`ccwb deploy bootstrap` **deletes the HTTP API**. `BootstrapUrl` changes as a
+result, so you must re-run `ccwb claude-desktop generate` and re-push the MDM
+trust anchor to devices. Run `ccwb init` first to supply the new VPC, subnet,
+certificate and DNS inputs — `ccwb deploy bootstrap` refuses to run without them.
 
 ### Response Format
 
@@ -80,11 +179,32 @@ CoWork configuration delivery:
 
 ## Security Considerations
 
-- **Token validation**: Every request must include a valid JWT Bearer token. The Lambda validates the signature against the IdP's JWKS, checks issuer (`iss`), audience (`aud`), and expiration (`exp`) claims.
-- **No caching**: Responses include `Cache-Control: no-store` to prevent stale configuration.
-- **HTTPS only**: API Gateway enforces HTTPS. The JWKS endpoint must also be HTTPS.
-- **Short-lived config**: The `expiresAt` field (1 hour) tells clients when to re-fetch. This limits exposure if a config response is somehow captured.
-- **No secrets in response**: The config response contains no credentials — only configuration directives. Authentication for Bedrock remains handled by the credential helper.
+- **Token validation**: every request must carry a valid JWT Bearer token. STS
+  `AssumeRoleWithWebIdentity` is the authoritative validator — it verifies the
+  signature against the IdP's JWKS and checks `iss`, `aud` and `exp` before any
+  credential is issued (see [Where the JWT validation happens](#where-the-jwt-validation-happens)).
+  The Lambda's own `iss`/`aud`/`exp` pre-check is a fail-fast guard, not the
+  security boundary.
+- **Network exposure**: with `AlbScheme: internal` the endpoint has no public IP
+  at all, which is the strongest control available here. Prefer it over
+  `internet-facing` unless you have a reason not to.
+- **Least-privilege Lambda role**: the execution role holds CloudWatch Logs
+  permissions only. It deliberately has no `sts:AssumeRole` or `bedrock:*` grants
+  — `AssumeRoleWithWebIdentity` is authorized by the *target role's trust policy*
+  and the user's token, not by the caller's identity. Do not add them.
+- **No caching**: responses include `Cache-Control: no-store` to prevent stale configuration.
+- **HTTPS only**: the listener is HTTPS-only (TLS 1.2+ via
+  `ELBSecurityPolicy-TLS13-1-2-2021-06`). There is no HTTP listener to redirect from.
+- **Minimal surface**: the listener's default action is a 404; only `/config`
+  reaches the Lambda.
+- **Error opacity**: brokering failures return a generic 403. STS error text is
+  logged to CloudWatch but never returned, so role ARNs and policy details don't leak.
+- **Short-lived credentials**: the response carries a Bedrock bearer token bounded
+  by the STS session (≤12h), and `expiresAt` tells clients when to re-fetch.
+- **Response does contain a credential**: unlike the static-config model, this
+  response includes `inferenceBedrockBearerToken`. That is why the endpoint
+  authenticates every request and sets `no-store` — and a further argument for
+  `AlbScheme: internal`.
 
 ## How Clients Connect (MDM Anchor Profile)
 

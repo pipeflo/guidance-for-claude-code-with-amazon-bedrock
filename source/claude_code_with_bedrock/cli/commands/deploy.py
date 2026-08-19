@@ -1125,6 +1125,52 @@ class DeployCommand(Command):
                     else:
                         token_audience = profile.client_id
 
+                # Endpoint (ALB) inputs. All customer-supplied: this solution does
+                # not provision VPCs, subnets, certificates or connectivity.
+                alb_scheme = getattr(profile, "claude_desktop_alb_scheme", "") or "internal"
+                vpc_id = getattr(profile, "claude_desktop_vpc_id", "") or ""
+                subnet_ids = list(getattr(profile, "claude_desktop_subnet_ids", []) or [])
+                certificate_arn = getattr(profile, "claude_desktop_certificate_arn", "") or ""
+                alb_ingress_cidr = getattr(profile, "claude_desktop_alb_ingress_cidr", "") or ""
+                alb_additional_cidr = (
+                    getattr(profile, "claude_desktop_alb_additional_ingress_cidr", "") or ""
+                )
+                domain_name = getattr(profile, "claude_desktop_domain_name", "") or ""
+                hosted_zone_id = getattr(profile, "claude_desktop_hosted_zone_id", "") or ""
+
+                missing = []
+                if not vpc_id:
+                    missing.append("VPC")
+                if len(subnet_ids) < 2:
+                    missing.append("at least 2 subnets in different Availability Zones")
+                if not certificate_arn:
+                    missing.append("ACM certificate ARN")
+                if missing:
+                    console.print(
+                        "[red]The bootstrap server is fronted by a load balancer, which needs "
+                        "networking details this profile doesn't have yet.[/red]"
+                    )
+                    console.print(f"[yellow]Missing: {', '.join(missing)}.[/yellow]")
+                    console.print(
+                        "[dim]These are supplied by you (the solution never creates VPCs, subnets "
+                        "or certificates). Run 'ccwb init' and complete the Claude Desktop "
+                        "bootstrap section, then re-run 'ccwb deploy bootstrap'.[/dim]"
+                    )
+                    return 1
+
+                # A cert whose domain nobody resolves is useless: without DNS the
+                # client must use the raw ALB name, which fails TLS verification.
+                if not (domain_name and hosted_zone_id):
+                    console.print(
+                        "[yellow]Note:[/yellow] no domain name + hosted zone configured, so no DNS "
+                        "record will be created."
+                    )
+                    console.print(
+                        "[dim]  After deploy, point your own DNS at the AlbDnsName output. Clients "
+                        "must connect on a hostname covered by your certificate — the raw ALB "
+                        "hostname will fail TLS verification.[/dim]"
+                    )
+
                 params = [
                     f"OidcIssuerUrl={oidc_issuer_url}",
                     f"OidcAudience={token_audience}",
@@ -1138,7 +1184,18 @@ class DeployCommand(Command):
                     f"GroupPrefix={group_prefix}",
                     f"FederatedRoleArn={profile.federated_role_arn}",
                     f"MaxSessionDuration={max_session_duration}",
+                    f"AlbScheme={alb_scheme}",
+                    f"VpcId={vpc_id}",
+                    f"SubnetIds={','.join(subnet_ids)}",
+                    f"CertificateArn={certificate_arn}",
+                    f"DomainName={domain_name}",
+                    f"HostedZoneId={hosted_zone_id}",
                 ]
+                # Omit empty CIDRs so the template defaults apply.
+                if alb_ingress_cidr:
+                    params.append(f"AlbIngressCidr={alb_ingress_cidr}")
+                if alb_additional_cidr:
+                    params.append(f"AlbAdditionalIngressCidr={alb_additional_cidr}")
 
                 # The handler (~18KB) exceeds the 4KB inline-ZipFile limit, so the
                 # template references a local dir (Code: ./lambda-functions/...) and
@@ -1204,8 +1261,24 @@ class DeployCommand(Command):
                     console.print(f"\n[bold green]\u2713 Bootstrap server deployed![/bold green]")
                     console.print(f"\n[bold]Bootstrap URL:[/bold] {bootstrap_url}")
                     console.print(
-                        "\n[dim]Add this URL as 'bootstrapUrl' in your MDM anchor profile.[/dim]"
+                        "\n[dim]Add this URL as 'bootstrapUrl' in your MDM anchor profile "
+                        "(or run 'ccwb claude-desktop generate').[/dim]"
                     )
+                    if alb_scheme == "internal":
+                        console.print(
+                            "\n[yellow]This endpoint is PRIVATE.[/yellow] Devices can only reach it "
+                            "from inside the VPC or over your own VPN / Direct Connect."
+                        )
+                        console.print(
+                            "[dim]  Verify before rollout: the URL should time out from an "
+                            "off-network machine and return 401 (not a timeout) from an "
+                            "on-network one.[/dim]"
+                        )
+                    else:
+                        console.print(
+                            "\n[yellow]This endpoint is PUBLIC (internet-facing).[/yellow] "
+                            "Consider attaching an AWS WAF web ACL to the load balancer."
+                        )
                     # Persist endpoint to profile for trust-anchor generation
                     if bootstrap_url and bootstrap_url != "N/A":
                         profile.claude_desktop_bootstrap_endpoint = bootstrap_url

@@ -9,9 +9,11 @@ the STS client so no AWS calls are made; they assert the returned config carries
 a per-user `inferenceBedrockBearerToken` scoped to the user's zone region.
 """
 
+import base64
 import json
 import os
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
@@ -50,10 +52,43 @@ def _fake_sts_credentials():
     }
 
 
+_ISSUER = "https://example.okta.com/oauth2/default"
+_AUDIENCE = "api://default"
+
+
+def _jwt(claims: dict) -> str:
+    """Build a JWT with a real header/payload and a dummy signature.
+
+    Signatures are never verified locally — STS is the authoritative validator
+    (see the handler's module docstring) — so tests need no crypto.
+    """
+
+    def seg(obj):
+        return base64.urlsafe_b64encode(json.dumps(obj).encode()).decode().rstrip("=")
+
+    return f"{seg({'alg': 'RS256', 'typ': 'JWT'})}.{seg(claims)}.dummy-signature"
+
+
+def _claims(**overrides):
+    """Plausible Okta access-token claims that pass the handler's pre-check."""
+    base = {
+        "sub": "user-sub-123",
+        "email": "user@example.com",
+        "iss": _ISSUER,
+        "aud": _AUDIENCE,
+        "exp": int(time.time()) + 3600,
+    }
+    base.update(overrides)
+    return base
+
+
 @pytest.fixture(autouse=True)
 def set_env_vars(monkeypatch):
     """Set required environment variables for all tests."""
-    # No OIDC validation env vars — the API Gateway JWT authorizer handles that.
+    # There is no API Gateway JWT authorizer any more (the endpoint is an ALB), so
+    # the handler needs these for its fail-fast pre-check.
+    monkeypatch.setenv("OIDC_ISSUER", _ISSUER)
+    monkeypatch.setenv("OIDC_AUDIENCE", _AUDIENCE)
     monkeypatch.setenv("DEFAULT_INFERENCE_REGION", "us-west-2")
     monkeypatch.setenv(
         "DEFAULT_INFERENCE_MODELS",
@@ -66,15 +101,25 @@ def set_env_vars(monkeypatch):
     monkeypatch.setenv("MAX_SESSION_DURATION", "43200")
 
 
-def _event(claims=None, token="the.user.token"):
-    """Build an API Gateway v2 event as the JWT authorizer delivers it:
-    validated claims in requestContext.authorizer.jwt.claims, raw token in the
-    Authorization header (for the STS broker step)."""
-    event = {"headers": {}, "requestContext": {}}
-    if token is not None:
+def _event(claims=None, token=None, method="GET", path="/config"):
+    """Build an ALB target event.
+
+    An ALB lowercases header names and provides no authorizer context, so the
+    handler decodes claims straight from the bearer token. Pass `claims` to have
+    a matching JWT built, or `token` to control the raw string exactly.
+    """
+    event = {
+        "requestContext": {"elb": {"targetGroupArn": "arn:aws:elasticloadbalancing:::targetgroup/tg"}},
+        "httpMethod": method,
+        "path": path,
+        "headers": {},
+        "body": "",
+        "isBase64Encoded": False,
+    }
+    if token is None and claims is not None:
+        token = _jwt(claims)
+    if token:
         event["headers"]["authorization"] = f"Bearer {token}"
-    if claims is not None:
-        event["requestContext"]["authorizer"] = {"jwt": {"claims": claims}}
     return event
 
 
@@ -153,31 +198,29 @@ def mock_sts(reload_handler):
 
 
 class TestLambdaHandler:
-    """Tests for lambda_handler (authorizer-based auth + response envelope).
+    """Tests for lambda_handler (ALB event handling + response envelope).
 
-    The API Gateway JWT authorizer validates the token before the Lambda runs,
-    so these tests deliver claims via requestContext.authorizer.jwt.claims.
+    The endpoint is an ALB, so there is no authorizer: the handler decodes claims
+    from the bearer token itself and STS does the authoritative validation.
     """
 
-    def test_missing_claims_returns_401(self, reload_handler):
-        """No authorizer claims on the request → 401 (defense in depth)."""
-        response = reload_handler.lambda_handler(_event(claims=None), None)
+    def test_missing_token_returns_401(self, reload_handler):
+        """No Authorization header at all → 401."""
+        response = reload_handler.lambda_handler(_event(), None)
 
         assert response["statusCode"] == 401
         body = json.loads(response["body"])
         assert body["error"] == "unauthorized"
 
-    def test_missing_token_returns_401(self, reload_handler):
-        """Claims present but no raw token → 401 (can't broker without it)."""
-        response = reload_handler.lambda_handler(
-            _event(claims={"sub": "user123", "email": "u@ex.com"}, token=None), None
-        )
+    def test_undecodable_token_returns_401(self, reload_handler):
+        """A token that isn't a JWT → 401 (nothing to decode)."""
+        response = reload_handler.lambda_handler(_event(token="not-a-jwt"), None)
 
         assert response["statusCode"] == 401
 
     def test_successful_broker_response(self, reload_handler, mock_sts):
         """Should return 200 with a per-user Bedrock bearer token."""
-        event = _event(claims={"sub": "user123", "email": "user@example.com"})
+        event = _event(claims=_claims(sub="user123", email="user@example.com"))
         response = reload_handler.lambda_handler(event, None)
 
         assert response["statusCode"] == 200
@@ -192,12 +235,16 @@ class TestLambdaHandler:
         assert body["user"]["email"] == "user@example.com"
 
     def test_broker_forwards_user_token_to_sts(self, reload_handler, mock_sts):
-        """The raw user token must be passed as WebIdentityToken (session tags ride in it)."""
-        event = _event(claims={"sub": "user123", "email": "alice@example.com"}, token="the.user.token")
-        reload_handler.lambda_handler(event, None)
+        """The raw user token must be passed as WebIdentityToken VERBATIM.
+
+        Session tags ride in the token, and STS needs the untouched string to
+        verify its signature — this is the authoritative validation step.
+        """
+        token = _jwt(_claims(sub="user123", email="alice@example.com"))
+        reload_handler.lambda_handler(_event(token=token), None)
 
         _, kwargs = mock_sts.assume_role_with_web_identity.call_args
-        assert kwargs["WebIdentityToken"] == "the.user.token"
+        assert kwargs["WebIdentityToken"] == token
         assert kwargs["RoleArn"] == "arn:aws:iam::123456789012:role/BedrockOktaFederatedRole"
         assert kwargs["RoleSessionName"] == "alice@example.com"
 
@@ -208,7 +255,7 @@ class TestLambdaHandler:
             "AccessDenied: role arn:aws:iam::123456789012:role/Secret not assumable"
         )
         with patch.object(reload_handler.boto3, "client", return_value=failing_sts):
-            event = _event(claims={"sub": "user123", "email": "user@example.com"})
+            event = _event(claims=_claims(sub="user123", email="user@example.com"))
             response = reload_handler.lambda_handler(event, None)
 
         assert response["statusCode"] == 403
@@ -219,7 +266,7 @@ class TestLambdaHandler:
 
     def test_cache_control_header(self, reload_handler, mock_sts):
         """Should include Cache-Control: no-store in all responses."""
-        event = _event(claims={"sub": "user123", "email": "user@example.com"})
+        event = _event(claims=_claims(sub="user123", email="user@example.com"))
         response = reload_handler.lambda_handler(event, None)
 
         assert response["headers"]["Cache-Control"] == "no-store"
@@ -234,7 +281,7 @@ class TestLambdaHandler:
         sts_client = MagicMock()
         sts_client.assume_role_with_web_identity.return_value = _fake_sts_credentials()
         with patch.object(handler.boto3, "client", return_value=sts_client):
-            event = _event(claims={"sub": "user123", "email": "user@example.com"})
+            event = _event(claims=_claims(sub="user123", email="user@example.com"))
             response = handler.lambda_handler(event, None)
 
         body = json.loads(response["body"])
@@ -251,40 +298,141 @@ class TestLambdaHandler:
         assert "message" in body and "internal" in body["message"].lower()
 
 
-class TestExtractClaims:
-    """Tests for _extract_claims (reads + normalizes authorizer claims)."""
+class TestPrecheckToken:
+    """Tests for _precheck_token — the fail-fast guard in front of STS.
 
-    def test_reads_claims_from_authorizer_context(self, reload_handler):
-        event = _event(claims={"sub": "u1", "email": "u1@ex.com", "groups": ["ccwb-us-a"]})
+    This is deliberately NOT the security boundary (STS validates the signature),
+    but it must reject implausible tokens WITHOUT spending an STS call, both to
+    keep errors clean and to blunt unauthenticated traffic against a public ALB.
+    """
+
+    def test_valid_token_passes(self, reload_handler):
+        assert reload_handler._precheck_token(_claims()) is None
+
+    def test_audience_as_list_passes(self, reload_handler):
+        """Some IdPs issue `aud` as a list; membership is what matters."""
+        assert reload_handler._precheck_token(_claims(aud=["other", _AUDIENCE])) is None
+
+    def test_issuer_trailing_slash_tolerated(self, reload_handler):
+        """Auth0-style issuers carry a trailing slash; don't reject on that alone."""
+        assert reload_handler._precheck_token(_claims(iss=_ISSUER + "/")) is None
+
+    @pytest.mark.parametrize(
+        "overrides,expected",
+        [
+            ({"iss": "https://evil.example.com"}, "issuer mismatch"),
+            ({"aud": "some-other-audience"}, "audience mismatch"),
+            ({"exp": int(time.time()) - 3600}, "token expired"),
+            ({"nbf": int(time.time()) + 3600}, "token not yet valid"),
+            ({"sub": ""}, "no sub claim"),
+        ],
+    )
+    def test_rejects_bad_claims(self, reload_handler, overrides, expected):
+        assert reload_handler._precheck_token(_claims(**overrides)) == expected
+
+    def test_rejects_undecodable(self, reload_handler):
+        claims = reload_handler._extract_claims(_event(token="not-a-jwt"))
+        assert reload_handler._precheck_token(claims) == "token not decodable"
+
+    def test_clock_skew_tolerated(self, reload_handler):
+        """A token that expired a few seconds ago still passes (IdP clock drift)."""
+        assert reload_handler._precheck_token(_claims(exp=int(time.time()) - 5)) is None
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"iss": "https://evil.example.com"},
+            {"aud": "some-other-audience"},
+            {"exp": int(time.time()) - 3600},
+        ],
+    )
+    def test_bad_token_returns_401_without_calling_sts(self, reload_handler, mock_sts, overrides):
+        """The whole point of the pre-check: no STS call for junk traffic."""
+        response = reload_handler.lambda_handler(_event(claims=_claims(**overrides)), None)
+
+        assert response["statusCode"] == 401
+        assert not mock_sts.assume_role_with_web_identity.called
+
+    def test_error_message_does_not_reveal_reason(self, reload_handler, mock_sts):
+        """Don't help an attacker tune a token — the reason is logged, not returned."""
+        response = reload_handler.lambda_handler(
+            _event(claims=_claims(aud="wrong-audience")), None
+        )
+        body = json.loads(response["body"])
+        assert "audience" not in body["message"].lower()
+
+
+class TestAlbResponseEnvelope:
+    """The ALB contract: isBase64Encoded + statusCode + headers are required."""
+
+    def test_response_includes_is_base64_encoded(self, reload_handler, mock_sts):
+        response = reload_handler.lambda_handler(
+            _event(claims=_claims(sub="u1", email="u1@ex.com")), None
+        )
+        assert response["isBase64Encoded"] is False
+        assert "statusCode" in response and "headers" in response
+
+    def test_cors_headers_present(self, reload_handler, mock_sts):
+        """Replaces the API Gateway CorsConfiguration an ALB doesn't have."""
+        response = reload_handler.lambda_handler(
+            _event(claims=_claims(sub="u1", email="u1@ex.com")), None
+        )
+        headers = response["headers"]
+        assert headers["Access-Control-Allow-Origin"] == "*"
+        assert "Authorization" in headers["Access-Control-Allow-Headers"]
+
+    def test_options_preflight_returns_204_without_token(self, reload_handler, mock_sts):
+        response = reload_handler.lambda_handler(_event(method="OPTIONS"), None)
+
+        assert response["statusCode"] == 204
+        assert not mock_sts.assume_role_with_web_identity.called
+
+    def test_error_responses_also_carry_envelope(self, reload_handler):
+        response = reload_handler.lambda_handler(_event(), None)
+        assert response["isBase64Encoded"] is False
+        assert response["headers"]["Cache-Control"] == "no-store"
+
+
+class TestExtractClaims:
+    """Tests for _extract_claims (decodes the bearer token + normalizes groups)."""
+
+    def test_reads_claims_from_bearer_token(self, reload_handler):
+        event = _event(claims=_claims(sub="u1", email="u1@ex.com", groups=["ccwb-us-a"]))
         claims = reload_handler._extract_claims(event)
         assert claims["sub"] == "u1"
         assert claims["groups"] == ["ccwb-us-a"]
 
     def test_normalizes_stringified_groups(self, reload_handler):
-        """API Gateway may serialize a multi-valued claim as '[a, b]'."""
-        event = _event(claims={"sub": "u1", "groups": "[ccwb-us-alpha, ccwb-engineering]"})
+        """Some IdPs serialize a multi-valued claim as '[a, b]'."""
+        event = _event(claims=_claims(sub="u1", groups="[ccwb-us-alpha, ccwb-engineering]"))
         claims = reload_handler._extract_claims(event)
         assert claims["groups"] == ["ccwb-us-alpha", "ccwb-engineering"]
 
     def test_normalizes_space_separated_groups(self, reload_handler):
         """Okta access token flattens groups to a SPACE-separated string."""
-        event = _event(claims={"sub": "u1", "groups": "Everyone ccwb-us-alpha claude-power-users"})
+        event = _event(claims=_claims(sub="u1", groups="Everyone ccwb-us-alpha claude-power-users"))
         claims = reload_handler._extract_claims(event)
         assert claims["groups"] == ["Everyone", "ccwb-us-alpha", "claude-power-users"]
 
     def test_normalizes_comma_separated_groups(self, reload_handler):
-        event = _event(claims={"sub": "u1", "groups": "ccwb-us-alpha, ccwb-eng"})
+        event = _event(claims=_claims(sub="u1", groups="ccwb-us-alpha, ccwb-eng"))
         claims = reload_handler._extract_claims(event)
         assert claims["groups"] == ["ccwb-us-alpha", "ccwb-eng"]
 
     def test_missing_groups_defaults_empty(self, reload_handler):
-        event = _event(claims={"sub": "u1"})
+        event = _event(claims=_claims(sub="u1"))
         claims = reload_handler._extract_claims(event)
         assert claims["groups"] == []
 
-    def test_no_authorizer_returns_empty(self, reload_handler):
-        claims = reload_handler._extract_claims({"requestContext": {}})
+    def test_no_token_returns_empty(self, reload_handler):
+        claims = reload_handler._extract_claims({"headers": {}})
         assert claims.get("sub") is None
+
+    def test_uppercase_authorization_header(self, reload_handler):
+        """ALBs lowercase header names, but tolerate the canonical spelling too."""
+        token = _jwt(_claims(sub="u9"))
+        claims = reload_handler._extract_claims({"headers": {"Authorization": f"Bearer {token}"}})
+        assert claims["sub"] == "u9"
 
     def test_extract_bearer_token(self, reload_handler):
         assert reload_handler._extract_bearer_token(_event(claims={}, token="abc.def")) == "abc.def"

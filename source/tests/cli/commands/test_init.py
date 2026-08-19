@@ -506,6 +506,45 @@ class TestExistingConfigRoundTrip:
         assert cd["zone_config"]["usa"]["region"] == "us-east-1"
         assert cd["role_config"]["engineering"]["models"] == ["claude-opus-4-6-v1:0"]
 
+    def test_bootstrap_endpoint_settings_preserved(self, monkeypatch):
+        """ALB endpoint settings survive the round-trip.
+
+        These are painful to re-enter (VPC, subnet and certificate IDs), and
+        silently losing them would flip a private endpoint back to the default or
+        fail the deploy guard.
+        """
+        profile = self._make_profile(
+            cowork_config_mode="dynamic",
+            claude_desktop_alb_scheme="internal",
+            claude_desktop_vpc_id="vpc-0abc123",
+            claude_desktop_subnet_ids=["subnet-0aaa", "subnet-0bbb"],
+            claude_desktop_certificate_arn=(
+                "arn:aws:acm:us-east-1:123456789012:certificate/11111111-2222-3333-4444-555555555555"
+            ),
+            claude_desktop_alb_ingress_cidr="10.50.0.0/16",
+            claude_desktop_alb_additional_ingress_cidr="10.200.0.0/22",
+            claude_desktop_domain_name="bootstrap.internal.example.com",
+            claude_desktop_hosted_zone_id="Z0EXAMPLEZONE",
+        )
+        existing = self._build_existing_config(profile, monkeypatch)
+
+        cd = existing["claude_desktop"]
+        assert cd["alb_scheme"] == "internal"
+        assert cd["vpc_id"] == "vpc-0abc123"
+        assert cd["subnet_ids"] == ["subnet-0aaa", "subnet-0bbb"]
+        assert cd["certificate_arn"].startswith("arn:aws:acm:")
+        assert cd["alb_ingress_cidr"] == "10.50.0.0/16"
+        assert cd["alb_additional_ingress_cidr"] == "10.200.0.0/22"
+        assert cd["domain_name"] == "bootstrap.internal.example.com"
+        assert cd["hosted_zone_id"] == "Z0EXAMPLEZONE"
+
+    def test_bootstrap_endpoint_defaults_to_internal(self, monkeypatch):
+        """A profile with no endpoint config defaults to the private scheme."""
+        existing = self._build_existing_config(self._make_profile(), monkeypatch)
+
+        assert existing["claude_desktop"]["alb_scheme"] == "internal"
+        assert existing["claude_desktop"]["subnet_ids"] == []
+
     def test_quota_fields_preserved(self, monkeypatch):
         """Daily limit and enforcement modes survive (previously dropped)."""
         profile = self._make_profile(

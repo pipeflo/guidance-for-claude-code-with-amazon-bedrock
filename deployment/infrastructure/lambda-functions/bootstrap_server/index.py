@@ -1,24 +1,47 @@
 # ABOUTME: Lambda handler for the Claude Desktop Bootstrap Server (credential broker)
-# ABOUTME: The API Gateway JWT authorizer validates the token; this function reads the
-# ABOUTME: authorizer claims, exchanges the raw token for STS credentials via
-# ABOUTME: AssumeRoleWithWebIdentity (session tags intact), and mints a Bedrock bearer token.
+# ABOUTME: Runs behind an ALB (internal or public). Decodes the user's OIDC token,
+# ABOUTME: exchanges it for STS credentials via AssumeRoleWithWebIdentity (session tags
+# ABOUTME: intact) — which is what authoritatively validates it — and mints a Bedrock token.
 
 """Claude Desktop Bootstrap Server — per-user Bedrock bearer-token broker.
 
 Flow per request:
   1. Claude Desktop signs the user into the org OIDC provider (Okta) via PKCE and
      sends the resulting token as `Authorization: Bearer <token>` to GET /config.
-  2. The API Gateway JWT authorizer validates the token's signature (against the
-     issuer's JWKS via OIDC discovery), issuer, audience, and expiry BEFORE this
-     function runs, and passes the decoded claims in
-     event.requestContext.authorizer.jwt.claims. No PyJWT dependency here.
-  3. This function forwards that SAME raw token to STS AssumeRoleWithWebIdentity.
-     Session tags (Zone, Project/CostCenter) ride in the token's
+  2. This function decodes the token's claims WITHOUT verifying the signature and
+     runs a cheap pre-check (issuer / audience / expiry) to fail fast.
+  3. It forwards that SAME raw token to STS AssumeRoleWithWebIdentity. Session
+     tags (Zone, Project/CostCenter) ride in the token's
      https://aws.amazon.com/tags claim and STS applies them automatically — so
      every existing GDPR Deny and cost-attribution IAM policy fires unchanged.
   4. It mints a short-term Amazon Bedrock bearer token (SigV4 presign of
      CallWithBearerToken) from those credentials and returns it as
      `inferenceBedrockBearerToken`, scoped to the user's zone region.
+
+WHERE IS THE JWT VALIDATION?  (the obvious review question)
+
+This used to sit behind an API Gateway HTTP API whose native JWT authorizer
+verified the token before the function ran. That endpoint could not be made
+private, so it was replaced by an ALB — and an ALB cannot validate JWTs (its
+authenticate-oidc action is a browser-redirect flow, wrong for a bearer-token
+API call).
+
+**STS is the authoritative validator.** `AssumeRoleWithWebIdentity` verifies the
+token's signature against the IdP's published JWKS, checks `iss` against the IAM
+OIDC provider, checks `aud` against that provider's ClientIdList, and enforces
+`exp`. A forged, tampered, or expired token is rejected there, so the function
+returns 403 and **no credential is ever issued**. Critically, the STS call
+happens in `_build_config_response` BEFORE profile discovery and before any
+bearer token is minted; the only use of claims prior to that point is local,
+side-effect-free computation (zone name, role, session name). A forged claim
+therefore buys an attacker nothing — the request dies at STS.
+
+`_precheck_token` is defense in depth and a DoS guard ONLY: it returns a clean
+401 and avoids burning an STS call on junk traffic. **Do not treat it as the
+security boundary, and do not remove the STS call on the assumption that it is.**
+
+Consequence: no PyJWT/cryptography dependency and no Lambda layer — the function
+still runs on nothing but the boto3/botocore that ship in the runtime.
 
 The bootstrap server is NOT in the inference data path — it only issues
 credentials at sign-in. Prompts go directly from Claude Desktop to Bedrock.
@@ -74,6 +97,15 @@ def _get_discovery_regions():
 
 def _get_zone_tag_key():
     return os.environ.get("ZONE_TAG_KEY", "Zone")
+
+def _get_oidc_issuer():
+    return os.environ.get("OIDC_ISSUER", "")
+
+def _get_oidc_audience():
+    return os.environ.get("OIDC_AUDIENCE", "")
+
+# Tolerance for clock drift between the IdP and Lambda when pre-checking exp/nbf.
+_CLOCK_SKEW_SEC = 60
 
 
 # Zone-discovery cache: {zone_lower: (region, [arns], epoch_seconds)}. Module scope
@@ -239,24 +271,96 @@ def _build_inference_models(profiles: list) -> list:
     return models
 
 
-def _extract_claims(event: dict) -> dict:
-    """Read the JWT claims the API Gateway authorizer attached to the request.
+def _decode_jwt_claims_unverified(token: str) -> dict:
+    """Base64url-decode a JWT's payload WITHOUT verifying its signature.
 
-    HTTP API JWT authorizers place decoded claims at
-    event.requestContext.authorizer.jwt.claims. The `groups` claim may arrive as
-    a real list or as a stringified list (e.g. "[a, b]") depending on the
-    provider; normalize it to a list.
+    Safe here only because STS re-validates the very same token before any
+    credential is issued (see the module docstring). Never use the result to make
+    an authorization decision that isn't downstream of the STS call.
+
+    Returns {} for anything that isn't a decodable three-part JWT.
     """
-    claims = (
-        event.get("requestContext", {})
-        .get("authorizer", {})
-        .get("jwt", {})
-        .get("claims", {})
-    ) or {}
+    if not token:
+        return {}
+    parts = token.split(".")
+    if len(parts) != 3:
+        return {}
+    payload = parts[1]
+    # base64url, padding stripped by the spec — restore it before decoding.
+    payload += "=" * (-len(payload) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(payload.encode("ascii"))
+        claims = json.loads(decoded)
+    except Exception:
+        return {}
+    if not isinstance(claims, dict):
+        return {}
+    return claims
 
+
+def _extract_claims(event: dict) -> dict:
+    """Decode the caller's JWT claims from the Authorization header.
+
+    Behind an ALB there is no authorizer to attach pre-validated claims, so we
+    decode them ourselves. The `groups` claim may arrive as a real list or as a
+    stringified list depending on the provider; normalize it to a list.
+    """
+    claims = _decode_jwt_claims_unverified(_extract_bearer_token(event))
     claims = dict(claims)
     claims["groups"] = _normalize_groups(claims.get("groups", []))
     return claims
+
+
+def _precheck_token(claims: dict) -> str | None:
+    """Cheap signature-free sanity check on the token. NOT the security boundary.
+
+    Purpose: return a clean 401 and avoid spending an STS call (and its latency)
+    on obviously junk or replayed traffic. STS remains the authoritative
+    validator — it checks the signature, issuer, audience and expiry itself, so
+    passing this function does NOT mean the token is genuine.
+
+    Returns None when the token looks plausible, else a short reason string
+    (logged, never returned to the client).
+    """
+    # `_extract_claims` always injects a normalized "groups" key, so a payload
+    # carrying nothing else means the token could not be decoded at all.
+    if not claims or set(claims.keys()) <= {"groups"}:
+        return "token not decodable"
+
+    if not claims.get("sub"):
+        return "no sub claim"
+
+    expected_issuer = _get_oidc_issuer()
+    if expected_issuer:
+        # Tolerate a trailing slash difference (Auth0 issuers carry one).
+        if str(claims.get("iss", "")).rstrip("/") != expected_issuer.rstrip("/"):
+            return "issuer mismatch"
+
+    expected_audience = _get_oidc_audience()
+    if expected_audience:
+        aud = claims.get("aud", "")
+        aud_values = aud if isinstance(aud, list) else [aud]
+        if expected_audience not in [str(a) for a in aud_values]:
+            return "audience mismatch"
+
+    now = int(time.time())
+    exp = claims.get("exp")
+    if exp is not None:
+        try:
+            if int(exp) + _CLOCK_SKEW_SEC < now:
+                return "token expired"
+        except (TypeError, ValueError):
+            return "malformed exp claim"
+
+    nbf = claims.get("nbf")
+    if nbf is not None:
+        try:
+            if int(nbf) - _CLOCK_SKEW_SEC > now:
+                return "token not yet valid"
+        except (TypeError, ValueError):
+            return "malformed nbf claim"
+
+    return None
 
 
 def _normalize_groups(groups):
@@ -284,8 +388,11 @@ def _normalize_groups(groups):
 def _extract_bearer_token(event: dict) -> str:
     """Return the raw bearer token from the Authorization header.
 
-    The authorizer has already validated it; we forward it verbatim to STS as the
-    WebIdentityToken so the session-tag claim is applied.
+    Forwarded verbatim to STS as the WebIdentityToken so the session-tag claim is
+    applied — and so STS can validate the signature we deliberately don't.
+
+    An ALB lowercases header names (unless multi-value headers are enabled), so
+    check both spellings.
     """
     headers = event.get("headers", {}) or {}
     auth_header = headers.get("authorization", headers.get("Authorization", "")) or ""
@@ -555,7 +662,14 @@ def _build_config_response(claims: dict, user_token: str) -> dict:
 
 
 def _response(status_code: int, body: dict, extra_headers: dict = None) -> dict:
-    """Build a standard API Gateway v2 response.
+    """Build an ALB-compatible response.
+
+    An ALB requires `isBase64Encoded`, `statusCode` and `headers`; the body is
+    optional. The CORS headers replace the API Gateway CorsConfiguration that
+    existed before the switch to an ALB, which has no built-in CORS handling.
+    Allow-Origin `*` is safe for this endpoint: it authenticates with a bearer
+    token rather than a cookie, so there are no ambient credentials for a
+    malicious page to ride on.
 
     Args:
         status_code: HTTP status code
@@ -563,17 +677,21 @@ def _response(status_code: int, body: dict, extra_headers: dict = None) -> dict:
         extra_headers: Additional headers to include
 
     Returns:
-        API Gateway v2 response dict
+        ALB target response dict
     """
     headers = {
         "Content-Type": "application/json",
         "Cache-Control": "no-store",
         "X-Content-Type-Options": "nosniff",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "Authorization, Content-Type",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
     }
     if extra_headers:
         headers.update(extra_headers)
 
     return {
+        "isBase64Encoded": False,
         "statusCode": status_code,
         "headers": headers,
         "body": json.dumps(body),
@@ -581,25 +699,41 @@ def _response(status_code: int, body: dict, extra_headers: dict = None) -> dict:
 
 
 def lambda_handler(event, context):
-    """Main Lambda handler for the Bootstrap Server.
+    """Main Lambda handler for the Bootstrap Server, invoked as an ALB target.
 
-    The API Gateway JWT authorizer has already validated the token
-    (signature/iss/aud/exp) before this runs, so we trust the claims it attached
-    and only need to read them + the raw token, then broker credentials.
+    Token handling: claims are decoded WITHOUT signature verification and screened
+    by `_precheck_token` to fail fast, then the raw token is handed to STS, which
+    is what actually validates it. See the module docstring — do not mistake the
+    pre-check for authentication.
 
     Returns:
         - 200: Configuration JSON on success
-        - 401: No authorizer claims / token on the request (defense in depth)
+        - 204: CORS preflight
+        - 401: Missing or implausible token (pre-check failed)
         - 403: Credential brokering failed (STS deny / misconfig)
         - 500: Internal server error
     """
     try:
+        # CORS preflight — the ALB has no built-in CORS handling.
+        method = (event.get("httpMethod") or "").upper()
+        if method == "OPTIONS":
+            return _response(204, {})
+
         claims = _extract_claims(event)
         token = _extract_bearer_token(event)
 
-        # Defense in depth: the authorizer should guarantee both, but never try
-        # to broker without a subject or the raw token.
-        if not claims.get("sub") or not token:
+        if not token:
+            return _response(401, {
+                "error": "unauthorized",
+                "message": "Missing authenticated identity",
+            })
+
+        # Fail fast on junk before spending an STS call. Log the specific reason
+        # for operators; return an opaque message so we don't help an attacker
+        # tune a token.
+        precheck_error = _precheck_token(claims)
+        if precheck_error:
+            print(f"WARN: Rejecting request in pre-check: {precheck_error}")
             return _response(401, {
                 "error": "unauthorized",
                 "message": "Missing authenticated identity",

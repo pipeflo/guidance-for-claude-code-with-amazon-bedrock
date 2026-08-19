@@ -190,6 +190,22 @@ class Profile:
         "isClaudeCodeForDesktopEnabled": "true",
     })
 
+    # Bootstrap endpoint (ALB). "internal" keeps the endpoint private — reachable
+    # only from the VPC or over the customer's own VPN/Direct Connect, which this
+    # solution deliberately does NOT provision. The VPC, subnets, certificate and
+    # DNS are all customer-supplied; see assets/docs/BOOTSTRAP_SERVER.md.
+    claude_desktop_alb_scheme: str = "internal"
+    claude_desktop_vpc_id: str = ""
+    claude_desktop_subnet_ids: list = field(default_factory=list)  # >= 2, different AZs
+    claude_desktop_certificate_arn: str = ""  # ACM cert in the deploy region
+    claude_desktop_alb_ingress_cidr: str = ""  # normally the VPC CIDR
+    claude_desktop_alb_additional_ingress_cidr: str = ""  # e.g. VPN client CIDR
+    # Optional: set BOTH to have the stack create the Route 53 alias record.
+    # Works with a private or a public hosted zone. Leave empty when DNS is
+    # managed outside Route 53 and point your own CNAME at the AlbDnsName output.
+    claude_desktop_domain_name: str = ""
+    claude_desktop_hosted_zone_id: str = ""
+
     # Legacy field support
     @property
     def okta_domain(self) -> str:
