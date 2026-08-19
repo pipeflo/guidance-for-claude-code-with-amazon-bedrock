@@ -1071,8 +1071,9 @@ class DeployCommand(Command):
                 elif not oidc_issuer_url and profile.provider_type == "google":
                     oidc_issuer_url = "https://accounts.google.com"
 
-                # No JWKS endpoint needed: the API Gateway JWT authorizer discovers
-                # it from the issuer's OIDC metadata and validates signatures itself.
+                # No JWKS endpoint needed: STS AssumeRoleWithWebIdentity fetches the
+                # issuer's keys itself when it validates the user's token. The issuer
+                # is passed only for the Lambda's fail-fast pre-check.
 
                 # Get OTEL endpoint from monitoring config if available
                 otlp_endpoint = getattr(profile, "otel_collector_endpoint", "") or ""
