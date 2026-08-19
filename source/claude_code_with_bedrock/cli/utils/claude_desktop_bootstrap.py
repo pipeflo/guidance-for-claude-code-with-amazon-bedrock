@@ -190,9 +190,26 @@ def generate_mobileconfig(output_dir: Path, config: dict) -> Path:
 
 
 def generate_reg_file(output_dir: Path, config: dict) -> Path:
-    """Write trust-anchor as a Windows .reg file."""
+    """Write trust-anchor as a Windows .reg file.
+
+    The key path is dictated by Claude Desktop, which reads managed config from
+    (highest precedence first):
+
+        1. HKLM\\SOFTWARE\\Policies\\Claude      <- what we write (recommended)
+        2. HKCU\\SOFTWARE\\Policies\\Claude
+        3. %LOCALAPPDATA%\\Claude-3p\\configLibrary\\
+
+    Two rules make this fragile, so don't "tidy" it:
+
+    - Values must be REG_SZ sitting DIRECTLY under the key. Nesting them in a
+      subkey (e.g. ...\\Policies\\Anthropic\\Claude Desktop) makes `reg import`
+      succeed and the key show up in regedit while Claude Desktop ignores it
+      entirely -- the app falls back to "no MDM config", so the user gets the
+      deployment-mode chooser instead of going straight to SSO. Silent failure.
+    - The hives are NOT merged: if the HKLM key exists, HKCU is not consulted.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
-    reg_key = r"HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Anthropic\Claude Desktop"
+    reg_key = r"HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Claude"
     lines = ["Windows Registry Editor Version 5.00", "", f"[{reg_key}]"]
 
     for key, value in config.items():

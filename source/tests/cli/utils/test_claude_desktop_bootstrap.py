@@ -185,11 +185,46 @@ class TestGenerateRegFile:
         # Registry header
         assert "Windows Registry Editor Version 5.00" in content
         # Correct registry key path
-        assert r"HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Anthropic\Claude Desktop" in content
+        assert r"[HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Claude]" in content
         # Per the config reference all values are strings, including booleans.
         assert '"disableDeploymentModeChooser"="true"' in content
         # URL string rendered with quotes
         assert '"bootstrapUrl"="https://b.example.com"' in content
+
+    def test_does_not_use_nested_subkey(self, okta_profile, tmp_path):
+        """Regression: values must NOT live under a nested subkey.
+
+        Claude Desktop only reads HKLM\\SOFTWARE\\Policies\\Claude. Writing to
+        ...\\Policies\\Anthropic\\Claude Desktop imports without error and is
+        visible in regedit, but the app never picks it up -- so the trust anchor
+        silently does nothing at fleet rollout.
+        """
+        config = build_trust_anchor_config(okta_profile, "https://b.example.com")
+        content = generate_reg_file(tmp_path, config).read_text()
+        assert "Anthropic" not in content
+        assert "Claude Desktop" not in content
+
+    def test_values_are_directly_under_the_key(self, okta_profile, tmp_path):
+        """Every value line must follow the single key header, with no other
+        key header in between (values must be REG_SZ directly under the key)."""
+        config = build_trust_anchor_config(okta_profile, "https://b.example.com")
+        lines = [ln for ln in generate_reg_file(tmp_path, config).read_text().splitlines() if ln.strip()]
+        key_headers = [i for i, ln in enumerate(lines) if ln.startswith("[")]
+        assert len(key_headers) == 1, "expected exactly one registry key header"
+        # Everything after the key header is a quoted value assignment.
+        for ln in lines[key_headers[0] + 1 :]:
+            assert ln.startswith('"') and "=" in ln, f"not a value line: {ln!r}"
+
+    def test_bootstrap_keys_present_as_reg_sz(self, okta_profile, tmp_path):
+        """The keys the app actually needs are emitted as REG_SZ strings."""
+        config = build_trust_anchor_config(okta_profile, "https://b.example.com")
+        content = generate_reg_file(tmp_path, config).read_text()
+        assert '"bootstrapEnabled"="true"' in content
+        assert '"bootstrapUrl"=' in content
+        assert '"bootstrapOidc"=' in content
+        # REG_EXPAND_SZ / dword forms would break parsing of these string keys.
+        assert '"bootstrapUrl"=hex' not in content
+        assert '"bootstrapUrl"=dword' not in content
 
     def test_escapes_backslashes_and_quotes(self, tmp_path):
         """Special characters in values are properly escaped for .reg format."""
