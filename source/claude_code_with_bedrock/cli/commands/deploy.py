@@ -1210,13 +1210,27 @@ class DeployCommand(Command):
                 domain_name = getattr(profile, "claude_desktop_domain_name", "") or ""
                 hosted_zone_id = getattr(profile, "claude_desktop_hosted_zone_id", "") or ""
 
+                cert_validation_zone_id = (
+                    getattr(profile, "claude_desktop_cert_validation_zone_id", "") or ""
+                )
+                # No certificate ARN is fine IF the stack can request one: it needs a
+                # domain to request it for and a public zone to publish the DNS
+                # validation record in. Without both, CloudFormation would sit waiting
+                # for a validation that can never complete.
+                will_create_cert = bool(
+                    not certificate_arn and domain_name and (cert_validation_zone_id or hosted_zone_id)
+                )
+
                 missing = []
-                if not vpc_id:
+                if not vpc_id and not getattr(profile, "claude_desktop_create_vpc", False):
                     missing.append("VPC")
-                if len(subnet_ids) < 2:
+                if len(subnet_ids) < 2 and not getattr(profile, "claude_desktop_create_vpc", False):
                     missing.append("at least 2 subnets in different Availability Zones")
-                if not certificate_arn:
-                    missing.append("ACM certificate ARN")
+                if not certificate_arn and not will_create_cert:
+                    missing.append(
+                        "either an ACM certificate ARN, or a domain name + hosted zone so one "
+                        "can be requested for you"
+                    )
                 if missing:
                     console.print(
                         "[red]The bootstrap server is fronted by a load balancer, which needs "
@@ -1229,6 +1243,17 @@ class DeployCommand(Command):
                         "bootstrap section, then re-run 'ccwb deploy bootstrap'.[/dim]"
                     )
                     return 1
+
+                if will_create_cert:
+                    console.print(
+                        f"[yellow]No certificate supplied — one will be requested for "
+                        f"[cyan]{domain_name}[/cyan] and validated via DNS.[/yellow]"
+                    )
+                    console.print(
+                        "[dim]  The stack waits for ACM to issue it, which usually takes a few "
+                        "minutes. The validation zone must be PUBLIC and must host that name, or "
+                        "the deploy will sit waiting rather than fail.[/dim]"
+                    )
 
                 # A cert whose domain nobody resolves is useless: without DNS the
                 # client must use the raw ALB name, which fails TLS verification.
@@ -1262,6 +1287,7 @@ class DeployCommand(Command):
                     f"CertificateArn={certificate_arn}",
                     f"DomainName={domain_name}",
                     f"HostedZoneId={hosted_zone_id}",
+                    f"CertificateValidationZoneId={cert_validation_zone_id}",
                 ]
                 # Omit empty CIDRs so the template defaults apply.
                 if alb_ingress_cidr:

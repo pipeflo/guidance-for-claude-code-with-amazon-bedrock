@@ -203,7 +203,12 @@ class Profile:
     claude_desktop_vpc_cidr: str = "10.60.0.0/16"  # only used when creating a VPC
     claude_desktop_vpc_id: str = ""
     claude_desktop_subnet_ids: list = field(default_factory=list)  # >= 2, different AZs
-    claude_desktop_certificate_arn: str = ""  # ACM cert in the deploy region
+    claude_desktop_certificate_arn: str = ""  # ACM cert in the deploy region;
+    # empty => the stack requests one for claude_desktop_domain_name, DNS-validated.
+    # PUBLIC zone for the ACM validation record. Only needed when the record zone
+    # (claude_desktop_hosted_zone_id) is PRIVATE: ACM validators query public DNS,
+    # so a private zone cannot prove domain control. Empty => reuse the record zone.
+    claude_desktop_cert_validation_zone_id: str = ""
     claude_desktop_alb_ingress_cidr: str = ""  # normally the VPC CIDR
     claude_desktop_alb_additional_ingress_cidr: str = ""  # e.g. VPN client CIDR
     # Optional: set BOTH to have the stack create the Route 53 alias record.

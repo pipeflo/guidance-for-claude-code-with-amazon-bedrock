@@ -2254,6 +2254,9 @@ class InitCommand(Command):
             "claude_desktop_certificate_arn": config_data.get("claude_desktop", {}).get(
                 "certificate_arn", ""
             ),
+            "claude_desktop_cert_validation_zone_id": config_data.get("claude_desktop", {}).get(
+                "cert_validation_zone_id", ""
+            ),
             "claude_desktop_alb_ingress_cidr": config_data.get("claude_desktop", {}).get(
                 "alb_ingress_cidr", ""
             ),
@@ -2649,6 +2652,10 @@ class InitCommand(Command):
                 "vpc_id": getattr(profile, "claude_desktop_vpc_id", "") or "",
                 "subnet_ids": getattr(profile, "claude_desktop_subnet_ids", []) or [],
                 "certificate_arn": getattr(profile, "claude_desktop_certificate_arn", "") or "",
+                "cert_validation_zone_id": getattr(
+                    profile, "claude_desktop_cert_validation_zone_id", ""
+                )
+                or "",
                 "alb_ingress_cidr": getattr(profile, "claude_desktop_alb_ingress_cidr", "") or "",
                 "alb_additional_ingress_cidr": getattr(
                     profile, "claude_desktop_alb_additional_ingress_cidr", ""
@@ -2946,20 +2953,6 @@ class InitCommand(Command):
                     "are the cleaner choice."
                 )
 
-        # --- Certificate (never created here: DNS validation would hang the stack) ---
-        console.print(
-            f"\n[dim]The HTTPS listener needs an ACM certificate in {region}. Clients must connect "
-            "on a hostname the certificate covers, or TLS verification fails.[/dim]"
-        )
-        cert_arn = questionary.text(
-            "ACM certificate ARN:",
-            default=saved_cd.get("certificate_arn", ""),
-            validate=lambda t: True if t.strip().startswith("arn:") else "Enter a valid ACM certificate ARN",
-        ).ask()
-        if not cert_arn:
-            return
-        cd["certificate_arn"] = cert_arn.strip()
-
         # --- Ingress CIDRs ---
         default_cidr = saved_cd.get("alb_ingress_cidr") or (
             selected_vpc["cidr"] if selected_vpc else "10.0.0.0/8"
@@ -2977,13 +2970,18 @@ class InitCommand(Command):
         ).ask()
         cd["alb_additional_ingress_cidr"] = (extra_cidr or "").strip()
 
-        # --- DNS (optional; required outcome, optional automation) ---
+        # --- DNS first, THEN the certificate ---
+        # Order matters: a certificate can only be requested for a known hostname,
+        # so the domain has to be settled before we can offer to create one.
         console.print(
-            "\n[dim]A DNS record matching the certificate is required. We can create it in Route 53 "
-            "(public or private zone), or you can point your own DNS at the load balancer.[/dim]"
+            "\n[dim]A DNS record matching the certificate is required — the load balancer's own "
+            "hostname can never match an ACM certificate, so without one TLS verification fails. "
+            "We can create the record in Route 53 (public or private zone), or you can point your "
+            "own DNS at the load balancer.[/dim]"
         )
+        zones, zone_err = self._get_hosted_zones()
+        picked_zone_is_private = False
         if questionary.confirm("Create the DNS record in Route 53?", default=True).ask():
-            zones, zone_err = self._get_hosted_zones()
             if zone_err or not zones:
                 console.print(
                     f"[yellow]Could not list hosted zones{': ' + zone_err if zone_err else ''}.[/yellow]"
@@ -3001,9 +2999,9 @@ class InitCommand(Command):
                     )
                 picked = questionary.select("Hosted zone:", choices=zone_choices).ask()
                 if picked:
-                    zone_id, is_private = picked
+                    zone_id, picked_zone_is_private = picked
                     cd["hosted_zone_id"] = zone_id
-                    if cd["alb_scheme"] == "internal" and not is_private:
+                    if cd["alb_scheme"] == "internal" and not picked_zone_is_private:
                         console.print(
                             "[yellow]Warning:[/yellow] a public zone pointing at an internal load "
                             "balancer publishes your private IPs in public DNS. It works, and the "
@@ -3011,10 +3009,86 @@ class InitCommand(Command):
                             "consider it information disclosure — a private zone avoids it."
                         )
                     domain = questionary.text(
-                        "Hostname for the endpoint (must be covered by the certificate):",
+                        "Hostname for the endpoint:",
                         default=saved_cd.get("domain_name", ""),
                     ).ask()
                     cd["domain_name"] = (domain or "").strip()
+
+        # --- Certificate: supply one, or have the stack request it ---
+        console.print(
+            f"\n[dim]The HTTPS listener needs an ACM certificate in {region} covering "
+            f"{cd.get('domain_name') or 'the hostname clients use'}.[/dim]"
+        )
+        # Requesting one needs a hostname AND a public zone to publish the DNS
+        # validation record in. ACM's validators query PUBLIC DNS, so a private
+        # hosted zone alone cannot prove domain control.
+        public_zones = [z for z in (zones or []) if not z.get("Config", {}).get("PrivateZone")]
+        can_request = bool(cd.get("domain_name")) and bool(public_zones)
+
+        cert_choices = [questionary.Choice("I have a certificate ARN", value="existing")]
+        if can_request:
+            cert_choices.append(
+                questionary.Choice(
+                    "Request one for me during deploy (ACM, DNS-validated)", value="create"
+                )
+            )
+        cert_mode = (
+            questionary.select("ACM certificate:", choices=cert_choices).ask()
+            if can_request
+            else "existing"
+        )
+
+        if cert_mode == "create":
+            cd["certificate_arn"] = ""
+            # Validation must land in a PUBLIC zone. If the record zone is private,
+            # ask which public zone hosts the name.
+            if picked_zone_is_private:
+                console.print(
+                    "[yellow]The record zone you picked is private, so it cannot validate a "
+                    "public ACM certificate.[/yellow]"
+                )
+                console.print(
+                    "[dim]  Choose the PUBLIC zone for the same domain — the validation record "
+                    "goes there, while clients keep resolving the private one.[/dim]"
+                )
+                val_choices = [
+                    questionary.Choice(
+                        z["Name"].rstrip("."), value=z["Id"].split("/")[-1]
+                    )
+                    for z in public_zones
+                ]
+                cd["cert_validation_zone_id"] = (
+                    questionary.select("Public zone for ACM validation:", choices=val_choices).ask()
+                    or ""
+                )
+                if not cd["cert_validation_zone_id"]:
+                    console.print(
+                        "[red]No validation zone chosen — supply a certificate ARN instead.[/red]"
+                    )
+                    return
+            else:
+                cd["cert_validation_zone_id"] = ""
+            console.print(
+                f"[green]✓[/green] A certificate for [cyan]{cd['domain_name']}[/cyan] will be "
+                f"requested during [cyan]ccwb deploy bootstrap[/cyan]."
+            )
+            console.print(
+                "[dim]  The deploy waits for ACM to issue it (usually a few minutes). If the zone "
+                "doesn't host that name the deploy will wait rather than fail, so double-check "
+                "it now.[/dim]"
+            )
+        else:
+            cert_arn = questionary.text(
+                "ACM certificate ARN:",
+                default=saved_cd.get("certificate_arn", ""),
+                validate=lambda t: (
+                    True if t.strip().startswith("arn:") else "Enter a valid ACM certificate ARN"
+                ),
+            ).ask()
+            if not cert_arn:
+                return
+            cd["certificate_arn"] = cert_arn.strip()
+            cd["cert_validation_zone_id"] = ""
 
         if not (cd.get("domain_name") and cd.get("hosted_zone_id")):
             cd["domain_name"] = cd.get("domain_name", "")

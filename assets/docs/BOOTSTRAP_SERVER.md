@@ -126,6 +126,39 @@ hostname the certificate covers. Three ways to get there:
 | **Route 53 public zone** | Same, but the record is public and returns your **private** IPs. | Simplest validation. ⚠️ Publishes internal hostnames/IPs to anyone querying DNS. Not reachable from the internet, but some security teams treat it as information disclosure. |
 | **DNS outside Route 53** (Infoblox, BIND, AD DNS) | Leave `DomainName` and `HostedZoneId` empty; point your own CNAME at the `AlbDnsName` stack output. | Your own cert / internal CA. |
 
+### Certificates
+
+Two options, chosen by whether you set `CertificateArn`:
+
+**Supply your own** (`CertificateArn` set) — required for ACM Private CA, imported
+certificates, or a domain not in Route 53.
+
+**Let the stack request one** (`CertificateArn` empty) — it requests a
+DNS-validated public ACM certificate for `DomainName` and CloudFormation publishes
+the validation record itself. Needs `DomainName` plus a hosted zone.
+
+⚠️ **The validation zone must be PUBLIC.** ACM's validators query public DNS, so a
+private hosted zone cannot prove domain control — even though it's perfectly fine
+for the record clients resolve. For an internal deployment that usually means two
+zones:
+
+| Purpose | Zone |
+|---|---|
+| The record clients resolve (`HostedZoneId`) | private — resolves in-VPC only |
+| The ACM validation record (`CertificateValidationZoneId`) | **public** zone for the same domain |
+
+`CertificateValidationZoneId` defaults to `HostedZoneId`, which is correct when
+that zone is already public. Set it explicitly only when the record zone is private.
+
+⚠️ **Deploys wait for issuance.** CloudFormation blocks until ACM issues, normally
+a few minutes. If the validation zone doesn't actually host `DomainName`, the
+deploy **waits** rather than failing — so verify the zone before deploying. `ccwb
+init` only offers this option when it can find a public zone, to reduce the chance
+of that.
+
+The `CertificateArnUsed` output reports whichever certificate ended up on the
+listener.
+
 ### Stack outputs
 
 | Output | Use |
@@ -363,7 +396,7 @@ prompts for them and `ccwb deploy bootstrap` fails fast without them:
 |---|---|---|
 | 1 | **A VPC** | Any VPC in the deploy region. Don't reuse the ccwb monitoring VPC — it has only public subnets, and adding to it causes CloudFormation drift on a ccwb-managed stack. |
 | 2 | **≥2 subnets in different AZs** | An ALB requirement. Use **private** subnets for `AlbScheme: internal`. **No NAT gateway needed** — the ALB needs no outbound access and the Lambda is invoked through the Lambda API, not from inside the subnet. |
-| 3 | **An ACM certificate in the same region** | Public ACM or ACM Private CA. Must cover the hostname clients will use. Not created here: DNS validation would block the stack. |
+| 3 | **An ACM certificate in the same region** — or a public Route 53 zone so one can be requested for you | Must cover the hostname clients will use. Leave `CertificateArn` empty and the stack requests a DNS-validated certificate for `DomainName`. Supply your own for ACM Private CA, an imported certificate, or a domain outside Route 53. See [Certificates](#certificates). |
 | 4 | **A DNS record** | Either give `DomainName` + `HostedZoneId` and the stack creates the alias (private **or** public zone), or manage it yourself and CNAME to the `AlbDnsName` output. Not optional in effect — see [DNS is required](#dns-is-required--but-it-does-not-have-to-be-public). |
 | 5 | **Network reachability from devices** | For `AlbScheme: internal`, devices need existing access to the VPC — VPN, Direct Connect, or being in-VPC. **This solution provisions none of it.** Without it, sign-in fails. |
 | 6 | **Deploy-time IAM permissions** | To create an ALB, target group, listener, security group, and the Route 53 record if used. |

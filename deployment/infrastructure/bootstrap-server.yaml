@@ -144,12 +144,23 @@ Parameters:
   CertificateArn:
     Type: String
     Description: >
-      ACM certificate ARN for the HTTPS listener, in THIS region. Customer-supplied
-      (public ACM or ACM Private CA) — this template never issues one, because DNS
-      validation would block the stack. The certificate's domain must match the
-      hostname clients connect to, otherwise TLS verification fails.
-    AllowedPattern: "^arn:aws[a-zA-Z-]*:acm:[a-z0-9-]+:[0-9]{12}:certificate/.+$"
-    ConstraintDescription: "Must be an ACM certificate ARN in this region"
+      ACM certificate ARN for the HTTPS listener, in THIS region. Leave EMPTY to
+      have the stack request one for DomainName, DNS-validated via
+      CertificateValidationZoneId (or HostedZoneId). Supply your own when you use
+      ACM Private CA, an imported certificate, or a domain outside Route 53. The
+      certificate's domain must match the hostname clients connect to, otherwise
+      TLS verification fails.
+    Default: ""
+
+  CertificateValidationZoneId:
+    Type: String
+    Description: >
+      Optional. PUBLIC Route 53 hosted zone used only to publish the ACM DNS
+      validation record. Needed when HostedZoneId is a PRIVATE zone: ACM's
+      validators query public DNS, so a private zone cannot prove domain control.
+      Defaults to HostedZoneId, which is correct when that zone is public.
+      Ignored when CertificateArn is supplied.
+    Default: ""
 
   AlbIngressCidr:
     Type: String
@@ -193,6 +204,18 @@ Conditions:
     - !Not [!Equals [!Ref HostedZoneId, ""]]
 
   HasAdditionalIngressCidr: !Not [!Equals [!Ref AlbAdditionalIngressCidr, ""]]
+
+  # Request a certificate only when the admin didn't supply one. Requires a domain
+  # to request it FOR and a zone to publish the validation record IN — without both
+  # the stack would hang waiting for a validation that can never succeed.
+  CreateCertificate: !And
+    - !Equals [!Ref CertificateArn, ""]
+    - !Not [!Equals [!Ref DomainName, ""]]
+    - !Or
+      - !Not [!Equals [!Ref CertificateValidationZoneId, ""]]
+      - !Not [!Equals [!Ref HostedZoneId, ""]]
+
+  UseSeparateValidationZone: !Not [!Equals [!Ref CertificateValidationZoneId, ""]]
 
 Resources:
   BootstrapFunction:
@@ -327,6 +350,28 @@ Resources:
           Value: "claude-code-with-bedrock"
 
   # Default action is a 404 so only the /config path reaches the function.
+  # Only created when no CertificateArn was supplied. CloudFormation publishes the
+  # DNS validation record itself and BLOCKS until ACM issues, so the zone must be
+  # public and must actually host DomainName — otherwise the stack waits instead of
+  # failing fast.
+  BootstrapCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Condition: CreateCertificate
+    Properties:
+      DomainName: !Ref DomainName
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          HostedZoneId: !If
+            - UseSeparateValidationZone
+            - !Ref CertificateValidationZoneId
+            - !Ref HostedZoneId
+      Tags:
+        - Key: Application
+          Value: "claude-code-with-bedrock"
+        - Key: Component
+          Value: "bootstrap-server"
+
   BootstrapHttpsListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
@@ -335,7 +380,10 @@ Resources:
       Protocol: HTTPS
       SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
       Certificates:
-        - CertificateArn: !Ref CertificateArn
+        - CertificateArn: !If
+            - CreateCertificate
+            - !Ref BootstrapCertificate
+            - !Ref CertificateArn
       DefaultActions:
         - Type: fixed-response
           FixedResponseConfig:
@@ -399,3 +447,10 @@ Outputs:
   AlbScheme:
     Description: "Whether the endpoint is private (internal) or public (internet-facing)"
     Value: !Ref AlbScheme
+
+  CertificateArnUsed:
+    Description: "The certificate on the listener — created by this stack, or the one you supplied"
+    Value: !If
+      - CreateCertificate
+      - !Ref BootstrapCertificate
+      - !Ref CertificateArn
