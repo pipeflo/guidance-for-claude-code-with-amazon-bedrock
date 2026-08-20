@@ -175,7 +175,6 @@ class DeployCommand(Command):
                 console.print(f"[red]Unknown stack: {stack_arg}[/red]")
                 console.print(
                     "Valid stacks: auth, distribution, networking, monitoring, dashboard, cowork-dashboard, analytics, quota, codebuild, bootstrap\n"
-                    "The bootstrap VPC stack, when enabled, is deployed automatically as part of 'bootstrap'.\n"
                 )
                 console.print("[dim]Tip: Use 'ccwb deploy' without arguments to deploy all enabled stacks.[/dim]")
                 console.print("[dim]Use 'ccwb deploy quota' for quota-specific updates or late enablement.[/dim]")

@@ -699,7 +699,7 @@ def _response(status_code: int, body: dict, extra_headers: dict = None) -> dict:
 
 
 def lambda_handler(event, context):
-    """Main Lambda handler for the Bootstrap Server, invoked as an ALB target.
+    """Main Lambda handler for the Bootstrap Server, invoked by API Gateway.
 
     Token handling: claims are decoded WITHOUT signature verification and screened
     by `_precheck_token` to fail fast, then the raw token is handed to STS, which

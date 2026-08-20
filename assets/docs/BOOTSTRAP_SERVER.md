@@ -84,8 +84,15 @@ CoWork configuration delivery:
 | `DefaultInferenceRegion` | AWS region for Bedrock inference | `us-east-1` |
 | `DefaultInferenceModels` | Comma-separated allowed model IDs | Sonnet |
 | `OtlpEndpoint` | OpenTelemetry collector endpoint | (optional) |
-| `InferenceSessionLifetimeSec` | Session lifetime before re-auth | `28800` (8h) |
+| `InferenceSessionLifetimeSec` | Session lifetime before re-auth reminder | `28800` (8h) |
 | `FederatedRoleArn` | Role the broker assumes for each user | (from profile) |
+| `MaxSessionDuration` | STS session / bearer-token lifetime (seconds) | `43200` template / **`28800` from a real profile** |
+| `DiscoveryRegions` | Regions scanned for zone-tagged inference profiles | (profile's `allowed_bedrock_regions`) |
+| `ZoneTagKey` | Resource-tag key identifying a profile's zone | `Zone` |
+| `GroupPrefix` | IdP group-name prefix for zone/role matching | `ccwb-` |
+| `RoleConfig` | JSON role → models/MCP/spend map | `""` |
+| `FeatureDefaults` | JSON feature-toggle defaults | `""` |
+| `AssociateVpcEndpoint` | `false` for a cross-account endpoint | `true` |
 | `VpcEndpointId` | Existing execute-api VPC endpoint; empty = create one | `""` |
 | `VpcId` | VPC to create the endpoint in (only if creating) | `""` |
 | `SubnetIds` | Subnets for the endpoint (only if creating) | `""` |
@@ -288,17 +295,49 @@ and can be removed from the profile.
 
 ## How Clients Connect (MDM Anchor Profile)
 
-When using dynamic configuration, deploy a minimal MDM "anchor" profile that only contains the bootstrap URL. The client fetches full configuration from the server at sign-in:
+When using dynamic configuration, devices get a minimal MDM **trust anchor** containing
+only the bootstrap URL and the OIDC settings. The client authenticates, then fetches its
+full configuration from the server at sign-in. Generate it with
+`ccwb claude-desktop generate` (output: `dist/<profile>/claude-desktop/`), which emits
+`.json`, `.mobileconfig` (macOS) and `.reg` (Windows).
+
+The keys it actually emits:
 
 ```json
 {
-  "coworkOAuthClientId": "your-oidc-client-id",
-  "coworkOAuthIssuer": "https://your-idp.example.com/oauth2/default",
-  "bootstrapUrl": "https://abc123.execute-api.us-east-1.amazonaws.com/config"
+  "bootstrapEnabled": "true",
+  "bootstrapUrl": "https://{api-id}-{vpce-id}.execute-api.<region>.amazonaws.com/prod/config",
+  "bootstrapOidc": {
+    "issuer": "https://example.okta.com/oauth2/default",
+    "clientId": "<oidc-client-id>",
+    "scopes": "openid profile groups",
+    "authorizationUrl": "https://example.okta.com/oauth2/default/v1/authorize",
+    "tokenUrl": "https://example.okta.com/oauth2/default/v1/token",
+    "redirectPort": 53180
+  },
+  "disableDeploymentModeChooser": "true"
 }
 ```
 
-This replaces the need for a full static MDM profile with all inference settings inlined. The client authenticates, receives its token, calls the bootstrap URL, and receives its full configuration.
+Note carefully:
+
+- **All top-level values are strings**, including the booleans.
+- ⚠️ **`redirectPort` is an INTEGER inside `bootstrapOidc`.** Quoting it makes Claude
+  Desktop fail to parse the object and silently fall back to device-code mode, which
+  then 404s. The "everything is a string" rule applies only to top-level keys.
+- ⚠️ **The Okta Native app must register `http://127.0.0.1:53180/callback`.** Okta does
+  not allow wildcard loopback ports, which is why the port is pinned.
+- **The `bootstrapUrl` includes the stage** (`/prod` by default). Omitting it yields a 403.
+
+Where it goes on devices:
+
+| OS | Location |
+|---|---|
+| Windows | `HKLM\SOFTWARE\Policies\Claude` — values as **REG_SZ directly under the key**, not in a subkey |
+| macOS | `/Library/Managed Preferences/com.anthropic.claudefordesktop.plist` |
+
+No secrets and no binary are distributed — the credential is minted per user, per session,
+by the bootstrap server.
 
 ## Deployment
 
@@ -500,8 +539,11 @@ The trust-anchor profile is identical for every user — only the bootstrap URL
 and OIDC settings (issuer + `client_id` + `groups` scope) are baked in. Per-user
 credentials and config are fetched at sign-in.
 
-See `customer-upgrade-guides/UPGRADE_TO_CLAUDE_DESKTOP_BOOTSTRAP.md` for a full
-deployment walkthrough.
+For a full zero-to-deployed walkthrough — including obtaining the ccwb profile,
+workstation setup and the networking prerequisites to confirm with the customer —
+see the deployment requirements runbook kept with the customer deliverables
+(`BOOTSTRAP_DEPLOYMENT_REQUIREMENTS.md`). It is deliberately not in this repo, so
+that it can carry environment-specific values.
 
 > **Note**: For organizations that use AWS IAM Identity Center as their primary
 > access model, Claude Desktop's built-in "in-app AWS sign-in" is an alternative
