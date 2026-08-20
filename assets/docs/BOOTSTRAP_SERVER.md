@@ -344,12 +344,32 @@ The broker reuses `federated_role_arn`, `client_id`, `zones`, and
 
 ### Prerequisites
 
+**Identity**
+
 - **Direct STS federation** (`federation_type: "direct"`) with a
   `federated_role_arn`. `ccwb deploy bootstrap` refuses to deploy for Cognito
   federation. The role's trust policy must already allow
   `sts:AssumeRoleWithWebIdentity` (the ccwb Okta auth stack configures this).
 - **Reuse the existing OIDC app** — the token audience (`client_id`) is already
   in the IAM OIDC provider's client-id list, so no new IAM OIDC config is needed.
+
+**Networking — must exist BEFORE you deploy**
+
+This stack creates the load balancer, its security group and (optionally) one DNS
+record. It creates nothing else. Have these ready first, because `ccwb init`
+prompts for them and `ccwb deploy bootstrap` fails fast without them:
+
+| # | Prerequisite | Notes |
+|---|---|---|
+| 1 | **A VPC** | Any VPC in the deploy region. Don't reuse the ccwb monitoring VPC — it has only public subnets, and adding to it causes CloudFormation drift on a ccwb-managed stack. |
+| 2 | **≥2 subnets in different AZs** | An ALB requirement. Use **private** subnets for `AlbScheme: internal`. **No NAT gateway needed** — the ALB needs no outbound access and the Lambda is invoked through the Lambda API, not from inside the subnet. |
+| 3 | **An ACM certificate in the same region** | Public ACM or ACM Private CA. Must cover the hostname clients will use. Not created here: DNS validation would block the stack. |
+| 4 | **A DNS record** | Either give `DomainName` + `HostedZoneId` and the stack creates the alias (private **or** public zone), or manage it yourself and CNAME to the `AlbDnsName` output. Not optional in effect — see [DNS is required](#dns-is-required--but-it-does-not-have-to-be-public). |
+| 5 | **Network reachability from devices** | For `AlbScheme: internal`, devices need existing access to the VPC — VPN, Direct Connect, or being in-VPC. **This solution provisions none of it.** Without it, sign-in fails. |
+| 6 | **Deploy-time IAM permissions** | To create an ALB, target group, listener, security group, and the Route 53 record if used. |
+
+Not required: a NAT gateway, a public subnet, putting the Lambda in the VPC, or
+any change to the IAM OIDC provider.
 
 ### Auto-populated values
 
