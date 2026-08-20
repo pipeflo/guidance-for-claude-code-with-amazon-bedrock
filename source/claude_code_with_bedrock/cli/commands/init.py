@@ -2241,31 +2241,18 @@ class InitCommand(Command):
                     "isClaudeCodeForDesktopEnabled": "true",
                 },
             ),
-            # Bootstrap endpoint (ALB). All customer-supplied networking inputs.
-            "claude_desktop_alb_scheme": config_data.get("claude_desktop", {}).get(
-                "alb_scheme", "internal"
+            # Bootstrap endpoint: private REST API + execute-api VPC endpoint.
+            # No certificate / hosted zone / DNS record — AWS provides the TLS.
+            "claude_desktop_vpc_endpoint_id": config_data.get("claude_desktop", {}).get(
+                "vpc_endpoint_id", ""
             ),
-            "claude_desktop_create_vpc": config_data.get("claude_desktop", {}).get(
-                "create_vpc", False
-            ),
-            "claude_desktop_vpc_cidr": config_data.get("claude_desktop", {}).get("vpc_cidr", ""),
             "claude_desktop_vpc_id": config_data.get("claude_desktop", {}).get("vpc_id", ""),
             "claude_desktop_subnet_ids": config_data.get("claude_desktop", {}).get("subnet_ids", []),
-            "claude_desktop_certificate_arn": config_data.get("claude_desktop", {}).get(
-                "certificate_arn", ""
+            "claude_desktop_endpoint_ingress_cidr": config_data.get("claude_desktop", {}).get(
+                "endpoint_ingress_cidr", ""
             ),
-            "claude_desktop_cert_validation_zone_id": config_data.get("claude_desktop", {}).get(
-                "cert_validation_zone_id", ""
-            ),
-            "claude_desktop_alb_ingress_cidr": config_data.get("claude_desktop", {}).get(
-                "alb_ingress_cidr", ""
-            ),
-            "claude_desktop_alb_additional_ingress_cidr": config_data.get("claude_desktop", {}).get(
-                "alb_additional_ingress_cidr", ""
-            ),
-            "claude_desktop_domain_name": config_data.get("claude_desktop", {}).get("domain_name", ""),
-            "claude_desktop_hosted_zone_id": config_data.get("claude_desktop", {}).get(
-                "hosted_zone_id", ""
+            "claude_desktop_stage_name": config_data.get("claude_desktop", {}).get(
+                "stage_name", "prod"
             ),
         }
 
@@ -2646,23 +2633,14 @@ class InitCommand(Command):
                 "zone_config": getattr(profile, "claude_desktop_zone_config", {}) or {},
                 "role_config": getattr(profile, "claude_desktop_role_config", {}) or {},
                 "feature_defaults": getattr(profile, "claude_desktop_feature_defaults", {}) or {},
-                "alb_scheme": getattr(profile, "claude_desktop_alb_scheme", "") or "internal",
-                "create_vpc": bool(getattr(profile, "claude_desktop_create_vpc", False)),
-                "vpc_cidr": getattr(profile, "claude_desktop_vpc_cidr", "") or "",
+                "vpc_endpoint_id": getattr(profile, "claude_desktop_vpc_endpoint_id", "") or "",
                 "vpc_id": getattr(profile, "claude_desktop_vpc_id", "") or "",
                 "subnet_ids": getattr(profile, "claude_desktop_subnet_ids", []) or [],
-                "certificate_arn": getattr(profile, "claude_desktop_certificate_arn", "") or "",
-                "cert_validation_zone_id": getattr(
-                    profile, "claude_desktop_cert_validation_zone_id", ""
+                "endpoint_ingress_cidr": getattr(
+                    profile, "claude_desktop_endpoint_ingress_cidr", ""
                 )
                 or "",
-                "alb_ingress_cidr": getattr(profile, "claude_desktop_alb_ingress_cidr", "") or "",
-                "alb_additional_ingress_cidr": getattr(
-                    profile, "claude_desktop_alb_additional_ingress_cidr", ""
-                )
-                or "",
-                "domain_name": getattr(profile, "claude_desktop_domain_name", "") or "",
-                "hosted_zone_id": getattr(profile, "claude_desktop_hosted_zone_id", "") or "",
+                "stage_name": getattr(profile, "claude_desktop_stage_name", "") or "prod",
             }
 
             # Add analytics configuration if present
@@ -2794,126 +2772,102 @@ class InitCommand(Command):
             return [], str(e)
 
     def _prompt_bootstrap_endpoint(self, config: dict[str, Any], saved_cd: dict[str, Any]) -> None:
-        """Collect the load-balancer settings for the bootstrap server endpoint.
+        """Collect what the private REST API endpoint needs.
 
-        The bootstrap server sits behind an ALB so the endpoint can be made
-        PRIVATE. Everything here is customer-supplied — this solution never
-        creates VPCs, subnets, certificates or connectivity (VPN / Direct
-        Connect / Transit Gateway are explicitly out of scope). Results land in
-        config["claude_desktop"] and are mirrored by _check_existing_deployment
-        so re-running the wizard doesn't silently drop them.
+        The bootstrap server is served from a PRIVATE API Gateway REST API, reachable
+        only through an execute-api VPC endpoint. AWS provides TLS for the
+        execute-api hostname, so there is no certificate, hosted zone or DNS record
+        to collect — which is the whole reason this replaced an internal load
+        balancer.
+
+        All we need is a VPC endpoint: an existing one, or a VPC + subnets to create
+        one in. We never create the VPC: a brand-new VPC would have no path from any
+        device, so the endpoint would be unreachable.
+
+        Results land in config["claude_desktop"] and are mirrored by
+        _check_existing_deployment so re-running the wizard doesn't drop them.
         """
         console = Console()
         region = config.get("aws", {}).get("region", "")
         cd = config["claude_desktop"]
 
         console.print("\n[bold]Bootstrap Server Endpoint[/bold]")
-        console.print("How should devices reach the bootstrap server?")
-        console.print("  • Internal: private load balancer — VPC / VPN / Direct Connect only")
-        console.print("  • Internet-facing: public load balancer")
+        console.print(
+            "The endpoint is a [cyan]private[/cyan] API Gateway REST API — reachable only through "
+            "an execute-api VPC endpoint."
+        )
+        console.print(
+            "[dim]  AWS provides the TLS certificate, so no certificate, hosted zone or DNS "
+            "record is needed. Devices reach it over your existing VPN / Direct Connect, which "
+            "this solution does not create.[/dim]"
+        )
 
-        scheme = questionary.select(
-            "Endpoint exposure:",
-            choices=[
-                questionary.Choice("Internal (private — recommended)", value="internal"),
-                questionary.Choice("Internet-facing (public)", value="internet-facing"),
-            ],
-            default=saved_cd.get("alb_scheme", "internal"),
-        ).ask()
-        cd["alb_scheme"] = scheme or "internal"
+        # --- an existing execute-api endpoint, or create one ---
+        existing = self._find_execute_api_endpoints(region)
+        choices = []
+        for ep in existing:
+            label = f"{ep['id']} in {ep['vpc_id']}"
+            if ep["private_dns"]:
+                label += "  [private DNS on]"
+            choices.append(questionary.Choice(label, value=ep["id"]))
+        choices.append(
+            questionary.Choice("Create a new execute-api VPC endpoint", value="__create__")
+        )
 
-        if cd["alb_scheme"] == "internal":
+        if existing:
             console.print(
-                "[dim]  Note: this solution does not create VPN or Direct Connect. Devices must "
-                "already have network access to the VPC, or sign-in will fail.[/dim]"
+                f"\n[green]Found {len(existing)} existing execute-api endpoint(s) in {region}.[/green]"
             )
-
-        # --- VPC: use an existing one, or have ccwb create a dedicated one ---
-        console.print("\n[yellow]Searching for VPCs...[/yellow]")
-        vpcs = get_vpcs(region)
-
-        # The created VPC mirrors the scheme: private => no way in or out at all.
-        if cd["alb_scheme"] == "internal":
-            create_label = (
-                "Create a new VPC (2 private subnets in 2 AZs — no internet gateway, "
-                "no NAT, no route off the VPC)"
-            )
+            picked = questionary.select("execute-api VPC endpoint:", choices=choices).ask()
         else:
-            create_label = (
-                "Create a new VPC (2 public subnets in 2 AZs + internet gateway, no NAT)"
-            )
+            console.print(f"\n[dim]No execute-api VPC endpoint found in {region}; one will be created.[/dim]")
+            picked = "__create__"
 
-        vpc_choices = [questionary.Choice(create_label, value="__create__")]
-        for vpc in vpcs:
-            label = f"{vpc['id']} - {vpc['cidr']}"
-            if vpc["name"]:
-                label = f"{vpc['name']} ({label})"
-            if vpc["is_default"]:
-                label = f"{label} [DEFAULT]"
-            vpc_choices.append(questionary.Choice(label, value=vpc["id"]))
-
-        vpc_id = questionary.select(
-            "VPC for the bootstrap load balancer:", choices=vpc_choices
-        ).ask()
-        if not vpc_id:
+        if not picked:
             return
 
-        if vpc_id == "__create__":
-            cd["create_vpc"] = True
+        if picked != "__create__":
+            cd["vpc_endpoint_id"] = picked
             cd["vpc_id"] = ""
             cd["subnet_ids"] = []
-            default_cidr = saved_cd.get("vpc_cidr") or "10.60.0.0/16"
-            cidr = questionary.text(
-                "CIDR for the new VPC (/16 — two /24 subnets are carved from it):",
-                default=default_cidr,
-                validate=lambda t: (
-                    True if t.strip().endswith("/16") else "Must be a /16, e.g. 10.60.0.0/16"
-                ),
-            ).ask()
-            cd["vpc_cidr"] = (cidr or default_cidr).strip()
-            # No NAT: nothing in this VPC needs egress. The load balancer only
-            # receives traffic and the Lambda runs outside the VPC, so a NAT
-            # gateway would cost ~$32/month per AZ and route nothing.
-            console.print(
-                f"[green]✓[/green] A dedicated VPC ([cyan]{cd['vpc_cidr']}[/cyan]) will be created "
-                f"by [cyan]ccwb deploy bootstrap[/cyan] before the bootstrap stack."
-            )
-            if cd["alb_scheme"] == "internal":
-                console.print(
-                    "[yellow]Important:[/yellow] that VPC will be fully private, so "
-                    "[bold]nothing will be able to reach the endpoint yet[/bold]."
-                )
-                console.print(
-                    "[dim]  Before rollout, attach connectivity to it (VPN, Direct Connect, "
-                    "peering, Transit Gateway) or run clients inside the VPC. This solution does "
-                    "not create any of that.[/dim]"
-                )
-            selected_vpc = {"cidr": cd["vpc_cidr"]}
+            cd["endpoint_ingress_cidr"] = ""
+            console.print(f"[green]\u2713[/green] Using existing endpoint [cyan]{picked}[/cyan]")
         else:
+            cd["vpc_endpoint_id"] = ""
+            console.print("\n[yellow]Searching for VPCs...[/yellow]")
+            vpcs = get_vpcs(region)
             if not vpcs:
+                console.print(f"[red]No VPCs found in {region}.[/red]")
+                console.print(
+                    "[dim]  The endpoint must live in a VPC your devices can already reach. Ask "
+                    "your network team for the VPC and subnet IDs, then re-run 'ccwb init'.[/dim]"
+                )
                 return
-            cd["create_vpc"] = False
+
+            vpc_choices = []
+            for vpc in vpcs:
+                label = f"{vpc['id']} - {vpc['cidr']}"
+                if vpc["name"]:
+                    label = f"{vpc['name']} ({label})"
+                if vpc["is_default"]:
+                    label = f"{label} [DEFAULT]"
+                vpc_choices.append(questionary.Choice(label, value=vpc["id"]))
+
+            vpc_id = questionary.select(
+                "VPC for the execute-api endpoint (must be reachable from your devices):",
+                choices=vpc_choices,
+            ).ask()
+            if not vpc_id:
+                return
             cd["vpc_id"] = vpc_id
-            cd["vpc_cidr"] = ""
             selected_vpc = next((v for v in vpcs if v["id"] == vpc_id), None)
 
-        # --- Subnets (>= 2 distinct AZs, an ALB requirement) ---
-        # Skipped when creating a VPC: CloudFormation mints the subnets, and
-        # `ccwb deploy bootstrap` reads their IDs from the VPC stack's outputs.
-        if not cd["create_vpc"]:
             console.print("\n[yellow]Searching for subnets...[/yellow]")
             subnets = get_subnets(region, vpc_id)
-            if len(subnets) < 2:
-                console.print(
-                    "[red]A load balancer needs at least 2 subnets in different Availability "
-                    f"Zones; this VPC has {len(subnets)}.[/red]"
-                )
-                console.print(
-                    "[dim]  Add subnets, or re-run and choose 'Create a new VPC'.[/dim]"
-                )
+            if not subnets:
+                console.print("[red]That VPC has no subnets.[/red]")
                 return
 
-            want_private = cd["alb_scheme"] == "internal"
             subnet_choices = []
             for subnet in subnets:
                 label = f"{subnet['id']} - {subnet['cidr']} ({subnet['availability_zone']})"
@@ -2921,193 +2875,66 @@ class InitCommand(Command):
                     label = f"{subnet['name']} - {label}"
                 label = f"{label} [{'PUBLIC' if subnet['is_public'] else 'PRIVATE'}]"
                 subnet_choices.append(
-                    questionary.Choice(
-                        label,
-                        value=subnet["id"],
-                        checked=(subnet["is_public"] is not want_private),
-                    )
+                    questionary.Choice(label, value=subnet["id"], checked=not subnet["is_public"])
                 )
 
             selected = questionary.checkbox(
-                "Select at least 2 subnets in different AZs:", choices=subnet_choices
+                "Subnets for the endpoint (one per AZ you serve):", choices=subnet_choices
             ).ask()
-            if not selected or len(selected) < 2:
-                console.print(
-                    "[red]At least 2 subnets are required — skipping endpoint setup.[/red]"
-                )
-                return
-
-            azs = {s["availability_zone"] for s in subnets if s["id"] in selected}
-            if len(azs) < 2:
-                console.print(
-                    "[red]The selected subnets are all in one Availability Zone. A load balancer "
-                    "needs two — skipping endpoint setup.[/red]"
-                )
+            if not selected:
+                console.print("[red]At least one subnet is required — skipping endpoint setup.[/red]")
                 return
             cd["subnet_ids"] = selected
 
-            if want_private and any(s["is_public"] for s in subnets if s["id"] in selected):
-                console.print(
-                    "[yellow]Warning:[/yellow] you selected a public subnet for an internal load "
-                    "balancer. It still gets only private IPs, so this works, but private subnets "
-                    "are the cleaner choice."
-                )
+            default_cidr = saved_cd.get("endpoint_ingress_cidr") or (
+                selected_vpc["cidr"] if selected_vpc else "10.0.0.0/8"
+            )
+            cd["endpoint_ingress_cidr"] = (
+                questionary.text(
+                    "CIDR allowed to reach the endpoint on 443:", default=default_cidr
+                ).ask()
+                or default_cidr
+            ).strip()
+            console.print(
+                f"[green]\u2713[/green] An execute-api endpoint will be created in "
+                f"[cyan]{vpc_id}[/cyan] across {len(selected)} subnet(s)"
+            )
 
-        # --- Ingress CIDRs ---
-        default_cidr = saved_cd.get("alb_ingress_cidr") or (
-            selected_vpc["cidr"] if selected_vpc else "10.0.0.0/8"
-        )
-        if cd["alb_scheme"] == "internet-facing":
-            default_cidr = saved_cd.get("alb_ingress_cidr") or "0.0.0.0/0"
-        cd["alb_ingress_cidr"] = (
-            questionary.text("CIDR allowed to reach the endpoint on 443:", default=default_cidr).ask()
-            or default_cidr
-        ).strip()
+        cd["stage_name"] = saved_cd.get("stage_name") or "prod"
 
-        extra_cidr = questionary.text(
-            "Additional allowed CIDR (e.g. VPN client range, blank for none):",
-            default=saved_cd.get("alb_additional_ingress_cidr", ""),
-        ).ask()
-        cd["alb_additional_ingress_cidr"] = (extra_cidr or "").strip()
-
-        # --- DNS first, THEN the certificate ---
-        # Order matters: a certificate can only be requested for a known hostname,
-        # so the domain has to be settled before we can offer to create one.
         console.print(
-            "\n[dim]A DNS record matching the certificate is required — the load balancer's own "
-            "hostname can never match an ACM certificate, so without one TLS verification fails. "
-            "We can create the record in Route 53 (public or private zone), or you can point your "
-            "own DNS at the load balancer.[/dim]"
+            "\n[yellow]Reachability is on you.[/yellow] Devices must route to that VPC and resolve "
+            "the endpoint hostname."
         )
-        zones, zone_err = self._get_hosted_zones()
-        picked_zone_is_private = False
-        if questionary.confirm("Create the DNS record in Route 53?", default=True).ask():
-            if zone_err or not zones:
-                console.print(
-                    f"[yellow]Could not list hosted zones{': ' + zone_err if zone_err else ''}.[/yellow]"
-                )
-                console.print("[dim]  Skipping — point your own DNS at the AlbDnsName output.[/dim]")
-            else:
-                zone_choices = []
-                for z in zones:
-                    is_private_zone = bool(z.get("Config", {}).get("PrivateZone"))
-                    zone_choices.append(
-                        questionary.Choice(
-                            f"{z['Name'].rstrip('.')} ({'private' if is_private_zone else 'public'})",
-                            value=(z["Id"].split("/")[-1], is_private_zone),
-                        )
-                    )
-                picked = questionary.select("Hosted zone:", choices=zone_choices).ask()
-                if picked:
-                    zone_id, picked_zone_is_private = picked
-                    cd["hosted_zone_id"] = zone_id
-                    if cd["alb_scheme"] == "internal" and not picked_zone_is_private:
-                        console.print(
-                            "[yellow]Warning:[/yellow] a public zone pointing at an internal load "
-                            "balancer publishes your private IPs in public DNS. It works, and the "
-                            "IPs aren't reachable from the internet, but some security teams "
-                            "consider it information disclosure — a private zone avoids it."
-                        )
-                    domain = questionary.text(
-                        "Hostname for the endpoint:",
-                        default=saved_cd.get("domain_name", ""),
-                    ).ask()
-                    cd["domain_name"] = (domain or "").strip()
-
-        # --- Certificate: supply one, or have the stack request it ---
         console.print(
-            f"\n[dim]The HTTPS listener needs an ACM certificate in {region} covering "
-            f"{cd.get('domain_name') or 'the hostname clients use'}.[/dim]"
-        )
-        # Requesting one needs a hostname AND a public zone to publish the DNS
-        # validation record in. ACM's validators query PUBLIC DNS, so a private
-        # hosted zone alone cannot prove domain control.
-        public_zones = [z for z in (zones or []) if not z.get("Config", {}).get("PrivateZone")]
-        can_request = bool(cd.get("domain_name")) and bool(public_zones)
-
-        cert_choices = [questionary.Choice("I have a certificate ARN", value="existing")]
-        if can_request:
-            cert_choices.append(
-                questionary.Choice(
-                    "Request one for me during deploy (ACM, DNS-validated)", value="create"
-                )
-            )
-        cert_mode = (
-            questionary.select("ACM certificate:", choices=cert_choices).ask()
-            if can_request
-            else "existing"
+            "[dim]  See assets/docs/BOOTSTRAP_SERVER.md for the DNS options. Without this, deploy "
+            "succeeds and every user sign-in fails.[/dim]"
         )
 
-        if cert_mode == "create":
-            cd["certificate_arn"] = ""
-            # Validation must land in a PUBLIC zone. If the record zone is private,
-            # ask which public zone hosts the name.
-            if picked_zone_is_private:
-                console.print(
-                    "[yellow]The record zone you picked is private, so it cannot validate a "
-                    "public ACM certificate.[/yellow]"
-                )
-                console.print(
-                    "[dim]  Choose the PUBLIC zone for the same domain — the validation record "
-                    "goes there, while clients keep resolving the private one.[/dim]"
-                )
-                val_choices = [
-                    questionary.Choice(
-                        z["Name"].rstrip("."), value=z["Id"].split("/")[-1]
-                    )
-                    for z in public_zones
-                ]
-                cd["cert_validation_zone_id"] = (
-                    questionary.select("Public zone for ACM validation:", choices=val_choices).ask()
-                    or ""
-                )
-                if not cd["cert_validation_zone_id"]:
-                    console.print(
-                        "[red]No validation zone chosen — supply a certificate ARN instead.[/red]"
-                    )
-                    return
-            else:
-                cd["cert_validation_zone_id"] = ""
-            console.print(
-                f"[green]✓[/green] A certificate for [cyan]{cd['domain_name']}[/cyan] will be "
-                f"requested during [cyan]ccwb deploy bootstrap[/cyan]."
-            )
-            console.print(
-                "[dim]  The deploy waits for ACM to issue it (usually a few minutes). If the zone "
-                "doesn't host that name the deploy will wait rather than fail, so double-check "
-                "it now.[/dim]"
-            )
-        else:
-            cert_arn = questionary.text(
-                "ACM certificate ARN:",
-                default=saved_cd.get("certificate_arn", ""),
-                validate=lambda t: (
-                    True if t.strip().startswith("arn:") else "Enter a valid ACM certificate ARN"
-                ),
-            ).ask()
-            if not cert_arn:
-                return
-            cd["certificate_arn"] = cert_arn.strip()
-            cd["cert_validation_zone_id"] = ""
+    def _find_execute_api_endpoints(self, region: str) -> list[dict[str, Any]]:
+        """List execute-api interface VPC endpoints in the region.
 
-        if not (cd.get("domain_name") and cd.get("hosted_zone_id")):
-            cd["domain_name"] = cd.get("domain_name", "")
-            cd["hosted_zone_id"] = cd.get("hosted_zone_id", "")
-            console.print(
-                "[dim]  No record will be created. After 'ccwb deploy bootstrap', point your DNS "
-                "at the AlbDnsName stack output.[/dim]"
-            )
+        Offering an existing one matters because many organisations manage endpoints
+        centrally, and creating a duplicate is both wasteful and confusing.
+        """
+        try:
+            import boto3
 
-        if cd["create_vpc"]:
-            console.print(
-                f"[green]✓[/green] Endpoint: [cyan]{cd['alb_scheme']}[/cyan] load balancer in a "
-                f"new VPC ([cyan]{cd['vpc_cidr']}[/cyan]), created at deploy time"
+            client = boto3.client("ec2", region_name=region)
+            resp = client.describe_vpc_endpoints(
+                Filters=[{"Name": "service-name", "Values": [f"com.amazonaws.{region}.execute-api"]}]
             )
-        else:
-            console.print(
-                f"[green]✓[/green] Endpoint: [cyan]{cd['alb_scheme']}[/cyan] load balancer in "
-                f"[cyan]{cd['vpc_id']}[/cyan] across {len(cd['subnet_ids'])} subnets"
-            )
+            return [
+                {
+                    "id": ep["VpcEndpointId"],
+                    "vpc_id": ep.get("VpcId", ""),
+                    "private_dns": ep.get("PrivateDnsEnabled", False),
+                }
+                for ep in resp.get("VpcEndpoints", [])
+                if ep.get("State") == "available"
+            ]
+        except Exception:
+            return []
 
     def _configure_vpc(self, region: str, existing_vpc_config: dict[str, Any] = None) -> dict[str, Any]:
         """Configure VPC for monitoring stack."""

@@ -23,8 +23,7 @@ class DestroyCommand(Command):
             "stack",
             description=(
                 "Specific stack to destroy "
-                "(auth/networking/monitoring/dashboard/analytics/s3bucket/"
-                "bootstrap/bootstrap-networking)"
+                "(auth/networking/monitoring/dashboard/analytics/s3bucket/bootstrap)"
             ),
             optional=True,
         )
@@ -76,23 +75,22 @@ class DestroyCommand(Command):
                 "analytics",
                 "s3bucket",
                 "bootstrap",
-                "bootstrap-networking",
             ]:
                 stacks_to_destroy.append(stack_arg)
             else:
                 console.print(f"[red]Unknown stack: {stack_arg}[/red]")
                 console.print(
                     "Valid stacks: auth, networking, monitoring, dashboard, analytics, "
-                    "s3bucket, bootstrap, bootstrap-networking"
+                    "s3bucket, bootstrap"
                 )
                 return 1
         else:
             # Destroy all stacks in reverse dependency order. The bootstrap server
-            # goes first, and its VPC immediately after — the load balancer lives in
-            # that VPC, so deleting the VPC while the ALB still exists would fail.
+            # goes first: it is a leaf consumer of the auth stack's federated role.
+            # Its execute-api VPC endpoint goes with it (same stack), and a
+            # customer-supplied endpoint is left untouched.
             stacks_to_destroy = [
                 "bootstrap",
-                "bootstrap-networking",
                 "analytics",
                 "dashboard",
                 "monitoring",
@@ -127,16 +125,6 @@ class DestroyCommand(Command):
         console.print("• S3 Buckets and Athena resources created by analytics stack")
         console.print("• Any custom resources created outside of CloudFormation")
 
-        if "bootstrap-networking" in stacks_to_destroy:
-            console.print(
-                "\n[bold yellow]This deletes the VPC that ccwb created for the bootstrap "
-                "endpoint.[/bold yellow]"
-            )
-            console.print(
-                "[dim]  Deletion will FAIL if anything else still lives in it — instances, "
-                "endpoints, or an attached VPN / peering / Transit Gateway. Detach and remove "
-                "those first, or destroy 'bootstrap' alone and keep the VPC.[/dim]"
-            )
         if "bootstrap" in stacks_to_destroy:
             console.print(
                 "[dim]• Devices keep their MDM trust anchor after this. Its bootstrapUrl will "
@@ -172,17 +160,6 @@ class DestroyCommand(Command):
             else:
                 console.print(f"[green]✓ {self._label(stack)} stack destroyed[/green]\n")
 
-        # An orphaned VPC is easy to forget and keeps its CIDR reserved.
-        if stack_arg == "bootstrap" and getattr(profile, "claude_desktop_create_vpc", False):
-            net_stack = profile.stack_names.get(
-                "bootstrap-networking", f"{profile.identity_pool_name}-bootstrap-networking"
-            )
-            console.print(
-                f"[yellow]The VPC stack '{net_stack}' was left in place.[/yellow] "
-                f"Remove it with [cyan]ccwb destroy bootstrap-networking[/cyan] when you no "
-                f"longer need it."
-            )
-
         # Show cleanup summary at the end
         self._show_cleanup_summary(all_failed_resources, stacks_with_failures, profile, console)
 
@@ -194,11 +171,10 @@ class DestroyCommand(Command):
 
     @staticmethod
     def _label(stack: str) -> str:
-        """Human-readable stack label. `str.capitalize()` mangles hyphenated names
-        ('bootstrap-networking' -> 'Bootstrap-networking')."""
+        """Human-readable stack label — `str.capitalize()` alone reads poorly
+        ('s3bucket' -> 'S3bucket')."""
         return {
             "bootstrap": "Bootstrap server",
-            "bootstrap-networking": "Bootstrap VPC",
             "s3bucket": "S3 bucket",
         }.get(stack, stack.capitalize())
 
@@ -212,12 +188,6 @@ class DestroyCommand(Command):
             return bool(profile.monitoring_enabled)
         if stack == "bootstrap":
             return getattr(profile, "cowork_config_mode", "static") == "dynamic"
-        if stack == "bootstrap-networking":
-            # Only exists when ccwb created the VPC; a customer-supplied VPC is
-            # theirs and must never be touched by ccwb destroy.
-            return getattr(profile, "cowork_config_mode", "static") == "dynamic" and bool(
-                getattr(profile, "claude_desktop_create_vpc", False)
-            )
         return True
 
     def _delete_stack(self, stack_name: str, region: str, console: Console) -> int:

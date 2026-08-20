@@ -170,11 +170,6 @@ class DeployCommand(Command):
                         "[yellow]Bootstrap server requires OIDC/SSO authentication (sso_enabled).[/yellow]"
                     )
                     return 1
-                # The VPC stack must land first — the bootstrap stack reads its outputs.
-                if getattr(profile, "claude_desktop_create_vpc", False):
-                    stacks_to_deploy.append(
-                        ("bootstrap-networking", "VPC for the Bootstrap Server load balancer")
-                    )
                 stacks_to_deploy.append(("bootstrap", "Claude Desktop Bootstrap Server"))
             else:
                 console.print(f"[red]Unknown stack: {stack_arg}[/red]")
@@ -234,11 +229,6 @@ class DeployCommand(Command):
             # Check if bootstrap server is enabled (dynamic CoWork config delivery)
             if getattr(profile, "cowork_config_mode", "static") == "dynamic":
                 if getattr(profile, "sso_enabled", True):
-                    # VPC stack first when we're creating one; bootstrap reads its outputs.
-                    if getattr(profile, "claude_desktop_create_vpc", False):
-                        stacks_to_deploy.append(
-                            ("bootstrap-networking", "VPC for the Bootstrap Server load balancer")
-                        )
                     stacks_to_deploy.append(("bootstrap", "Claude Desktop Bootstrap Server"))
 
         # Initialize CloudFormation manager
@@ -684,38 +674,6 @@ class DeployCommand(Command):
                         ["CAPABILITY_NAMED_IAM"],
                         task_description="Deploying presigned S3 distribution stack...",
                     )
-
-            elif stack_type == "bootstrap-networking":
-                # Optional VPC for the bootstrap load balancer. Shape follows the
-                # scheme: internal => fully private (no IGW/NAT/route out);
-                # internet-facing => public subnets + IGW. Never a NAT gateway —
-                # nothing in this VPC needs egress (see the template header).
-                template = project_root / "deployment" / "infrastructure" / "bootstrap-networking.yaml"
-                stack_name = profile.stack_names.get(
-                    "bootstrap-networking", f"{profile.identity_pool_name}-bootstrap-networking"
-                )
-                alb_scheme = getattr(profile, "claude_desktop_alb_scheme", "") or "internal"
-                params = [
-                    f"AlbScheme={alb_scheme}",
-                    f"VpcCidr={getattr(profile, 'claude_desktop_vpc_cidr', '') or '10.60.0.0/16'}",
-                ]
-                result = deploy_with_cf(
-                    template,
-                    stack_name,
-                    params,
-                    task_description="Deploying VPC for the Bootstrap Server load balancer...",
-                )
-                if result == 0 and alb_scheme == "internal":
-                    console.print(
-                        "\n[yellow]This VPC is fully private[/yellow] — no internet gateway, no NAT, "
-                        "no route off the VPC."
-                    )
-                    console.print(
-                        "[dim]  Nothing can reach the bootstrap endpoint until you attach "
-                        "connectivity (VPN, Direct Connect, peering) or place clients inside "
-                        "this VPC.[/dim]"
-                    )
-                return result
 
             elif stack_type == "networking":
                 template = project_root / "deployment" / "infrastructure" / "networking.yaml"
@@ -1169,103 +1127,38 @@ class DeployCommand(Command):
                     else:
                         token_audience = profile.client_id
 
-                # Endpoint (ALB) inputs. All customer-supplied: this solution does
-                # not provision VPCs, subnets, certificates or connectivity.
-                alb_scheme = getattr(profile, "claude_desktop_alb_scheme", "") or "internal"
+                # Endpoint inputs. A PRIVATE REST API needs no certificate and no DNS
+                # record — AWS provides TLS for the execute-api hostname. It does need
+                # a VPC endpoint: either one the customer already runs, or one created
+                # here from a VPC + subnets they supply. We never create the VPC — a
+                # fresh one would be unreachable, which defeats the purpose.
+                vpc_endpoint_id = getattr(profile, "claude_desktop_vpc_endpoint_id", "") or ""
                 vpc_id = getattr(profile, "claude_desktop_vpc_id", "") or ""
                 subnet_ids = list(getattr(profile, "claude_desktop_subnet_ids", []) or [])
-                certificate_arn = getattr(profile, "claude_desktop_certificate_arn", "") or ""
-                alb_ingress_cidr = getattr(profile, "claude_desktop_alb_ingress_cidr", "") or ""
+                ingress_cidr = getattr(profile, "claude_desktop_endpoint_ingress_cidr", "") or ""
+                stage_name = getattr(profile, "claude_desktop_stage_name", "") or "prod"
 
-                # When we created the VPC, its stack is the source of truth — the
-                # profile has no subnet IDs to record, since CloudFormation minted them.
-                if getattr(profile, "claude_desktop_create_vpc", False):
-                    net_stack = profile.stack_names.get(
-                        "bootstrap-networking", f"{profile.identity_pool_name}-bootstrap-networking"
-                    )
-                    net_outputs = get_stack_outputs(net_stack, profile.aws_region) or {}
-                    if not net_outputs.get("VpcId") or not net_outputs.get("SubnetIds"):
-                        console.print(
-                            f"[red]Could not read VPC outputs from stack '{net_stack}'.[/red]"
-                        )
-                        console.print(
-                            "[dim]Your profile requests a new VPC, so that stack must deploy first. "
-                            "Run 'ccwb deploy bootstrap' (which deploys both in order) rather than "
-                            "deploying this stack on its own.[/dim]"
-                        )
-                        return 1
-                    vpc_id = net_outputs["VpcId"]
-                    subnet_ids = [s for s in net_outputs["SubnetIds"].split(",") if s]
-                    # Default ingress to the new VPC's CIDR — the admin never saw it
-                    # to type it in, and for a private VPC this is the only sane value.
-                    if not alb_ingress_cidr:
-                        alb_ingress_cidr = net_outputs.get("VpcCidr", "") or ""
+                if not vpc_endpoint_id and (not vpc_id or not subnet_ids):
                     console.print(
-                        f"[dim]Using the VPC created by '{net_stack}': {vpc_id} "
-                        f"({len(subnet_ids)} subnets)[/dim]"
+                        "[red]The bootstrap server is served from a private REST API, which needs "
+                        "an execute-api VPC endpoint.[/red]"
                     )
-                alb_additional_cidr = (
-                    getattr(profile, "claude_desktop_alb_additional_ingress_cidr", "") or ""
-                )
-                domain_name = getattr(profile, "claude_desktop_domain_name", "") or ""
-                hosted_zone_id = getattr(profile, "claude_desktop_hosted_zone_id", "") or ""
-
-                cert_validation_zone_id = (
-                    getattr(profile, "claude_desktop_cert_validation_zone_id", "") or ""
-                )
-                # No certificate ARN is fine IF the stack can request one: it needs a
-                # domain to request it for and a public zone to publish the DNS
-                # validation record in. Without both, CloudFormation would sit waiting
-                # for a validation that can never complete.
-                will_create_cert = bool(
-                    not certificate_arn and domain_name and (cert_validation_zone_id or hosted_zone_id)
-                )
-
-                missing = []
-                if not vpc_id and not getattr(profile, "claude_desktop_create_vpc", False):
-                    missing.append("VPC")
-                if len(subnet_ids) < 2 and not getattr(profile, "claude_desktop_create_vpc", False):
-                    missing.append("at least 2 subnets in different Availability Zones")
-                if not certificate_arn and not will_create_cert:
-                    missing.append(
-                        "either an ACM certificate ARN, or a domain name + hosted zone so one "
-                        "can be requested for you"
-                    )
-                if missing:
                     console.print(
-                        "[red]The bootstrap server is fronted by a load balancer, which needs "
-                        "networking details this profile doesn't have yet.[/red]"
+                        "[yellow]Supply an existing endpoint, or a VPC and at least one subnet so "
+                        "one can be created for you.[/yellow]"
                     )
-                    console.print(f"[yellow]Missing: {', '.join(missing)}.[/yellow]")
                     console.print(
-                        "[dim]These are supplied by you (the solution never creates VPCs, subnets "
-                        "or certificates). Run 'ccwb init' and complete the Claude Desktop "
-                        "bootstrap section, then re-run 'ccwb deploy bootstrap'.[/dim]"
+                        "[dim]  Run 'ccwb init' and complete the Claude Desktop bootstrap section, "
+                        "then re-run 'ccwb deploy bootstrap'.[/dim]"
                     )
                     return 1
 
-                if will_create_cert:
+                if vpc_endpoint_id:
+                    console.print(f"[dim]Serving through existing VPC endpoint {vpc_endpoint_id}.[/dim]")
+                else:
                     console.print(
-                        f"[yellow]No certificate supplied — one will be requested for "
-                        f"[cyan]{domain_name}[/cyan] and validated via DNS.[/yellow]"
-                    )
-                    console.print(
-                        "[dim]  The stack waits for ACM to issue it, which usually takes a few "
-                        "minutes. The validation zone must be PUBLIC and must host that name, or "
-                        "the deploy will sit waiting rather than fail.[/dim]"
-                    )
-
-                # A cert whose domain nobody resolves is useless: without DNS the
-                # client must use the raw ALB name, which fails TLS verification.
-                if not (domain_name and hosted_zone_id):
-                    console.print(
-                        "[yellow]Note:[/yellow] no domain name + hosted zone configured, so no DNS "
-                        "record will be created."
-                    )
-                    console.print(
-                        "[dim]  After deploy, point your own DNS at the AlbDnsName output. Clients "
-                        "must connect on a hostname covered by your certificate — the raw ALB "
-                        "hostname will fail TLS verification.[/dim]"
+                        f"[dim]An execute-api VPC endpoint will be created in {vpc_id} "
+                        f"({len(subnet_ids)} subnet(s)).[/dim]"
                     )
 
                 params = [
@@ -1281,19 +1174,14 @@ class DeployCommand(Command):
                     f"GroupPrefix={group_prefix}",
                     f"FederatedRoleArn={profile.federated_role_arn}",
                     f"MaxSessionDuration={max_session_duration}",
-                    f"AlbScheme={alb_scheme}",
+                    f"VpcEndpointId={vpc_endpoint_id}",
                     f"VpcId={vpc_id}",
                     f"SubnetIds={','.join(subnet_ids)}",
-                    f"CertificateArn={certificate_arn}",
-                    f"DomainName={domain_name}",
-                    f"HostedZoneId={hosted_zone_id}",
-                    f"CertificateValidationZoneId={cert_validation_zone_id}",
+                    f"StageName={stage_name}",
                 ]
-                # Omit empty CIDRs so the template defaults apply.
-                if alb_ingress_cidr:
-                    params.append(f"AlbIngressCidr={alb_ingress_cidr}")
-                if alb_additional_cidr:
-                    params.append(f"AlbAdditionalIngressCidr={alb_additional_cidr}")
+                # Omitted when empty so the template default applies.
+                if ingress_cidr:
+                    params.append(f"EndpointIngressCidr={ingress_cidr}")
 
                 # The handler (~18KB) exceeds the 4KB inline-ZipFile limit, so the
                 # template references a local dir (Code: ./lambda-functions/...) and
@@ -1362,21 +1250,15 @@ class DeployCommand(Command):
                         "\n[dim]Add this URL as 'bootstrapUrl' in your MDM anchor profile "
                         "(or run 'ccwb claude-desktop generate').[/dim]"
                     )
-                    if alb_scheme == "internal":
-                        console.print(
-                            "\n[yellow]This endpoint is PRIVATE.[/yellow] Devices can only reach it "
-                            "from inside the VPC or over your own VPN / Direct Connect."
-                        )
-                        console.print(
-                            "[dim]  Verify before rollout: the URL should time out from an "
-                            "off-network machine and return 401 (not a timeout) from an "
-                            "on-network one.[/dim]"
-                        )
-                    else:
-                        console.print(
-                            "\n[yellow]This endpoint is PUBLIC (internet-facing).[/yellow] "
-                            "Consider attaching an AWS WAF web ACL to the load balancer."
-                        )
+                    console.print(
+                        "\n[yellow]This endpoint is PRIVATE.[/yellow] It is reachable only through "
+                        "the execute-api VPC endpoint — from inside the VPC, or over your own "
+                        "VPN / Direct Connect."
+                    )
+                    console.print(
+                        "[dim]  Verify before rollout: it should time out from an off-network "
+                        "machine and return 401 (not a timeout) from an on-network one.[/dim]"
+                    )
                     # Persist endpoint to profile for trust-anchor generation
                     if bootstrap_url and bootstrap_url != "N/A":
                         profile.claude_desktop_bootstrap_endpoint = bootstrap_url
@@ -1470,17 +1352,6 @@ class DeployCommand(Command):
                     f"EnableMonitoring={str(profile.monitoring_enabled).lower()}",
                 ])
                 print_deploy_cmd(template, stack_name, params, ["CAPABILITY_NAMED_IAM"])
-
-        elif stack_type == "bootstrap-networking":
-            template = project_root / "deployment" / "infrastructure" / "bootstrap-networking.yaml"
-            stack_name = profile.stack_names.get(
-                "bootstrap-networking", f"{profile.identity_pool_name}-bootstrap-networking"
-            )
-            params = [
-                f"AlbScheme={getattr(profile, 'claude_desktop_alb_scheme', '') or 'internal'}",
-                f"VpcCidr={getattr(profile, 'claude_desktop_vpc_cidr', '') or '10.60.0.0/16'}",
-            ]
-            print_deploy_cmd(template, stack_name, params)
 
         elif stack_type == "networking":
             template = project_root / "deployment" / "infrastructure" / "networking.yaml"

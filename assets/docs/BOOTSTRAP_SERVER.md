@@ -13,9 +13,9 @@ This enables organizations to change configuration centrally without re-deployin
 │             │     2. Receive token        └──────────────┘
 │             │
 │             │     3. GET /config          ┌──────────────┐
-│             │        Authorization:       │     ALB      │
-│             │        Bearer <token>       │  (internal   │
-│             │ ──────────────────────────► │  or public)  │
+│             │        Authorization:       │  PRIVATE     │
+│             │        Bearer <token>       │  REST API    │
+│             │ ──────────────────────────► │  (via VPCe)  │
 │             │                             └──────┬───────┘
 │             │                                    │
 │             │                             ┌──────▼───────┐
@@ -43,12 +43,10 @@ This enables organizations to change configuration centrally without re-deployin
 
 ### Where the JWT validation happens
 
-Earlier versions used an API Gateway HTTP API whose native JWT authorizer
-validated the token at the edge. That endpoint **could not be made private** —
-per AWS, *"you can only configure REST APIs as private"* — and supported neither
-resource policies nor AWS WAF. It was therefore replaced by an ALB, which cannot
-validate JWTs (its `authenticate-oidc` action is a browser-redirect flow, the
-wrong shape for a bearer-token API call).
+Earlier versions used an API Gateway **HTTP** API whose native JWT authorizer
+validated the token at the edge. That endpoint **could not be made private** — per
+AWS, *"you can only configure REST APIs as private"*. Moving to a **REST** API made
+the endpoint private but gave up the JWT authorizer, which REST APIs do not offer.
 
 **STS is now the authoritative validator.** `AssumeRoleWithWebIdentity` verifies
 the signature against the IdP's published JWKS, checks `iss` against the IAM OIDC
@@ -88,130 +86,108 @@ CoWork configuration delivery:
 | `OtlpEndpoint` | OpenTelemetry collector endpoint | (optional) |
 | `InferenceSessionLifetimeSec` | Session lifetime before re-auth | `28800` (8h) |
 | `FederatedRoleArn` | Role the broker assumes for each user | (from profile) |
-| `AlbScheme` | `internal` (private) or `internet-facing` | `internal` |
-| `VpcId` | VPC for the load balancer | (required) |
-| `SubnetIds` | ≥2 subnets in different AZs | (required) |
-| `CertificateArn` | ACM certificate in this region | (required) |
-| `AlbIngressCidr` | CIDR allowed on 443, normally the VPC CIDR | `10.0.0.0/8` |
-| `AlbAdditionalIngressCidr` | Second allowed CIDR, e.g. VPN clients | (optional) |
-| `DomainName` | Hostname clients connect to | (optional) |
-| `HostedZoneId` | Route 53 zone for the alias record | (optional) |
+| `VpcEndpointId` | Existing execute-api VPC endpoint; empty = create one | `""` |
+| `VpcId` | VPC to create the endpoint in (only if creating) | `""` |
+| `SubnetIds` | Subnets for the endpoint (only if creating) | `""` |
+| `EndpointIngressCidr` | CIDR allowed on 443 for a created endpoint | `10.0.0.0/8` |
+| `StageName` | REST API stage; appears in the invoke URL | `prod` |
 
-## Endpoint: private or public
+## Endpoint: a private REST API
 
-The bootstrap server sits behind an Application Load Balancer.
+The bootstrap server is served from a **private API Gateway REST API**, reachable
+only through an `execute-api` interface VPC endpoint.
 
-- **`AlbScheme: internal`** (default, recommended) — the load balancer has only
-  private IPs, so the endpoint is reachable **exclusively** from inside the VPC or
-  over connectivity you already own.
-- **`AlbScheme: internet-facing`** — public endpoint. Attach an AWS WAF web ACL
-  (possible with an ALB; it never was with an HTTP API).
+**Why this shape.** Of the options AWS offers, only a REST API can be `PRIVATE` —
+an HTTP API cannot ("you can only configure REST APIs as private"). And because
+the invoke hostname sits under `execute-api.<region>.amazonaws.com`, **AWS supplies
+the TLS certificate**. That is the decisive advantage over an internal Application
+Load Balancer, which requires a certificate you provide — AWS will not issue one
+for `*.elb.amazonaws.com`.
 
-> **This solution provisions no connectivity.** VPN, Direct Connect, Transit
-> Gateway and VPC peering are out of scope, as are hosted zones and certificates.
-> The VPC, subnets, certificate and DNS are inputs you supply. With
-> `AlbScheme: internal`, devices that cannot reach the VPC will fail at sign-in.
+So this endpoint needs:
 
-### DNS is required — but it does not have to be public
+- ❌ no ACM certificate
+- ❌ no public hosted zone
+- ❌ no DNS record
+- ❌ no NAT gateway, no VPC creation, no VPC-attached Lambda
+- ✅ one `execute-api` VPC endpoint — yours, or created here
+- ✅ device→VPC connectivity that **you already have** (VPN / Direct Connect)
 
-The load balancer's own name is `internal-…elb.amazonaws.com`, and ACM will not
-issue a certificate for a domain you don't own. If a client connects on the raw
-ALB hostname, the certificate cannot match it, TLS verification fails, and Claude
-Desktop refuses the connection. So **every deployment needs a DNS record** for a
-hostname the certificate covers. Three ways to get there:
+### The VPC endpoint
 
-| Your DNS | What the stack does | Certificate |
-|---|---|---|
-| **Route 53 private zone** (recommended for `internal`) | Set `DomainName` + `HostedZoneId`; the stack creates the alias. Resolvable in-VPC, and from on-prem via a Resolver inbound endpoint. | A public ACM cert still works — validate with a CNAME in the **public** zone of a domain you own, even though the name itself resolves only privately. Or use ACM Private CA if that CA is already trusted on your devices. |
-| **Route 53 public zone** | Same, but the record is public and returns your **private** IPs. | Simplest validation. ⚠️ Publishes internal hostnames/IPs to anyone querying DNS. Not reachable from the internet, but some security teams treat it as information disclosure. |
-| **DNS outside Route 53** (Infoblox, BIND, AD DNS) | Leave `DomainName` and `HostedZoneId` empty; point your own CNAME at the `AlbDnsName` stack output. | Your own cert / internal CA. |
+Supply `VpcEndpointId` to use an endpoint your organisation already runs, or leave
+it empty and give `VpcId` + `SubnetIds` to have one created.
 
-### Certificates
+**The stack never creates a VPC.** A brand-new VPC would have no path from any
+device, so the endpoint inside it would be unreachable. The VPC must be one your
+devices can already reach.
 
-**A certificate is unavoidable, but public DNS is not.**
+⚠️ **Private DNS is deliberately left OFF** on any endpoint this stack creates.
+Enabling it hijacks `execute-api.<region>.amazonaws.com` for the **entire VPC**,
+which breaks anything there that calls a public or regional API Gateway. Instead
+the API is *associated* with the endpoint, giving a dedicated hostname:
 
-The response carries `inferenceBedrockBearerToken` — a real credential — so it must
-travel over TLS, and an ALB HTTPS listener requires a certificate. That is an AWS
-constraint, not a ccwb choice. There is no supported HTTP option.
-
-What the certificate must satisfy: it lives in **ACM in the deploy region** and
-covers the **hostname clients connect to**. Nothing more. Four ways to get there:
-
-| Source | Needs public DNS? | Cost | When to use |
-|---|---|---|---|
-| **Import your existing internal certificate** ⭐ | **No** | free | You already run an internal CA (AD Certificate Services or similar) that issues certificates for internal hostnames, and your managed devices already trust it. The usual enterprise answer. |
-| **AWS Private CA** | **No** | ~$400/mo per CA + per certificate | You already operate one. Devices must trust the CA — normally already handled by MDM/GPO. |
-| Public ACM, auto-validated | Yes — a public **Route 53** zone | free | Convenient when you host public DNS in Route 53. `ccwb init` offers this only when it finds a public zone. |
-| Public ACM, manually validated | A public domain **anywhere** (any DNS provider) | free | ACM DNS validation is just a CNAME in public DNS. Only the CloudFormation automation needs Route 53. |
-
-#### Importing an internal certificate
-
-```bash
-aws acm import-certificate \
-  --certificate fileb://cert.pem \
-  --private-key fileb://key.pem \
-  --certificate-chain fileb://chain.pem \
-  --region <deploy-region>
+```
+https://{api-id}-{vpce-id}.execute-api.{region}.amazonaws.com/{stage}/config
 ```
 
-Pass the returned ARN as `CertificateArn` (or paste it at the wizard's certificate
-prompt). The private key must be unencrypted PEM.
+That form needs no `Host` or `x-apigw-api-id` header — which matters, because
+**Claude Desktop cannot send a custom header** when fetching its bootstrap config.
+It is the `BootstrapUrl` output, and it works whether or not private DNS is on.
 
-⚠️ **ACM does not auto-renew imported certificates.** Re-import before expiry, the
-same as any other internally managed certificate. Set a reminder.
+If you already run an endpoint **with** private DNS enabled, the standard hostname
+also works and is emitted as `BootstrapUrlPrivateDns`.
 
-#### Letting the stack request one
+### Devices must resolve that hostname
 
-Leave `CertificateArn` empty and the stack requests a DNS-validated public
-certificate for `DomainName`, with CloudFormation publishing the validation record.
+The invoke hostname is public DNS, but it resolves to the endpoint's **private**
+IPs — and only from inside the VPC, or from a network whose DNS forwards to the VPC
+resolver. From a laptop on VPN that means either a **Route 53 Resolver inbound
+endpoint** in the VPC, or conditional forwarding from your corporate DNS.
 
-⚠️ **The validation zone must be PUBLIC.** ACM's validators query public DNS, so a
-private hosted zone cannot prove domain control — even though it is perfectly fine
-for the record clients resolve. That usually means two zones:
+Without that, deploy succeeds and every user sign-in fails. It is the single most
+common way this goes wrong.
 
-| Purpose | Zone |
-|---|---|
-| The record clients resolve (`HostedZoneId`) | private — resolves in-VPC only |
-| The ACM validation record (`CertificateValidationZoneId`) | **public** zone for the same domain |
+### Access control
 
-`CertificateValidationZoneId` defaults to `HostedZoneId`, correct when that zone is
-already public. Set it explicitly only when the record zone is private.
-
-⚠️ **Deploys wait for issuance.** CloudFormation blocks until ACM issues, normally a
-few minutes. If the validation zone does not actually host `DomainName`, the deploy
-**waits** rather than failing — verify the zone first.
-
-The `CertificateArnUsed` output reports whichever certificate ended up on the listener.
+A `PRIVATE` REST API is inaccessible to every VPC until a resource policy grants
+access, so the policy is not optional. This stack writes one scoped to the single
+VPC endpoint — an `Allow` on `aws:SourceVpce` plus an explicit `Deny` for anything
+else — so a VPC endpoint in another account cannot invoke it. Enforced at the API
+Gateway edge, before the Lambda runs.
 
 ### Stack outputs
 
 | Output | Use |
 |---|---|
-| `BootstrapUrl` | Value for the MDM `bootstrapUrl` key. Falls back to the raw ALB hostname when no DNS was configured — that form **fails TLS verification**, so treat it as an in-VPC smoke-test URL only. |
-| `AlbDnsName` | Target for your own CNAME when DNS lives outside Route 53. |
-| `AlbCanonicalHostedZoneId` | Needed if you create the alias record yourself. |
-| `AlbScheme` | Confirms whether the endpoint ended up private or public. |
+| `BootstrapUrl` | Value for the MDM `bootstrapUrl` key. Endpoint-associated hostname; needs no extra header. |
+| `BootstrapUrlPrivateDns` | Alternative, valid only if private DNS is enabled on the endpoint. |
+| `VpcEndpointIdUsed` | The endpoint serving the API — created here, or the one you supplied. |
+| `RestApiId` | The private REST API's ID. |
 
 ### Verifying it is actually private
 
 ```bash
-# From OFF the network — must TIME OUT (not 401, not 403)
-curl -m 10 https://<your-domain>/config
+# From OFF the network — must TIME OUT or fail to resolve
+curl -m 10 https://{api-id}-{vpce-id}.execute-api.{region}.amazonaws.com/{stage}/config
 
 # From ON the network, no token — must return 401
-curl -s -o /dev/null -w '%{http_code}\n' https://<your-domain>/config
+curl -s -o /dev/null -w '%{http_code}\n' https://.../config
 ```
 
-A timeout from outside is the test that proves the requirement is met; a 401 from
-outside means the endpoint is still publicly reachable.
+A timeout from outside proves the requirement is met. A `403` from outside means the
+resource policy is doing its job but DNS resolved publicly; a `401` from outside
+would mean the endpoint is not private at all.
 
-### Migrating from the API Gateway version
+### Migrating from an earlier version
 
-The API Gateway resources were removed from the template, so the next
-`ccwb deploy bootstrap` **deletes the HTTP API**. `BootstrapUrl` changes as a
-result, so you must re-run `ccwb claude-desktop generate` and re-push the MDM
-trust anchor to devices. Run `ccwb init` first to supply the new VPC, subnet,
-certificate and DNS inputs — `ccwb deploy bootstrap` refuses to run without them.
+Earlier releases used an API Gateway **HTTP API** (public, no private option) and
+then briefly an internal **ALB** (private, but certificate required). Both are
+gone. The next `ccwb deploy bootstrap` replaces the endpoint, so `BootstrapUrl`
+changes and you must re-run `ccwb claude-desktop generate` and re-push the MDM
+trust anchor. Run `ccwb init` first to supply the VPC endpoint details — deploy
+refuses without them. Certificate, hosted-zone and DNS settings are no longer used
+and can be removed from the profile.
 
 ### Response Format
 
@@ -242,26 +218,26 @@ certificate and DNS inputs — `ccwb deploy bootstrap` refuses to run without th
   credential is issued (see [Where the JWT validation happens](#where-the-jwt-validation-happens)).
   The Lambda's own `iss`/`aud`/`exp` pre-check is a fail-fast guard, not the
   security boundary.
-- **Network exposure**: with `AlbScheme: internal` the endpoint has no public IP
-  at all, which is the strongest control available here. Prefer it over
-  `internet-facing` unless you have a reason not to.
+- **Network exposure**: the API is `PRIVATE`, so it has no internet-facing path at
+  all. On top of that, a resource policy restricts invocation to a single
+  `execute-api` VPC endpoint, enforced at the edge before the Lambda runs — so even
+  another VPC endpoint in another account cannot reach it.
 - **Least-privilege Lambda role**: the execution role holds CloudWatch Logs
   permissions only. It deliberately has no `sts:AssumeRole` or `bedrock:*` grants
   — `AssumeRoleWithWebIdentity` is authorized by the *target role's trust policy*
   and the user's token, not by the caller's identity. Do not add them.
 - **No caching**: responses include `Cache-Control: no-store` to prevent stale configuration.
-- **HTTPS only**: the listener is HTTPS-only (TLS 1.2+ via
-  `ELBSecurityPolicy-TLS13-1-2-2021-06`). There is no HTTP listener to redirect from.
-- **Minimal surface**: the listener's default action is a 404; only `/config`
-  reaches the Lambda.
+- **HTTPS only**: API Gateway serves HTTPS exclusively, with an AWS-managed
+  certificate for the `execute-api` hostname.
+- **Minimal surface**: only the `/config` resource exists; every other path is
+  rejected by API Gateway before the Lambda runs.
 - **Error opacity**: brokering failures return a generic 403. STS error text is
   logged to CloudWatch but never returned, so role ARNs and policy details don't leak.
 - **Short-lived credentials**: the response carries a Bedrock bearer token bounded
   by the STS session (≤12h), and `expiresAt` tells clients when to re-fetch.
 - **Response does contain a credential**: unlike the static-config model, this
   response includes `inferenceBedrockBearerToken`. That is why the endpoint
-  authenticates every request and sets `no-store` — and a further argument for
-  `AlbScheme: internal`.
+  authenticates every request, sets `no-store`, and is private.
 
 ## How Clients Connect (MDM Anchor Profile)
 
@@ -412,21 +388,22 @@ The broker reuses `federated_role_arn`, `client_id`, `zones`, and
 
 **Networking — must exist BEFORE you deploy**
 
-This stack creates the load balancer, its security group and (optionally) one DNS
-record. It creates nothing else. Have these ready first, because `ccwb init`
-prompts for them and `ccwb deploy bootstrap` fails fast without them:
+This stack creates the private REST API and, optionally, one `execute-api` VPC
+endpoint. Nothing else. Have these ready first:
 
 | # | Prerequisite | Notes |
 |---|---|---|
-| 1 | **A VPC** | Any VPC in the deploy region. Don't reuse the ccwb monitoring VPC — it has only public subnets, and adding to it causes CloudFormation drift on a ccwb-managed stack. |
-| 2 | **≥2 subnets in different AZs** | An ALB requirement. Use **private** subnets for `AlbScheme: internal`. **No NAT gateway needed** — the ALB needs no outbound access and the Lambda is invoked through the Lambda API, not from inside the subnet. |
-| 3 | **A certificate in ACM in the same region** | Must cover the hostname clients use. **No public DNS is required** — most enterprises import the certificate their existing internal CA already issues. See [Certificates](#certificates) for all four sources. |
-| 4 | **A DNS record** | Either give `DomainName` + `HostedZoneId` and the stack creates the alias (private **or** public zone), or manage it yourself and CNAME to the `AlbDnsName` output. Not optional in effect — see [DNS is required](#dns-is-required--but-it-does-not-have-to-be-public). |
-| 5 | **Network reachability from devices** | For `AlbScheme: internal`, devices need existing access to the VPC — VPN, Direct Connect, or being in-VPC. **This solution provisions none of it.** Without it, sign-in fails. |
-| 6 | **Deploy-time IAM permissions** | To create an ALB, target group, listener, security group, and the Route 53 record if used. |
+| 1 | **A VPC your devices can already reach** | The stack never creates one — a fresh VPC would be unreachable. |
+| 2 | **One or more subnets in it** | For the `execute-api` endpoint, ideally one per AZ you serve. Skip if you supply `VpcEndpointId`. |
+| 3 | **Device→VPC connectivity** | VPN, Direct Connect, or clients inside the VPC. **This solution provisions none of it.** Without it, sign-in fails. |
+| 4 | **DNS resolution for the endpoint hostname** | Route 53 Resolver inbound endpoint, or corporate DNS forwarding to the VPC resolver. |
+| 5 | **Deploy-time IAM permissions** | REST API, VPC endpoint, security group, Lambda, IAM role, S3 for Lambda packaging. |
 
-Not required: a NAT gateway, a public subnet, putting the Lambda in the VPC, or
-any change to the IAM OIDC provider.
+**No certificate. No hosted zone. No DNS record.** AWS provides TLS for the
+`execute-api` hostname.
+
+Not required: a certificate, a hosted zone, a NAT gateway, a public subnet,
+putting the Lambda in the VPC, or any change to the IAM OIDC provider.
 
 ### Auto-populated values
 
