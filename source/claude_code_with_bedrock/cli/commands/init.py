@@ -130,6 +130,7 @@ class InitCommand(Command):
                     zones=config.get("zones") or [],
                     okta_group_prefix=config.get("okta_group_prefix") or profile_name,
                     cost_tag_key=config.get("cost_attribution_tag_key") or "Project",
+                    dynamic_bootstrap=(config.get("cowork", {}).get("config_mode") == "dynamic"),
                 )
             return 0
 
@@ -250,6 +251,7 @@ class InitCommand(Command):
                 zones=config.get("zones") or [],
                 okta_group_prefix=config.get("okta_group_prefix") or profile_name,
                 cost_tag_key=config.get("cost_attribution_tag_key") or "Project",
+                dynamic_bootstrap=(config.get("cowork", {}).get("config_mode") == "dynamic"),
             )
 
         return 0
@@ -264,6 +266,7 @@ class InitCommand(Command):
         zones: list[str] | None = None,
         okta_group_prefix: str | None = None,
         cost_tag_key: str = "Project",
+        dynamic_bootstrap: bool = False,
     ) -> None:
         """Print the IdP-side setup recipe the admin needs to run to start
         emitting the Project session tag. Dispatches on provider_type:
@@ -286,6 +289,7 @@ class InitCommand(Command):
                 zones=zones or [],
                 okta_group_prefix=okta_group_prefix or profile_name,
                 cost_tag_key=cost_tag_key,
+                dynamic_bootstrap=dynamic_bootstrap,
             )
         else:
             generic_panel = Panel.fit(
@@ -315,6 +319,7 @@ class InitCommand(Command):
         zones: list[str] | None = None,
         okta_group_prefix: str | None = None,
         cost_tag_key: str = "Project",
+        dynamic_bootstrap: bool = False,
     ) -> None:
         """Show the admin the exact Okta claim config for this profile.
 
@@ -375,7 +380,17 @@ class InitCommand(Command):
             f"  [dim]Path[/dim]:  Security → API → Authorization Servers → [white]{cas_id}[/white]\n"
             "         → Claims → Add Claim",
             f"  [dim]Name[/dim]:         [white]https://aws.amazon.com/tags/principal_tags/{cost_tag_key}[/white]",
-            "  [dim]Token type[/dim]:   ID Token, Always",
+            # Claude Desktop sends its ACCESS token to the bootstrap server, and the
+            # Lambda forwards that same token to STS as the WebIdentityToken — so STS
+            # reads session tags from the ACCESS token. ID-token-only claims produce a
+            # successful sign-in whose session carries no tags, and every Bedrock call
+            # then fails with AccessDenied via DenyBedrockInvokeWithoutZone.
+            "  [dim]Token type[/dim]:   "
+            + (
+                "[yellow]ID Token AND Access Token[/yellow], Always"
+                if dynamic_bootstrap
+                else "ID Token, Always"
+            ),
             "  [dim]Value type[/dim]:   Expression",
             f"  [dim]Value[/dim]:        [yellow]{project_expr}[/yellow]",
             "  [dim]Disable if[/dim]:   Empty string",
@@ -387,11 +402,36 @@ class InitCommand(Command):
                 [
                     "[bold]3. Zone claim[/bold] (GDPR — routes to the per-zone inference profile):\n",
                     "  [dim]Name[/dim]:         [white]https://aws.amazon.com/tags/principal_tags/Zone[/white]",
-                    "  [dim]Token type[/dim]:   ID Token, Always",
+                    "  [dim]Token type[/dim]:   "
+                    + (
+                        "[yellow]ID Token AND Access Token[/yellow], Always"
+                        if dynamic_bootstrap
+                        else "ID Token, Always"
+                    ),
                     "  [dim]Value type[/dim]:   Expression",
                     f"  [dim]Value[/dim]:        [yellow]{zone_expr}[/yellow]",
                     "  [dim]Disable if[/dim]:   Empty string",
                     "  [dim]Scopes[/dim]:       openid\n",
+                ]
+            )
+
+        if dynamic_bootstrap:
+            body_lines.extend(
+                [
+                    "[bold yellow]Claude Desktop — the claims MUST also be on the "
+                    "Access Token[/bold yellow]\n",
+                    "Claude Desktop sends its ACCESS token to the bootstrap server, which\n"
+                    "forwards that same token to STS. STS applies session tags from the\n"
+                    "token it is given, so ID-token-only claims mean:\n",
+                    "  • sign-in succeeds and /config returns 200",
+                    "  • the model list looks correct (zone falls back to the group name)",
+                    "  • [red]every Bedrock call then fails with AccessDenied[/red]\n",
+                    "In Okta set Token type to include the access token (choose 'Any', or\n"
+                    "add a second claim of each scoped to the access token). Keep the ID\n"
+                    "Token claims too — Claude Code still uses those.\n",
+                    "Also register [white]http://127.0.0.1:53180/callback[/white] on the Native app\n"
+                    "(Okta allows no wildcard loopback port). If you reuse the Claude Code\n"
+                    "app, it needs BOTH that and its existing localhost:8400 redirect URI.\n",
                 ]
             )
 

@@ -613,3 +613,54 @@ class TestGatherConfigurationScoping:
 if __name__ == "__main__":
     # Run the tests
     pytest.main([__file__, "-v"])
+
+
+class TestOktaClaimTokenTypeGuidance:
+    """The printed Okta recipe must name the right token type.
+
+    Claude Desktop sends its ACCESS token to the bootstrap server, and the Lambda
+    forwards that same token to STS as the WebIdentityToken. STS applies session
+    tags from the token it is given, so ID-token-only tag claims yield a successful
+    sign-in whose session carries no Zone/Project tags — and every Bedrock call then
+    fails with AccessDenied. The guidance has to say so, but only when the bootstrap
+    path is actually in use; Claude Code alone is fine with the ID token.
+    """
+
+    def _render(self, dynamic_bootstrap):
+        from rich.console import Console
+
+        import claude_code_with_bedrock.cli.commands.init as init_module
+
+        console = Console(record=True, width=120)
+        init_module.InitCommand()._print_okta_cost_attribution_hint(
+            console,
+            "demo",
+            "default",
+            isolation_enabled=True,
+            zones=["usa"],
+            okta_group_prefix="ccwb-",
+            cost_tag_key="Project",
+            dynamic_bootstrap=dynamic_bootstrap,
+        )
+        return console.export_text()
+
+    def test_static_path_keeps_id_token_only(self):
+        out = self._render(False)
+        assert "ID Token, Always" in out
+        assert "Access Token" not in out
+
+    def test_dynamic_path_requires_access_token(self):
+        out = self._render(True)
+        assert "ID Token AND Access Token" in out
+        assert "ID Token, Always" not in out
+
+    def test_dynamic_path_explains_the_failure_mode(self):
+        """Without the 'why', an admin may treat it as optional."""
+        out = self._render(True)
+        assert "AccessDenied" in out
+        assert "ACCESS token" in out
+
+    def test_dynamic_path_mentions_the_loopback_redirect_uri(self):
+        """Okta allows no wildcard loopback port, so 53180 must be registered."""
+        out = self._render(True)
+        assert "127.0.0.1:53180/callback" in out
