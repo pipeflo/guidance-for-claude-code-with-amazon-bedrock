@@ -2245,6 +2245,10 @@ class InitCommand(Command):
             "claude_desktop_alb_scheme": config_data.get("claude_desktop", {}).get(
                 "alb_scheme", "internal"
             ),
+            "claude_desktop_create_vpc": config_data.get("claude_desktop", {}).get(
+                "create_vpc", False
+            ),
+            "claude_desktop_vpc_cidr": config_data.get("claude_desktop", {}).get("vpc_cidr", ""),
             "claude_desktop_vpc_id": config_data.get("claude_desktop", {}).get("vpc_id", ""),
             "claude_desktop_subnet_ids": config_data.get("claude_desktop", {}).get("subnet_ids", []),
             "claude_desktop_certificate_arn": config_data.get("claude_desktop", {}).get(
@@ -2640,6 +2644,8 @@ class InitCommand(Command):
                 "role_config": getattr(profile, "claude_desktop_role_config", {}) or {},
                 "feature_defaults": getattr(profile, "claude_desktop_feature_defaults", {}) or {},
                 "alb_scheme": getattr(profile, "claude_desktop_alb_scheme", "") or "internal",
+                "create_vpc": bool(getattr(profile, "claude_desktop_create_vpc", False)),
+                "vpc_cidr": getattr(profile, "claude_desktop_vpc_cidr", "") or "",
                 "vpc_id": getattr(profile, "claude_desktop_vpc_id", "") or "",
                 "subnet_ids": getattr(profile, "claude_desktop_subnet_ids", []) or [],
                 "certificate_arn": getattr(profile, "claude_desktop_certificate_arn", "") or "",
@@ -2815,18 +2821,22 @@ class InitCommand(Command):
                 "already have network access to the VPC, or sign-in will fail.[/dim]"
             )
 
-        # --- VPC ---
+        # --- VPC: use an existing one, or have ccwb create a dedicated one ---
         console.print("\n[yellow]Searching for VPCs...[/yellow]")
         vpcs = get_vpcs(region)
-        if not vpcs:
-            console.print(f"[red]No VPCs found in {region}.[/red]")
-            console.print(
-                "[dim]  Create one (or ask your network team for the VPC and subnet IDs), then "
-                "re-run 'ccwb init'.[/dim]"
-            )
-            return
 
-        vpc_choices = []
+        # The created VPC mirrors the scheme: private => no way in or out at all.
+        if cd["alb_scheme"] == "internal":
+            create_label = (
+                "Create a new VPC (2 private subnets in 2 AZs — no internet gateway, "
+                "no NAT, no route off the VPC)"
+            )
+        else:
+            create_label = (
+                "Create a new VPC (2 public subnets in 2 AZs + internet gateway, no NAT)"
+            )
+
+        vpc_choices = [questionary.Choice(create_label, value="__create__")]
         for vpc in vpcs:
             label = f"{vpc['id']} - {vpc['cidr']}"
             if vpc["name"]:
@@ -2836,62 +2846,105 @@ class InitCommand(Command):
             vpc_choices.append(questionary.Choice(label, value=vpc["id"]))
 
         vpc_id = questionary.select(
-            "VPC for the bootstrap load balancer:",
-            choices=vpc_choices,
-            default=saved_cd.get("vpc_id") if saved_cd.get("vpc_id") else None,
+            "VPC for the bootstrap load balancer:", choices=vpc_choices
         ).ask()
         if not vpc_id:
             return
-        cd["vpc_id"] = vpc_id
-        selected_vpc = next((v for v in vpcs if v["id"] == vpc_id), None)
+
+        if vpc_id == "__create__":
+            cd["create_vpc"] = True
+            cd["vpc_id"] = ""
+            cd["subnet_ids"] = []
+            default_cidr = saved_cd.get("vpc_cidr") or "10.60.0.0/16"
+            cidr = questionary.text(
+                "CIDR for the new VPC (/16 — two /24 subnets are carved from it):",
+                default=default_cidr,
+                validate=lambda t: (
+                    True if t.strip().endswith("/16") else "Must be a /16, e.g. 10.60.0.0/16"
+                ),
+            ).ask()
+            cd["vpc_cidr"] = (cidr or default_cidr).strip()
+            # No NAT: nothing in this VPC needs egress. The load balancer only
+            # receives traffic and the Lambda runs outside the VPC, so a NAT
+            # gateway would cost ~$32/month per AZ and route nothing.
+            console.print(
+                f"[green]✓[/green] A dedicated VPC ([cyan]{cd['vpc_cidr']}[/cyan]) will be created "
+                f"by [cyan]ccwb deploy bootstrap[/cyan] before the bootstrap stack."
+            )
+            if cd["alb_scheme"] == "internal":
+                console.print(
+                    "[yellow]Important:[/yellow] that VPC will be fully private, so "
+                    "[bold]nothing will be able to reach the endpoint yet[/bold]."
+                )
+                console.print(
+                    "[dim]  Before rollout, attach connectivity to it (VPN, Direct Connect, "
+                    "peering, Transit Gateway) or run clients inside the VPC. This solution does "
+                    "not create any of that.[/dim]"
+                )
+            selected_vpc = {"cidr": cd["vpc_cidr"]}
+        else:
+            if not vpcs:
+                return
+            cd["create_vpc"] = False
+            cd["vpc_id"] = vpc_id
+            cd["vpc_cidr"] = ""
+            selected_vpc = next((v for v in vpcs if v["id"] == vpc_id), None)
 
         # --- Subnets (>= 2 distinct AZs, an ALB requirement) ---
-        console.print("\n[yellow]Searching for subnets...[/yellow]")
-        subnets = get_subnets(region, vpc_id)
-        if len(subnets) < 2:
-            console.print(
-                "[red]A load balancer needs at least 2 subnets in different Availability Zones; "
-                f"this VPC has {len(subnets)}.[/red]"
-            )
-            return
-
-        want_private = cd["alb_scheme"] == "internal"
-        subnet_choices = []
-        for subnet in subnets:
-            label = f"{subnet['id']} - {subnet['cidr']} ({subnet['availability_zone']})"
-            if subnet["name"]:
-                label = f"{subnet['name']} - {label}"
-            label = f"{label} [{'PUBLIC' if subnet['is_public'] else 'PRIVATE'}]"
-            subnet_choices.append(
-                questionary.Choice(
-                    label,
-                    value=subnet["id"],
-                    checked=(subnet["is_public"] is not want_private),
+        # Skipped when creating a VPC: CloudFormation mints the subnets, and
+        # `ccwb deploy bootstrap` reads their IDs from the VPC stack's outputs.
+        if not cd["create_vpc"]:
+            console.print("\n[yellow]Searching for subnets...[/yellow]")
+            subnets = get_subnets(region, vpc_id)
+            if len(subnets) < 2:
+                console.print(
+                    "[red]A load balancer needs at least 2 subnets in different Availability "
+                    f"Zones; this VPC has {len(subnets)}.[/red]"
                 )
-            )
+                console.print(
+                    "[dim]  Add subnets, or re-run and choose 'Create a new VPC'.[/dim]"
+                )
+                return
 
-        selected = questionary.checkbox(
-            "Select at least 2 subnets in different AZs:", choices=subnet_choices
-        ).ask()
-        if not selected or len(selected) < 2:
-            console.print("[red]At least 2 subnets are required — skipping endpoint setup.[/red]")
-            return
+            want_private = cd["alb_scheme"] == "internal"
+            subnet_choices = []
+            for subnet in subnets:
+                label = f"{subnet['id']} - {subnet['cidr']} ({subnet['availability_zone']})"
+                if subnet["name"]:
+                    label = f"{subnet['name']} - {label}"
+                label = f"{label} [{'PUBLIC' if subnet['is_public'] else 'PRIVATE'}]"
+                subnet_choices.append(
+                    questionary.Choice(
+                        label,
+                        value=subnet["id"],
+                        checked=(subnet["is_public"] is not want_private),
+                    )
+                )
 
-        azs = {s["availability_zone"] for s in subnets if s["id"] in selected}
-        if len(azs) < 2:
-            console.print(
-                "[red]The selected subnets are all in one Availability Zone. A load balancer "
-                "needs two — skipping endpoint setup.[/red]"
-            )
-            return
-        cd["subnet_ids"] = selected
+            selected = questionary.checkbox(
+                "Select at least 2 subnets in different AZs:", choices=subnet_choices
+            ).ask()
+            if not selected or len(selected) < 2:
+                console.print(
+                    "[red]At least 2 subnets are required — skipping endpoint setup.[/red]"
+                )
+                return
 
-        if want_private and any(s["is_public"] for s in subnets if s["id"] in selected):
-            console.print(
-                "[yellow]Warning:[/yellow] you selected a public subnet for an internal load "
-                "balancer. It still gets only private IPs, so this works, but private subnets "
-                "are the cleaner choice."
-            )
+            azs = {s["availability_zone"] for s in subnets if s["id"] in selected}
+            if len(azs) < 2:
+                console.print(
+                    "[red]The selected subnets are all in one Availability Zone. A load balancer "
+                    "needs two — skipping endpoint setup.[/red]"
+                )
+                return
+            cd["subnet_ids"] = selected
+
+            if want_private and any(s["is_public"] for s in subnets if s["id"] in selected):
+                console.print(
+                    "[yellow]Warning:[/yellow] you selected a public subnet for an internal load "
+                    "balancer. It still gets only private IPs, so this works, but private subnets "
+                    "are the cleaner choice."
+                )
 
         # --- Certificate (never created here: DNS validation would hang the stack) ---
         console.print(
@@ -2971,10 +3024,16 @@ class InitCommand(Command):
                 "at the AlbDnsName stack output.[/dim]"
             )
 
-        console.print(
-            f"[green]✓[/green] Endpoint: [cyan]{cd['alb_scheme']}[/cyan] load balancer in "
-            f"[cyan]{cd['vpc_id']}[/cyan] across {len(cd['subnet_ids'])} subnets"
-        )
+        if cd["create_vpc"]:
+            console.print(
+                f"[green]✓[/green] Endpoint: [cyan]{cd['alb_scheme']}[/cyan] load balancer in a "
+                f"new VPC ([cyan]{cd['vpc_cidr']}[/cyan]), created at deploy time"
+            )
+        else:
+            console.print(
+                f"[green]✓[/green] Endpoint: [cyan]{cd['alb_scheme']}[/cyan] load balancer in "
+                f"[cyan]{cd['vpc_id']}[/cyan] across {len(cd['subnet_ids'])} subnets"
+            )
 
     def _configure_vpc(self, region: str, existing_vpc_config: dict[str, Any] = None) -> dict[str, Any]:
         """Configure VPC for monitoring stack."""

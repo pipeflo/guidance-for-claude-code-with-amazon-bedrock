@@ -544,6 +544,23 @@ class TestExistingConfigRoundTrip:
 
         assert existing["claude_desktop"]["alb_scheme"] == "internal"
         assert existing["claude_desktop"]["subnet_ids"] == []
+        # Bring-your-own-VPC is the default; creating one is opt-in.
+        assert existing["claude_desktop"]["create_vpc"] is False
+
+    def test_create_vpc_settings_preserved(self, monkeypatch):
+        """create_vpc + the CIDR survive, so re-running init doesn't silently
+        switch a customer from 'create a VPC' back to 'pick an existing one'."""
+        profile = self._make_profile(
+            cowork_config_mode="dynamic",
+            claude_desktop_create_vpc=True,
+            claude_desktop_vpc_cidr="10.77.0.0/16",
+            claude_desktop_alb_scheme="internal",
+        )
+        existing = self._build_existing_config(profile, monkeypatch)
+
+        cd = existing["claude_desktop"]
+        assert cd["create_vpc"] is True
+        assert cd["vpc_cidr"] == "10.77.0.0/16"
 
     def test_quota_fields_preserved(self, monkeypatch):
         """Daily limit and enforcement modes survive (previously dropped)."""

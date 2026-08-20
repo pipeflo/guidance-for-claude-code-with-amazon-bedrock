@@ -170,11 +170,17 @@ class DeployCommand(Command):
                         "[yellow]Bootstrap server requires OIDC/SSO authentication (sso_enabled).[/yellow]"
                     )
                     return 1
+                # The VPC stack must land first — the bootstrap stack reads its outputs.
+                if getattr(profile, "claude_desktop_create_vpc", False):
+                    stacks_to_deploy.append(
+                        ("bootstrap-networking", "VPC for the Bootstrap Server load balancer")
+                    )
                 stacks_to_deploy.append(("bootstrap", "Claude Desktop Bootstrap Server"))
             else:
                 console.print(f"[red]Unknown stack: {stack_arg}[/red]")
                 console.print(
                     "Valid stacks: auth, distribution, networking, monitoring, dashboard, cowork-dashboard, analytics, quota, codebuild, bootstrap\n"
+                    "The bootstrap VPC stack, when enabled, is deployed automatically as part of 'bootstrap'.\n"
                 )
                 console.print("[dim]Tip: Use 'ccwb deploy' without arguments to deploy all enabled stacks.[/dim]")
                 console.print("[dim]Use 'ccwb deploy quota' for quota-specific updates or late enablement.[/dim]")
@@ -228,6 +234,11 @@ class DeployCommand(Command):
             # Check if bootstrap server is enabled (dynamic CoWork config delivery)
             if getattr(profile, "cowork_config_mode", "static") == "dynamic":
                 if getattr(profile, "sso_enabled", True):
+                    # VPC stack first when we're creating one; bootstrap reads its outputs.
+                    if getattr(profile, "claude_desktop_create_vpc", False):
+                        stacks_to_deploy.append(
+                            ("bootstrap-networking", "VPC for the Bootstrap Server load balancer")
+                        )
                     stacks_to_deploy.append(("bootstrap", "Claude Desktop Bootstrap Server"))
 
         # Initialize CloudFormation manager
@@ -673,6 +684,38 @@ class DeployCommand(Command):
                         ["CAPABILITY_NAMED_IAM"],
                         task_description="Deploying presigned S3 distribution stack...",
                     )
+
+            elif stack_type == "bootstrap-networking":
+                # Optional VPC for the bootstrap load balancer. Shape follows the
+                # scheme: internal => fully private (no IGW/NAT/route out);
+                # internet-facing => public subnets + IGW. Never a NAT gateway —
+                # nothing in this VPC needs egress (see the template header).
+                template = project_root / "deployment" / "infrastructure" / "bootstrap-networking.yaml"
+                stack_name = profile.stack_names.get(
+                    "bootstrap-networking", f"{profile.identity_pool_name}-bootstrap-networking"
+                )
+                alb_scheme = getattr(profile, "claude_desktop_alb_scheme", "") or "internal"
+                params = [
+                    f"AlbScheme={alb_scheme}",
+                    f"VpcCidr={getattr(profile, 'claude_desktop_vpc_cidr', '') or '10.60.0.0/16'}",
+                ]
+                result = deploy_with_cf(
+                    template,
+                    stack_name,
+                    params,
+                    task_description="Deploying VPC for the Bootstrap Server load balancer...",
+                )
+                if result == 0 and alb_scheme == "internal":
+                    console.print(
+                        "\n[yellow]This VPC is fully private[/yellow] — no internet gateway, no NAT, "
+                        "no route off the VPC."
+                    )
+                    console.print(
+                        "[dim]  Nothing can reach the bootstrap endpoint until you attach "
+                        "connectivity (VPN, Direct Connect, peering) or place clients inside "
+                        "this VPC.[/dim]"
+                    )
+                return result
 
             elif stack_type == "networking":
                 template = project_root / "deployment" / "infrastructure" / "networking.yaml"
@@ -1133,6 +1176,34 @@ class DeployCommand(Command):
                 subnet_ids = list(getattr(profile, "claude_desktop_subnet_ids", []) or [])
                 certificate_arn = getattr(profile, "claude_desktop_certificate_arn", "") or ""
                 alb_ingress_cidr = getattr(profile, "claude_desktop_alb_ingress_cidr", "") or ""
+
+                # When we created the VPC, its stack is the source of truth — the
+                # profile has no subnet IDs to record, since CloudFormation minted them.
+                if getattr(profile, "claude_desktop_create_vpc", False):
+                    net_stack = profile.stack_names.get(
+                        "bootstrap-networking", f"{profile.identity_pool_name}-bootstrap-networking"
+                    )
+                    net_outputs = get_stack_outputs(net_stack, profile.aws_region) or {}
+                    if not net_outputs.get("VpcId") or not net_outputs.get("SubnetIds"):
+                        console.print(
+                            f"[red]Could not read VPC outputs from stack '{net_stack}'.[/red]"
+                        )
+                        console.print(
+                            "[dim]Your profile requests a new VPC, so that stack must deploy first. "
+                            "Run 'ccwb deploy bootstrap' (which deploys both in order) rather than "
+                            "deploying this stack on its own.[/dim]"
+                        )
+                        return 1
+                    vpc_id = net_outputs["VpcId"]
+                    subnet_ids = [s for s in net_outputs["SubnetIds"].split(",") if s]
+                    # Default ingress to the new VPC's CIDR — the admin never saw it
+                    # to type it in, and for a private VPC this is the only sane value.
+                    if not alb_ingress_cidr:
+                        alb_ingress_cidr = net_outputs.get("VpcCidr", "") or ""
+                    console.print(
+                        f"[dim]Using the VPC created by '{net_stack}': {vpc_id} "
+                        f"({len(subnet_ids)} subnets)[/dim]"
+                    )
                 alb_additional_cidr = (
                     getattr(profile, "claude_desktop_alb_additional_ingress_cidr", "") or ""
                 )
@@ -1373,6 +1444,17 @@ class DeployCommand(Command):
                     f"EnableMonitoring={str(profile.monitoring_enabled).lower()}",
                 ])
                 print_deploy_cmd(template, stack_name, params, ["CAPABILITY_NAMED_IAM"])
+
+        elif stack_type == "bootstrap-networking":
+            template = project_root / "deployment" / "infrastructure" / "bootstrap-networking.yaml"
+            stack_name = profile.stack_names.get(
+                "bootstrap-networking", f"{profile.identity_pool_name}-bootstrap-networking"
+            )
+            params = [
+                f"AlbScheme={getattr(profile, 'claude_desktop_alb_scheme', '') or 'internal'}",
+                f"VpcCidr={getattr(profile, 'claude_desktop_vpc_cidr', '') or '10.60.0.0/16'}",
+            ]
+            print_deploy_cmd(template, stack_name, params)
 
         elif stack_type == "networking":
             template = project_root / "deployment" / "infrastructure" / "networking.yaml"

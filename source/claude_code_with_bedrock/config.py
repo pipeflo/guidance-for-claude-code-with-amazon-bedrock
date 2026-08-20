@@ -195,6 +195,12 @@ class Profile:
     # solution deliberately does NOT provision. The VPC, subnets, certificate and
     # DNS are all customer-supplied; see assets/docs/BOOTSTRAP_SERVER.md.
     claude_desktop_alb_scheme: str = "internal"
+    # When True, `ccwb deploy bootstrap` deploys bootstrap-networking.yaml FIRST and
+    # reads VpcId/SubnetIds from its outputs, ignoring the two fields below. The
+    # created VPC follows the scheme: internal => fully private (no IGW/NAT/route
+    # out); internet-facing => public subnets + IGW. Never a NAT gateway.
+    claude_desktop_create_vpc: bool = False
+    claude_desktop_vpc_cidr: str = "10.60.0.0/16"  # only used when creating a VPC
     claude_desktop_vpc_id: str = ""
     claude_desktop_subnet_ids: list = field(default_factory=list)  # >= 2, different AZs
     claude_desktop_certificate_arn: str = ""  # ACM cert in the deploy region
