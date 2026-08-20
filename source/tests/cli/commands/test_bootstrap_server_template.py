@@ -41,11 +41,28 @@ class TestPrivateEndpoint:
         cfg = tpl["Resources"]["BootstrapApi"]["Properties"]["EndpointConfiguration"]
         assert cfg["Types"] == ["PRIVATE"]
 
-    def test_api_is_associated_with_the_vpc_endpoint(self, tpl):
+    def test_association_is_conditional(self, tpl):
         """Association yields the {api-id}-{vpce-id} hostname, which needs NO Host or
-        x-apigw-api-id header — Claude Desktop cannot send one."""
+        x-apigw-api-id header — Claude Desktop cannot send one. But association is
+        same-account only, so a central-networking-account endpoint must be able to
+        opt out rather than produce an un-deployable stack."""
         cfg = tpl["Resources"]["BootstrapApi"]["Properties"]["EndpointConfiguration"]
         assert "VpcEndpointIds" in cfg
+        assert "AssociateEndpoint" in str(cfg["VpcEndpointIds"])
+        assert "AssociateEndpoint" in tpl["Conditions"]
+
+    def test_created_endpoint_is_always_associated(self, tpl):
+        """An endpoint we create is local by definition, so the condition must be
+        true whenever VpcEndpointId is empty — otherwise the common path would lose
+        its header-free hostname."""
+        cond = str(tpl["Conditions"]["AssociateEndpoint"])
+        assert "VpcEndpointId" in cond
+        assert "Fn::Or" in cond
+
+    def test_url_falls_back_when_not_associated(self, tpl):
+        """Without association the dedicated hostname does not exist, so BootstrapUrl
+        must switch to the standard execute-api hostname."""
+        assert "AssociateEndpoint" in str(tpl["Outputs"]["BootstrapUrl"]["Value"])
 
     def test_created_endpoint_leaves_private_dns_off(self, tpl):
         """Enabling private DNS hijacks execute-api for the WHOLE VPC, breaking any

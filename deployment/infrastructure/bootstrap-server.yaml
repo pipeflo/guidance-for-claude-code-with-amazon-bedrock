@@ -151,6 +151,18 @@ Parameters:
       plus, via routing, your VPN clients. Ignored when VpcEndpointId is supplied.
     Default: "10.0.0.0/8"
 
+  AssociateVpcEndpoint:
+    Type: String
+    Description: >
+      Associate the API with the VPC endpoint. Association yields the dedicated
+      hostname {api-id}-{vpce-id}.execute-api... which needs no request header, and
+      is the right choice for an endpoint in THIS account. Set to "false" when the
+      endpoint lives in another account (e.g. a central networking account), where
+      association is not possible: rely on private DNS on that endpoint and use the
+      BootstrapUrlPrivateDns form instead.
+    Default: "true"
+    AllowedValues: ["true", "false"]
+
   StageName:
     Type: String
     Description: "REST API stage name. Appears in the invoke URL path."
@@ -160,6 +172,13 @@ Parameters:
 Conditions:
   # Create the endpoint only when the admin didn't point us at one.
   CreateVpcEndpoint: !Equals [!Ref VpcEndpointId, ""]
+
+  # A VPC endpoint in another account cannot be associated with this API, so the
+  # dedicated {api-id}-{vpce-id} hostname is unavailable there. An endpoint we
+  # create is always local, so it is always associated.
+  AssociateEndpoint: !Or
+    - !Equals [!Ref VpcEndpointId, ""]
+    - !Equals [!Ref AssociateVpcEndpoint, "true"]
 
 Resources:
   BootstrapFunction:
@@ -269,8 +288,12 @@ Resources:
       EndpointConfiguration:
         Types:
           - PRIVATE
-        VpcEndpointIds:
-          - !If [CreateVpcEndpoint, !Ref ExecuteApiEndpoint, !Ref VpcEndpointId]
+        # Omitted for a cross-account endpoint: association is same-account only.
+        # The resource policy below is what grants access either way.
+        VpcEndpointIds: !If
+          - AssociateEndpoint
+          - - !If [CreateVpcEndpoint, !Ref ExecuteApiEndpoint, !Ref VpcEndpointId]
+          - !Ref AWS::NoValue
       # A PRIVATE API is inaccessible to every VPC until a resource policy grants
       # access. Scope it to the one endpoint so another VPC endpoint in any account
       # cannot invoke it. Enforced at the edge, before the Lambda runs.
@@ -345,13 +368,18 @@ Resources:
 Outputs:
   BootstrapUrl:
     Description: >
-      Endpoint for the MDM bootstrapUrl key. Uses the endpoint-associated hostname,
-      which works whether or not private DNS is enabled on the VPC endpoint and
-      needs no extra request header.
-    Value: !Sub
-      - "https://${ApiId}-${VpceId}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/config"
-      - ApiId: !Ref BootstrapApi
-        VpceId: !If [CreateVpcEndpoint, !Ref ExecuteApiEndpoint, !Ref VpcEndpointId]
+      Endpoint for the MDM bootstrapUrl key. When the API is associated with the VPC
+      endpoint this is the dedicated {api-id}-{vpce-id} hostname, which works whether
+      or not private DNS is enabled and needs no extra request header. For a
+      cross-account endpoint it falls back to the standard hostname, which REQUIRES
+      private DNS enabled on that endpoint.
+    Value: !If
+      - AssociateEndpoint
+      - !Sub
+        - "https://${ApiId}-${VpceId}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/config"
+        - ApiId: !Ref BootstrapApi
+          VpceId: !If [CreateVpcEndpoint, !Ref ExecuteApiEndpoint, !Ref VpcEndpointId]
+      - !Sub "https://${BootstrapApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/config"
     Export:
       Name: !Sub "${AWS::StackName}-BootstrapUrl"
 

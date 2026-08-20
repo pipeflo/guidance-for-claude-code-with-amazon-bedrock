@@ -524,6 +524,18 @@ class TestExistingConfigRoundTrip:
         assert cd["vpc_endpoint_id"] == "vpce-0abc123"
         assert cd["stage_name"] == "prod"
 
+    def test_cross_account_endpoint_flag_preserved(self, monkeypatch):
+        """A central-networking-account endpoint cannot be associated. Losing that
+        flag would flip the URL back to a hostname that does not exist."""
+        profile = self._make_profile(
+            cowork_config_mode="dynamic",
+            claude_desktop_vpc_endpoint_id="vpce-0central",
+            claude_desktop_associate_vpc_endpoint=False,
+        )
+        cd = self._build_existing_config(profile, monkeypatch)["claude_desktop"]
+        assert cd["vpc_endpoint_id"] == "vpce-0central"
+        assert cd["associate_vpc_endpoint"] is False
+
     def test_endpoint_creation_settings_preserved(self, monkeypatch):
         """The create-an-endpoint path keeps its VPC, subnets and ingress CIDR."""
         profile = self._make_profile(
@@ -547,6 +559,8 @@ class TestExistingConfigRoundTrip:
         assert cd["vpc_endpoint_id"] == ""
         assert cd["subnet_ids"] == []
         assert cd["stage_name"] == "prod"
+        # Default is to associate: the common path creates a local endpoint.
+        assert cd["associate_vpc_endpoint"] is True
 
     def test_quota_fields_preserved(self, monkeypatch):
         """Daily limit and enforcement modes survive (previously dropped)."""

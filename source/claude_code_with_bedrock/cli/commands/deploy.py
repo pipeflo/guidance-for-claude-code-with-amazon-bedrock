@@ -1137,6 +1137,7 @@ class DeployCommand(Command):
                 subnet_ids = list(getattr(profile, "claude_desktop_subnet_ids", []) or [])
                 ingress_cidr = getattr(profile, "claude_desktop_endpoint_ingress_cidr", "") or ""
                 stage_name = getattr(profile, "claude_desktop_stage_name", "") or "prod"
+                associate = getattr(profile, "claude_desktop_associate_vpc_endpoint", True)
 
                 if not vpc_endpoint_id and (not vpc_id or not subnet_ids):
                     console.print(
@@ -1153,7 +1154,13 @@ class DeployCommand(Command):
                     )
                     return 1
 
-                if vpc_endpoint_id:
+                if vpc_endpoint_id and not associate:
+                    console.print(
+                        f"[dim]Serving through {vpc_endpoint_id} in another account. Clients will use "
+                        f"the standard execute-api hostname, so private DNS must be enabled on that "
+                        f"endpoint.[/dim]"
+                    )
+                elif vpc_endpoint_id:
                     console.print(f"[dim]Serving through existing VPC endpoint {vpc_endpoint_id}.[/dim]")
                 else:
                     console.print(
@@ -1178,6 +1185,7 @@ class DeployCommand(Command):
                     f"VpcId={vpc_id}",
                     f"SubnetIds={','.join(subnet_ids)}",
                     f"StageName={stage_name}",
+                    f"AssociateVpcEndpoint={'true' if associate else 'false'}",
                 ]
                 # Omitted when empty so the template default applies.
                 if ingress_cidr:

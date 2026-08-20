@@ -138,6 +138,34 @@ It is the `BootstrapUrl` output, and it works whether or not private DNS is on.
 If you already run an endpoint **with** private DNS enabled, the standard hostname
 also works and is emitted as `BootstrapUrlPrivateDns`.
 
+### Centralised endpoints in a networking account
+
+If your organisation keeps all interface endpoints in a central networking account,
+you do **not** need a VPC endpoint — or even a VPC — in the account running this
+stack. PrivateLink supports this directly:
+
+> *"PrivateLink allows access to private API Gateway endpoints in different AWS
+> accounts, without VPC peering, VPN connections, or AWS Transit Gateway. A single
+> `execute-api` endpoint is used to connect to any API Gateway, regardless of which
+> AWS account the destination API Gateway is in. Resource policies control which VPC
+> endpoints have access."*
+
+Supply the central endpoint's ID as `VpcEndpointId` and set
+`AssociateVpcEndpoint: false`. In `ccwb init`, choose **"Enter an endpoint ID
+manually"** and answer *no* to "is that endpoint in THIS AWS account?" — the wizard
+cannot discover endpoints in other accounts, so this is the only way to name one.
+
+Two consequences:
+
+- **The resource policy is the access control**, and it names that endpoint. Nothing
+  else changes.
+- **Association is same-account only**, so the dedicated `{api-id}-{vpce-id}`
+  hostname is unavailable. Clients use the standard
+  `{api-id}.execute-api.{region}.amazonaws.com` hostname instead, which **requires
+  private DNS enabled** on the central endpoint. That is normal in a centralised
+  setup — sharing the private hosted zone to spoke VPCs is the point of it — but
+  confirm it with your networking team rather than assuming.
+
 ### Devices must resolve that hostname
 
 The invoke hostname is public DNS, but it resolves to the endpoint's **private**

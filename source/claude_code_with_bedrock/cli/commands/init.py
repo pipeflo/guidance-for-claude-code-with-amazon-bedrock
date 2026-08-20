@@ -2254,6 +2254,9 @@ class InitCommand(Command):
             "claude_desktop_stage_name": config_data.get("claude_desktop", {}).get(
                 "stage_name", "prod"
             ),
+            "claude_desktop_associate_vpc_endpoint": config_data.get("claude_desktop", {}).get(
+                "associate_vpc_endpoint", True
+            ),
         }
 
         # Look for an existing profile to update; otherwise create a new one.
@@ -2641,6 +2644,9 @@ class InitCommand(Command):
                 )
                 or "",
                 "stage_name": getattr(profile, "claude_desktop_stage_name", "") or "prod",
+                "associate_vpc_endpoint": bool(
+                    getattr(profile, "claude_desktop_associate_vpc_endpoint", True)
+                ),
             }
 
             # Add analytics configuration if present
@@ -2813,17 +2819,66 @@ class InitCommand(Command):
         choices.append(
             questionary.Choice("Create a new execute-api VPC endpoint", value="__create__")
         )
+        # Endpoints in a CENTRAL networking account are invisible to
+        # describe-vpc-endpoints here, so they have to be entered by hand. This is a
+        # common enterprise topology, and PrivateLink supports it: one endpoint can
+        # reach a private API in any account, with the resource policy granting it.
+        choices.append(
+            questionary.Choice(
+                "Enter an endpoint ID manually (e.g. in a central networking account)",
+                value="__manual__",
+            )
+        )
 
         if existing:
             console.print(
                 f"\n[green]Found {len(existing)} existing execute-api endpoint(s) in {region}.[/green]"
             )
-            picked = questionary.select("execute-api VPC endpoint:", choices=choices).ask()
         else:
-            console.print(f"\n[dim]No execute-api VPC endpoint found in {region}; one will be created.[/dim]")
-            picked = "__create__"
+            console.print(
+                f"\n[dim]No execute-api VPC endpoint found in this account in {region}.[/dim]"
+            )
+        picked = questionary.select("execute-api VPC endpoint:", choices=choices).ask()
 
         if not picked:
+            return
+
+        if picked == "__manual__":
+            ep_id = questionary.text(
+                "execute-api VPC endpoint ID (vpce-...):",
+                default=saved_cd.get("vpc_endpoint_id", ""),
+                validate=lambda x: (
+                    True if x.strip().startswith("vpce-") else "Enter a VPC endpoint ID, e.g. vpce-0abc123"
+                ),
+            ).ask()
+            if not ep_id:
+                return
+            cd["vpc_endpoint_id"] = ep_id.strip()
+            cd["vpc_id"] = ""
+            cd["subnet_ids"] = []
+            cd["endpoint_ingress_cidr"] = ""
+
+            # Association is same-account only, so a central endpoint can't provide
+            # the {api-id}-{vpce-id} hostname. Those setups normally already enable
+            # private DNS and share the hosted zone to spoke VPCs.
+            same_account = questionary.confirm(
+                "Is that endpoint in THIS AWS account?", default=False
+            ).ask()
+            cd["associate_vpc_endpoint"] = bool(same_account)
+            if not same_account:
+                console.print(
+                    "[yellow]Cross-account endpoint:[/yellow] the API cannot be associated with it, "
+                    "so the dedicated hostname isn't available."
+                )
+                console.print(
+                    "[dim]  Clients will use the standard execute-api hostname, which requires "
+                    "[bold]private DNS enabled[/bold] on that endpoint (usual in a centralised "
+                    "setup). Your networking team must also add this API's VPC endpoint to their "
+                    "resolver/hosted-zone sharing, and nothing needs to exist in this account's "
+                    "VPC.[/dim]"
+                )
+            cd["stage_name"] = saved_cd.get("stage_name") or "prod"
+            console.print(f"[green]\u2713[/green] Using endpoint [cyan]{cd['vpc_endpoint_id']}[/cyan]")
             return
 
         if picked != "__create__":
@@ -2831,9 +2886,11 @@ class InitCommand(Command):
             cd["vpc_id"] = ""
             cd["subnet_ids"] = []
             cd["endpoint_ingress_cidr"] = ""
+            cd["associate_vpc_endpoint"] = True  # discovered here, so same account
             console.print(f"[green]\u2713[/green] Using existing endpoint [cyan]{picked}[/cyan]")
         else:
             cd["vpc_endpoint_id"] = ""
+            cd["associate_vpc_endpoint"] = True  # we create it, so always local
             console.print("\n[yellow]Searching for VPCs...[/yellow]")
             vpcs = get_vpcs(region)
             if not vpcs:

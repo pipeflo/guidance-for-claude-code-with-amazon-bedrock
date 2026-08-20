@@ -201,6 +201,10 @@ class Profile:
     claude_desktop_subnet_ids: list = field(default_factory=list)
     claude_desktop_endpoint_ingress_cidr: str = ""  # defaults to the VPC CIDR
     claude_desktop_stage_name: str = "prod"
+    # False when the endpoint lives in another account (e.g. a central networking
+    # account): association is same-account only, so clients then use the standard
+    # execute-api hostname, which needs private DNS on that endpoint.
+    claude_desktop_associate_vpc_endpoint: bool = True
 
     # Legacy field support
     @property
