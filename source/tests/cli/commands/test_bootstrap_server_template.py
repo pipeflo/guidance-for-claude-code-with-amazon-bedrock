@@ -38,7 +38,7 @@ def tpl():
 class TestPrivateEndpoint:
     def test_api_is_private(self, tpl):
         """The entire point. A REST API is the only kind that can be PRIVATE."""
-        cfg = tpl["Resources"]["BootstrapApi"]["Properties"]["EndpointConfiguration"]
+        cfg = tpl["Resources"]["BootstrapRestApi"]["Properties"]["EndpointConfiguration"]
         assert cfg["Types"] == ["PRIVATE"]
 
     def test_association_is_conditional(self, tpl):
@@ -46,7 +46,7 @@ class TestPrivateEndpoint:
         x-apigw-api-id header — Claude Desktop cannot send one. But association is
         same-account only, so a central-networking-account endpoint must be able to
         opt out rather than produce an un-deployable stack."""
-        cfg = tpl["Resources"]["BootstrapApi"]["Properties"]["EndpointConfiguration"]
+        cfg = tpl["Resources"]["BootstrapRestApi"]["Properties"]["EndpointConfiguration"]
         assert "VpcEndpointIds" in cfg
         assert "AssociateEndpoint" in str(cfg["VpcEndpointIds"])
         assert "AssociateEndpoint" in tpl["Conditions"]
@@ -85,16 +85,39 @@ class TestPrivateEndpoint:
         assert "AWS::EC2::InternetGateway" not in types
 
 
+class TestUpgradeSafety:
+    """CloudFormation cannot change a logical ID's resource type.
+
+    Earlier releases shipped BootstrapApi / BootstrapApiStage as
+    AWS::ApiGatewayV2::Api / ::Stage. Reusing those IDs for the REST equivalents
+    makes every existing stack fail to update with "Update of resource type is not
+    permitted" — which is exactly what happened once. Keep the new names.
+    """
+
+    _LEGACY_V2_IDS = ("BootstrapApi", "BootstrapApiStage")
+
+    def test_does_not_reuse_legacy_apigatewayv2_logical_ids(self, tpl):
+        for legacy in self._LEGACY_V2_IDS:
+            assert legacy not in tpl["Resources"], (
+                f"{legacy} was an ApiGatewayV2 resource in earlier releases; reusing "
+                f"the logical ID for a different type breaks in-place stack updates"
+            )
+
+    def test_rest_resources_use_the_new_ids(self, tpl):
+        assert tpl["Resources"]["BootstrapRestApi"]["Type"] == "AWS::ApiGateway::RestApi"
+        assert tpl["Resources"]["BootstrapRestApiStage"]["Type"] == "AWS::ApiGateway::Stage"
+
+
 class TestResourcePolicy:
     def test_policy_exists(self, tpl):
         """A PRIVATE API is inaccessible to every VPC until a policy grants access,
         so a missing policy is a dead endpoint, not an open one."""
-        assert "Policy" in tpl["Resources"]["BootstrapApi"]["Properties"]
+        assert "Policy" in tpl["Resources"]["BootstrapRestApi"]["Properties"]
 
     def test_policy_scopes_to_source_vpce_both_ways(self, tpl):
         """Allow from our endpoint AND explicitly Deny everything else, so another
         VPC endpoint in any account cannot invoke it."""
-        stmts = tpl["Resources"]["BootstrapApi"]["Properties"]["Policy"]["Statement"]
+        stmts = tpl["Resources"]["BootstrapRestApi"]["Properties"]["Policy"]["Statement"]
         effects = {s["Effect"] for s in stmts}
         assert effects == {"Allow", "Deny"}
         rendered = str(stmts)
@@ -136,7 +159,7 @@ class TestRouting:
     def test_deployment_waits_for_the_method(self, tpl):
         """Without DependsOn, the deployment can be created before the method and
         the stage serves a 403."""
-        assert tpl["Resources"]["BootstrapApiDeployment"].get("DependsOn") == "ConfigMethod"
+        assert tpl["Resources"]["BootstrapRestApiDeployment"].get("DependsOn") == "ConfigMethod"
 
     def test_stage_is_parameterised_and_in_the_url(self, tpl):
         assert "StageName" in tpl["Parameters"]
@@ -162,5 +185,5 @@ class TestLambdaAndOutputs:
 
     def test_partition_not_hardcoded(self, tpl):
         """GovCloud support: ARNs must use ${AWS::Partition}."""
-        rendered = str(tpl["Resources"]["BootstrapApiPermission"]["Properties"]["SourceArn"])
+        rendered = str(tpl["Resources"]["BootstrapRestApiPermission"]["Properties"]["SourceArn"])
         assert "AWS::Partition" in rendered

@@ -279,8 +279,15 @@ Resources:
 
   # ---------------------------------------------------------------------------
   # Private REST API
+  #
+  # NOTE ON LOGICAL IDS: these are deliberately BootstrapRestApi* and not
+  # BootstrapApi*. Earlier releases used AWS::ApiGatewayV2::Api / ::Stage under the
+  # logical IDs BootstrapApi and BootstrapApiStage, and CloudFormation refuses to
+  # change the resource type of an existing logical ID ("Update of resource type is
+  # not permitted"). Renaming lets CFN delete the old pair and create these, so
+  # existing stacks update in place. Do NOT rename them back.
   # ---------------------------------------------------------------------------
-  BootstrapApi:
+  BootstrapRestApi:
     Type: AWS::ApiGateway::RestApi
     Properties:
       Name: !Sub "${AWS::StackName}-api"
@@ -324,8 +331,8 @@ Resources:
   ConfigResource:
     Type: AWS::ApiGateway::Resource
     Properties:
-      RestApiId: !Ref BootstrapApi
-      ParentId: !GetAtt BootstrapApi.RootResourceId
+      RestApiId: !Ref BootstrapRestApi
+      ParentId: !GetAtt BootstrapRestApi.RootResourceId
       PathPart: "config"
 
   # ANY so the Lambda also sees OPTIONS and can answer CORS preflight itself.
@@ -333,7 +340,7 @@ Resources:
   ConfigMethod:
     Type: AWS::ApiGateway::Method
     Properties:
-      RestApiId: !Ref BootstrapApi
+      RestApiId: !Ref BootstrapRestApi
       ResourceId: !Ref ConfigResource
       HttpMethod: ANY
       # Authorization is the STS exchange inside the Lambda, plus the resource
@@ -344,26 +351,26 @@ Resources:
         IntegrationHttpMethod: POST
         Uri: !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${BootstrapFunction.Arn}/invocations"
 
-  BootstrapApiDeployment:
+  BootstrapRestApiDeployment:
     Type: AWS::ApiGateway::Deployment
     DependsOn: ConfigMethod
     Properties:
-      RestApiId: !Ref BootstrapApi
+      RestApiId: !Ref BootstrapRestApi
 
-  BootstrapApiStage:
+  BootstrapRestApiStage:
     Type: AWS::ApiGateway::Stage
     Properties:
-      RestApiId: !Ref BootstrapApi
-      DeploymentId: !Ref BootstrapApiDeployment
+      RestApiId: !Ref BootstrapRestApi
+      DeploymentId: !Ref BootstrapRestApiDeployment
       StageName: !Ref StageName
 
-  BootstrapApiPermission:
+  BootstrapRestApiPermission:
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !Ref BootstrapFunction
       Action: "lambda:InvokeFunction"
       Principal: apigateway.amazonaws.com
-      SourceArn: !Sub "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${BootstrapApi}/*"
+      SourceArn: !Sub "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${BootstrapRestApi}/*"
 
 Outputs:
   BootstrapUrl:
@@ -377,9 +384,9 @@ Outputs:
       - AssociateEndpoint
       - !Sub
         - "https://${ApiId}-${VpceId}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/config"
-        - ApiId: !Ref BootstrapApi
+        - ApiId: !Ref BootstrapRestApi
           VpceId: !If [CreateVpcEndpoint, !Ref ExecuteApiEndpoint, !Ref VpcEndpointId]
-      - !Sub "https://${BootstrapApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/config"
+      - !Sub "https://${BootstrapRestApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/config"
     Export:
       Name: !Sub "${AWS::StackName}-BootstrapUrl"
 
@@ -387,7 +394,7 @@ Outputs:
     Description: >
       Alternative URL, valid ONLY if private DNS is enabled on the execute-api
       endpoint. Enabling it affects the whole VPC, so prefer BootstrapUrl.
-    Value: !Sub "https://${BootstrapApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/config"
+    Value: !Sub "https://${BootstrapRestApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/config"
 
   BootstrapFunctionArn:
     Description: "Bootstrap Lambda function ARN"
@@ -399,4 +406,4 @@ Outputs:
 
   RestApiId:
     Description: "Private REST API ID"
-    Value: !Ref BootstrapApi
+    Value: !Ref BootstrapRestApi
