@@ -21,7 +21,11 @@ class DestroyCommand(Command):
     arguments = [
         argument(
             "stack",
-            description="Specific stack to destroy (auth/networking/monitoring/dashboard/analytics)",
+            description=(
+                "Specific stack to destroy "
+                "(auth/networking/monitoring/dashboard/analytics/s3bucket/"
+                "bootstrap/bootstrap-networking)"
+            ),
             optional=True,
         )
     ]
@@ -64,15 +68,38 @@ class DestroyCommand(Command):
 
         stacks_to_destroy = []
         if stack_arg:
-            if stack_arg in ["auth", "networking", "monitoring", "dashboard", "analytics", "s3bucket"]:
+            if stack_arg in [
+                "auth",
+                "networking",
+                "monitoring",
+                "dashboard",
+                "analytics",
+                "s3bucket",
+                "bootstrap",
+                "bootstrap-networking",
+            ]:
                 stacks_to_destroy.append(stack_arg)
             else:
                 console.print(f"[red]Unknown stack: {stack_arg}[/red]")
-                console.print("Valid stacks: auth, networking, monitoring, dashboard, analytics, s3bucket")
+                console.print(
+                    "Valid stacks: auth, networking, monitoring, dashboard, analytics, "
+                    "s3bucket, bootstrap, bootstrap-networking"
+                )
                 return 1
         else:
-            # Destroy all stacks in reverse order
-            stacks_to_destroy = ["analytics", "dashboard", "monitoring", "networking", "s3bucket", "auth"]
+            # Destroy all stacks in reverse dependency order. The bootstrap server
+            # goes first, and its VPC immediately after — the load balancer lives in
+            # that VPC, so deleting the VPC while the ALB still exists would fail.
+            stacks_to_destroy = [
+                "bootstrap",
+                "bootstrap-networking",
+                "analytics",
+                "dashboard",
+                "monitoring",
+                "networking",
+                "s3bucket",
+                "auth",
+            ]
 
         # Show what will be destroyed
         console.print(
@@ -84,14 +111,37 @@ class DestroyCommand(Command):
             )
         )
 
+        # Filter to what actually applies before showing the warning, so the list
+        # reflects reality rather than every stack this tool knows about.
+        stacks_to_destroy = [s for s in stacks_to_destroy if self._applies(s, profile)]
+        if not stacks_to_destroy:
+            console.print("[yellow]Nothing to destroy for this profile.[/yellow]")
+            return 0
+
         for stack in stacks_to_destroy:
             stack_name = profile.stack_names.get(stack, f"{profile.identity_pool_name}-{stack}")
-            console.print(f"• {stack.capitalize()} stack: [cyan]{stack_name}[/cyan]")
+            console.print(f"• {self._label(stack)} stack: [cyan]{stack_name}[/cyan]")
 
         console.print("\n[yellow]Note: Some resources may require manual cleanup:[/yellow]")
         console.print("• CloudWatch LogGroups (/ecs/otel-collector, /aws/claude-code/metrics)")
         console.print("• S3 Buckets and Athena resources created by analytics stack")
         console.print("• Any custom resources created outside of CloudFormation")
+
+        if "bootstrap-networking" in stacks_to_destroy:
+            console.print(
+                "\n[bold yellow]This deletes the VPC that ccwb created for the bootstrap "
+                "endpoint.[/bold yellow]"
+            )
+            console.print(
+                "[dim]  Deletion will FAIL if anything else still lives in it — instances, "
+                "endpoints, or an attached VPN / peering / Transit Gateway. Detach and remove "
+                "those first, or destroy 'bootstrap' alone and keep the VPC.[/dim]"
+            )
+        if "bootstrap" in stacks_to_destroy:
+            console.print(
+                "[dim]• Devices keep their MDM trust anchor after this. Its bootstrapUrl will "
+                "stop resolving, so remove or repoint it.[/dim]"
+            )
 
         # Confirm destruction
         if not force:
@@ -106,17 +156,6 @@ class DestroyCommand(Command):
         stacks_with_failures = []
 
         for stack in stacks_to_destroy:
-            if stack == "monitoring" and not profile.monitoring_enabled:
-                continue
-            if stack == "dashboard" and not profile.monitoring_enabled:
-                continue
-            if stack == "networking" and not profile.monitoring_enabled:
-                continue
-            if stack == "analytics" and not profile.monitoring_enabled:
-                continue
-            if stack == "s3bucket" and not profile.monitoring_enabled:
-                continue
-
             stack_name = profile.stack_names.get(stack, f"{profile.identity_pool_name}-{stack}")
             console.print(f"Destroying {stack} stack: [cyan]{stack_name}[/cyan]")
 
@@ -128,15 +167,58 @@ class DestroyCommand(Command):
                     all_failed_resources.extend(failed)
                     stacks_with_failures.append(stack_name)
                 console.print(
-                    f"[yellow]⚠ {stack.capitalize()} stack has resources requiring manual cleanup[/yellow]\n"
+                    f"[yellow]⚠ {self._label(stack)} stack has resources requiring manual cleanup[/yellow]\n"
                 )
             else:
-                console.print(f"[green]✓ {stack.capitalize()} stack destroyed[/green]\n")
+                console.print(f"[green]✓ {self._label(stack)} stack destroyed[/green]\n")
+
+        # An orphaned VPC is easy to forget and keeps its CIDR reserved.
+        if stack_arg == "bootstrap" and getattr(profile, "claude_desktop_create_vpc", False):
+            net_stack = profile.stack_names.get(
+                "bootstrap-networking", f"{profile.identity_pool_name}-bootstrap-networking"
+            )
+            console.print(
+                f"[yellow]The VPC stack '{net_stack}' was left in place.[/yellow] "
+                f"Remove it with [cyan]ccwb destroy bootstrap-networking[/cyan] when you no "
+                f"longer need it."
+            )
 
         # Show cleanup summary at the end
         self._show_cleanup_summary(all_failed_resources, stacks_with_failures, profile, console)
 
         return 0
+
+    # Stacks whose existence depends on a profile setting. Anything not listed here
+    # is always deployed, so always a destroy candidate.
+    _MONITORING_STACKS = ("monitoring", "dashboard", "networking", "analytics", "s3bucket")
+
+    @staticmethod
+    def _label(stack: str) -> str:
+        """Human-readable stack label. `str.capitalize()` mangles hyphenated names
+        ('bootstrap-networking' -> 'Bootstrap-networking')."""
+        return {
+            "bootstrap": "Bootstrap server",
+            "bootstrap-networking": "Bootstrap VPC",
+            "s3bucket": "S3 bucket",
+        }.get(stack, stack.capitalize())
+
+    def _applies(self, stack: str, profile) -> bool:
+        """Whether this stack was ever deployed for this profile.
+
+        Keeps the destruction warning honest — listing stacks that don't exist
+        trains people to skim past it.
+        """
+        if stack in self._MONITORING_STACKS:
+            return bool(profile.monitoring_enabled)
+        if stack == "bootstrap":
+            return getattr(profile, "cowork_config_mode", "static") == "dynamic"
+        if stack == "bootstrap-networking":
+            # Only exists when ccwb created the VPC; a customer-supplied VPC is
+            # theirs and must never be touched by ccwb destroy.
+            return getattr(profile, "cowork_config_mode", "static") == "dynamic" and bool(
+                getattr(profile, "claude_desktop_create_vpc", False)
+            )
+        return True
 
     def _delete_stack(self, stack_name: str, region: str, console: Console) -> int:
         """Delete a CloudFormation stack using boto3.
