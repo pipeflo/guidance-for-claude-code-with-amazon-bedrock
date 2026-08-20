@@ -128,36 +128,60 @@ hostname the certificate covers. Three ways to get there:
 
 ### Certificates
 
-Two options, chosen by whether you set `CertificateArn`:
+**A certificate is unavoidable, but public DNS is not.**
 
-**Supply your own** (`CertificateArn` set) — required for ACM Private CA, imported
-certificates, or a domain not in Route 53.
+The response carries `inferenceBedrockBearerToken` — a real credential — so it must
+travel over TLS, and an ALB HTTPS listener requires a certificate. That is an AWS
+constraint, not a ccwb choice. There is no supported HTTP option.
 
-**Let the stack request one** (`CertificateArn` empty) — it requests a
-DNS-validated public ACM certificate for `DomainName` and CloudFormation publishes
-the validation record itself. Needs `DomainName` plus a hosted zone.
+What the certificate must satisfy: it lives in **ACM in the deploy region** and
+covers the **hostname clients connect to**. Nothing more. Four ways to get there:
+
+| Source | Needs public DNS? | Cost | When to use |
+|---|---|---|---|
+| **Import your existing internal certificate** ⭐ | **No** | free | You already run an internal CA (AD Certificate Services or similar) that issues certificates for internal hostnames, and your managed devices already trust it. The usual enterprise answer. |
+| **AWS Private CA** | **No** | ~$400/mo per CA + per certificate | You already operate one. Devices must trust the CA — normally already handled by MDM/GPO. |
+| Public ACM, auto-validated | Yes — a public **Route 53** zone | free | Convenient when you host public DNS in Route 53. `ccwb init` offers this only when it finds a public zone. |
+| Public ACM, manually validated | A public domain **anywhere** (any DNS provider) | free | ACM DNS validation is just a CNAME in public DNS. Only the CloudFormation automation needs Route 53. |
+
+#### Importing an internal certificate
+
+```bash
+aws acm import-certificate \
+  --certificate fileb://cert.pem \
+  --private-key fileb://key.pem \
+  --certificate-chain fileb://chain.pem \
+  --region <deploy-region>
+```
+
+Pass the returned ARN as `CertificateArn` (or paste it at the wizard's certificate
+prompt). The private key must be unencrypted PEM.
+
+⚠️ **ACM does not auto-renew imported certificates.** Re-import before expiry, the
+same as any other internally managed certificate. Set a reminder.
+
+#### Letting the stack request one
+
+Leave `CertificateArn` empty and the stack requests a DNS-validated public
+certificate for `DomainName`, with CloudFormation publishing the validation record.
 
 ⚠️ **The validation zone must be PUBLIC.** ACM's validators query public DNS, so a
-private hosted zone cannot prove domain control — even though it's perfectly fine
-for the record clients resolve. For an internal deployment that usually means two
-zones:
+private hosted zone cannot prove domain control — even though it is perfectly fine
+for the record clients resolve. That usually means two zones:
 
 | Purpose | Zone |
 |---|---|
 | The record clients resolve (`HostedZoneId`) | private — resolves in-VPC only |
 | The ACM validation record (`CertificateValidationZoneId`) | **public** zone for the same domain |
 
-`CertificateValidationZoneId` defaults to `HostedZoneId`, which is correct when
-that zone is already public. Set it explicitly only when the record zone is private.
+`CertificateValidationZoneId` defaults to `HostedZoneId`, correct when that zone is
+already public. Set it explicitly only when the record zone is private.
 
-⚠️ **Deploys wait for issuance.** CloudFormation blocks until ACM issues, normally
-a few minutes. If the validation zone doesn't actually host `DomainName`, the
-deploy **waits** rather than failing — so verify the zone before deploying. `ccwb
-init` only offers this option when it can find a public zone, to reduce the chance
-of that.
+⚠️ **Deploys wait for issuance.** CloudFormation blocks until ACM issues, normally a
+few minutes. If the validation zone does not actually host `DomainName`, the deploy
+**waits** rather than failing — verify the zone first.
 
-The `CertificateArnUsed` output reports whichever certificate ended up on the
-listener.
+The `CertificateArnUsed` output reports whichever certificate ended up on the listener.
 
 ### Stack outputs
 
@@ -396,7 +420,7 @@ prompts for them and `ccwb deploy bootstrap` fails fast without them:
 |---|---|---|
 | 1 | **A VPC** | Any VPC in the deploy region. Don't reuse the ccwb monitoring VPC — it has only public subnets, and adding to it causes CloudFormation drift on a ccwb-managed stack. |
 | 2 | **≥2 subnets in different AZs** | An ALB requirement. Use **private** subnets for `AlbScheme: internal`. **No NAT gateway needed** — the ALB needs no outbound access and the Lambda is invoked through the Lambda API, not from inside the subnet. |
-| 3 | **An ACM certificate in the same region** — or a public Route 53 zone so one can be requested for you | Must cover the hostname clients will use. Leave `CertificateArn` empty and the stack requests a DNS-validated certificate for `DomainName`. Supply your own for ACM Private CA, an imported certificate, or a domain outside Route 53. See [Certificates](#certificates). |
+| 3 | **A certificate in ACM in the same region** | Must cover the hostname clients use. **No public DNS is required** — most enterprises import the certificate their existing internal CA already issues. See [Certificates](#certificates) for all four sources. |
 | 4 | **A DNS record** | Either give `DomainName` + `HostedZoneId` and the stack creates the alias (private **or** public zone), or manage it yourself and CNAME to the `AlbDnsName` output. Not optional in effect — see [DNS is required](#dns-is-required--but-it-does-not-have-to-be-public). |
 | 5 | **Network reachability from devices** | For `AlbScheme: internal`, devices need existing access to the VPC — VPN, Direct Connect, or being in-VPC. **This solution provisions none of it.** Without it, sign-in fails. |
 | 6 | **Deploy-time IAM permissions** | To create an ALB, target group, listener, security group, and the Route 53 record if used. |
