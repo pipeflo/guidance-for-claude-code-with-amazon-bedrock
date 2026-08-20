@@ -195,17 +195,36 @@ Gateway edge, before the Lambda runs.
 
 ### Verifying it is actually private
 
-```bash
-# From OFF the network — must TIME OUT or fail to resolve
-curl -m 10 https://{api-id}-{vpce-id}.execute-api.{region}.amazonaws.com/{stage}/config
+Run these from a machine **on** the network and one **off** it.
 
-# From ON the network, no token — must return 401
-curl -s -o /dev/null -w '%{http_code}\n' https://.../config
+```bash
+# ON the network, no token -> 401 (reachable, TLS valid, auth required)
+curl -s -i --max-time 20 https://{api-id}-{vpce-id}.execute-api.{region}.amazonaws.com/{stage}/config
+
+# OFF the network -> must NOT get an HTTP response
+curl -s -o /dev/null --max-time 20 https://.../{stage}/config; echo "exit=$?"
 ```
 
-A timeout from outside proves the requirement is met. A `403` from outside means the
-resource policy is doing its job but DNS resolved publicly; a `401` from outside
-would mean the endpoint is not private at all.
+Expected results:
+
+| From | Expected | Meaning |
+|---|---|---|
+| On-network, no token | `401` | reachable, certificate valid, authentication required |
+| On-network, bad/expired token | `401` | pre-check rejected it without an STS call |
+| On-network, wrong path or stage | `403` | only `/config` on the deployed stage exists |
+| On-network, `OPTIONS` | `204` | CORS preflight |
+| **Off-network** | **`curl` exit 28 (timeout)** | ✅ **private** |
+| Off-network | `401` or `200` | ❌ not private — investigate immediately |
+
+The hostname resolves publicly to the endpoint's **private** IPs, so `nslookup` succeeds
+from anywhere while only in-network clients can connect. A timeout off-network is
+therefore the expected pass, not a DNS failure.
+
+> ⚠️ **On Windows, use `curl` — not PowerShell's `Invoke-WebRequest`.**
+> `Invoke-WebRequest` performs WPAD proxy auto-discovery, which stalls inside a VPC
+> with no WPAD server. Every request appears to time out even when the endpoint is
+> working perfectly, which looks exactly like a broken deployment. `curl` ships with
+> Windows Server 2022 and does not do WPAD.
 
 ### Migrating from an earlier version
 
