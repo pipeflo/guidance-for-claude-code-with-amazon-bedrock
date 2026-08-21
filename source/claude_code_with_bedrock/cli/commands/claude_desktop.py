@@ -67,7 +67,9 @@ class ClaudeDesktopGenerateCommand(Command):
 
         profile_name = self.option("profile")
         config = Config.load()
-        profile = config.get_profile(profile_name) if profile_name else config.get_active_profile()
+        # get_profile(None) already falls through to the active profile, so the
+        # None case needs no special handling. Config has no get_active_profile().
+        profile = config.get_profile(profile_name)
 
         if not profile:
             console.print("[red]No profile found. Run `ccwb init` first.[/red]")
