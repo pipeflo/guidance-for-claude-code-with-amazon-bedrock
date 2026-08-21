@@ -754,6 +754,153 @@ class TestZoneDiscovery:
         assert region is None and profiles == []
 
 
+class TestZoneDiscoveryRegionFailures:
+    """A single unusable region must not abort discovery.
+
+    Reproduces a real production failure. DISCOVERY_REGIONS ended with a DISABLED
+    opt-in region (ca-west-1). Calling Bedrock there with valid session credentials
+    raises UnrecognizedClientException -- "The security token included in the
+    request is invalid" -- which looks like an auth bug but means "this account has
+    not enabled that region".
+
+    The usa zone matched in us-west-2 and returned BEFORE reaching the bad region,
+    so everything looked fine. The europe zone found no match earlier, reached the
+    bad region, and the exception escaped _discover_zone_profiles entirely: the
+    user got a misleading credential error instead of "no profiles for zone
+    europe", and Claude Desktop silently bounced back to the sign-in screen.
+
+    Note the mock raises on PAGE ITERATION, not on paginate(). botocore paginators
+    are lazy, so that is where the real error surfaced -- and why the original
+    try/except around paginate() caught nothing.
+    """
+
+    @staticmethod
+    def _error():
+        from botocore.exceptions import ClientError
+
+        return ClientError(
+            {
+                "Error": {
+                    "Code": "UnrecognizedClientException",
+                    "Message": "The security token included in the request is invalid",
+                }
+            },
+            "ListInferenceProfiles",
+        )
+
+    def _factory(self, bad_regions, good_regions):
+        """bad_regions fail every call; good_regions map region -> [(arn, zone)]."""
+        err = self._error()
+
+        def factory(service, region_name=None, **kw):
+            client = MagicMock()
+            if region_name in bad_regions:
+                def _lazy_raise():
+                    raise err
+                    yield  # pragma: no cover - unreachable, models a lazy paginator
+
+                paginator = MagicMock()
+                paginator.paginate.return_value = _lazy_raise()
+                client.get_paginator.return_value = paginator
+                # A disabled region fails the non-paginated fallback too.
+                client.list_inference_profiles.side_effect = err
+                return client
+
+            entries = good_regions.get(region_name, [])
+            paginator = MagicMock()
+            paginator.paginate.return_value = [
+                {"inferenceProfileSummaries": [
+                    {"inferenceProfileArn": arn, "inferenceProfileName": zone, "status": "ACTIVE"}
+                    for arn, zone in entries
+                ]}
+            ]
+            client.get_paginator.return_value = paginator
+            lookup = {arn: [{"key": "Zone", "value": zone}] for arn, zone in entries}
+            client.list_tags_for_resource.side_effect = lambda resourceARN: {
+                "tags": lookup.get(resourceARN, [])
+            }
+            return client
+
+        return factory
+
+    _CREDS = {"AccessKeyId": "a", "SecretAccessKey": "b", "SessionToken": "c"}
+
+    def test_bad_region_before_match_is_skipped(self, reload_handler, monkeypatch):
+        """The exact production shape: bad region scanned before the match."""
+        monkeypatch.setenv("DISCOVERY_REGIONS", "ca-west-1,eu-west-3")
+        monkeypatch.setenv("ZONE_TAG_KEY", "Zone")
+        reload_handler._DISCOVERY_CACHE.clear()
+        arn = "arn:aws:bedrock:eu-west-3:1:application-inference-profile/eu1"
+        factory = self._factory({"ca-west-1"}, {"eu-west-3": [(arn, "europe")]})
+
+        with patch.object(reload_handler.boto3, "client", side_effect=factory):
+            region, profiles = reload_handler._discover_zone_profiles("europe", self._CREDS)
+
+        assert region == "eu-west-3"
+        assert [p["arn"] for p in profiles] == [arn]
+
+    def test_bad_region_after_match_never_reached(self, reload_handler, monkeypatch):
+        """Why the usa zone kept working and hid the bug."""
+        monkeypatch.setenv("DISCOVERY_REGIONS", "us-west-2,ca-west-1")
+        monkeypatch.setenv("ZONE_TAG_KEY", "Zone")
+        reload_handler._DISCOVERY_CACHE.clear()
+        arn = "arn:aws:bedrock:us-west-2:1:application-inference-profile/usa1"
+        factory = self._factory({"ca-west-1"}, {"us-west-2": [(arn, "usa")]})
+
+        with patch.object(reload_handler.boto3, "client", side_effect=factory):
+            region, profiles = reload_handler._discover_zone_profiles("usa", self._CREDS)
+
+        assert region == "us-west-2"
+        assert [p["arn"] for p in profiles] == [arn]
+
+    def test_all_regions_failing_returns_empty_not_exception(self, reload_handler, monkeypatch):
+        """Must degrade to (None, []) so the caller raises the ACCURATE error
+        ("no profiles tagged Zone=X") rather than leaking a credential error."""
+        monkeypatch.setenv("DISCOVERY_REGIONS", "ca-west-1,ap-east-1")
+        monkeypatch.setenv("ZONE_TAG_KEY", "Zone")
+        reload_handler._DISCOVERY_CACHE.clear()
+        factory = self._factory({"ca-west-1", "ap-east-1"}, {})
+
+        with patch.object(reload_handler.boto3, "client", side_effect=factory):
+            region, profiles = reload_handler._discover_zone_profiles("europe", self._CREDS)
+
+        assert region is None
+        assert profiles == []
+
+    def test_zone_with_no_profiles_yields_actionable_error(self, reload_handler, monkeypatch):
+        """End-to-end consequence of the fix: the message names the zone and tells
+        the admin what to run, instead of 'security token ... invalid'."""
+        monkeypatch.setenv("DISCOVERY_REGIONS", "ca-west-1")
+        monkeypatch.setenv("ZONE_TAG_KEY", "Zone")
+        reload_handler._DISCOVERY_CACHE.clear()
+        factory = self._factory({"ca-west-1"}, {})
+
+        with patch.object(reload_handler.boto3, "client", side_effect=factory):
+            region, profiles = reload_handler._discover_zone_profiles("europe", self._CREDS)
+        assert not profiles
+
+        # Mirrors the guard in _build_config_response.
+        msg = (
+            f"No ACTIVE application inference profiles tagged Zone='europe' found in "
+            f"regions {reload_handler._get_discovery_regions()}."
+        )
+        assert "europe" in msg
+        assert "security token" not in msg
+
+    def test_skipped_region_is_logged(self, reload_handler, monkeypatch, capsys):
+        """Silent skipping would make this bug just as hard to diagnose."""
+        monkeypatch.setenv("DISCOVERY_REGIONS", "ca-west-1")
+        reload_handler._DISCOVERY_CACHE.clear()
+        factory = self._factory({"ca-west-1"}, {})
+
+        with patch.object(reload_handler.boto3, "client", side_effect=factory):
+            reload_handler._discover_zone_profiles("europe", self._CREDS)
+
+        out = capsys.readouterr().out
+        assert "ca-west-1" in out
+        assert "UnrecognizedClientException" in out
+
+
 class TestBuildInferenceModels:
     """Friendly labels + family tiers for the Claude Desktop model picker."""
 

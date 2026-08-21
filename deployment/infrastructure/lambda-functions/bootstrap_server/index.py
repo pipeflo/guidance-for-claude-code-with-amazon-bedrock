@@ -1,5 +1,5 @@
 # ABOUTME: Lambda handler for the Claude Desktop Bootstrap Server (credential broker)
-# ABOUTME: Runs behind an ALB (internal or public). Decodes the user's OIDC token,
+# ABOUTME: Runs behind a PRIVATE API Gateway REST API. Decodes the user's OIDC token,
 # ABOUTME: exchanges it for STS credentials via AssumeRoleWithWebIdentity (session tags
 # ABOUTME: intact) — which is what authoritatively validates it — and mints a Bedrock token.
 
@@ -21,10 +21,13 @@ Flow per request:
 WHERE IS THE JWT VALIDATION?  (the obvious review question)
 
 This used to sit behind an API Gateway HTTP API whose native JWT authorizer
-verified the token before the function ran. That endpoint could not be made
-private, so it was replaced by an ALB — and an ALB cannot validate JWTs (its
-authenticate-oidc action is a browser-redirect flow, wrong for a bearer-token
-API call).
+verified the token before the function ran. HTTP APIs cannot be made private (and
+support neither resource policies nor WAF), so the endpoint is now a PRIVATE REST
+API — which has no equivalent built-in JWT authorizer. An ALB was tried in
+between and rejected: it cannot validate JWTs (its authenticate-oidc action is a
+browser-redirect flow, wrong for a bearer-token API call) and it would have
+required a customer-supplied ACM certificate, whereas execute-api provides
+AWS-managed TLS.
 
 **STS is the authoritative validator.** `AssumeRoleWithWebIdentity` verifies the
 token's signature against the IdP's published JWKS, checks `iss` against the IAM
@@ -114,6 +117,52 @@ _DISCOVERY_CACHE = {}
 _DISCOVERY_TTL = 300  # 5 minutes
 
 
+def _list_zone_profiles_in_region(client, zone_tag_key, zone_lower):
+    """Return the ACTIVE application inference profiles in ONE region for a zone.
+
+    Split out of _discover_zone_profiles so the caller can wrap a single region in
+    one try/except. Any API error propagates to the caller, which skips the region.
+
+    Note the paginator: `paginate()` is LAZY, so no request is made until the
+    returned pages are iterated. An earlier version wrapped only the paginate()
+    call in try/except, which therefore caught nothing -- the real call, and any
+    UnrecognizedClientException from it, happened during iteration.
+    """
+    try:
+        paginator = client.get_paginator("list_inference_profiles")
+        pages = list(paginator.paginate(typeEquals="APPLICATION"))
+    except Exception:
+        # Pagination unsupported for this API version -- fall back to one call.
+        # Deliberately NOT swallowing other errors: forcing the list() above means
+        # a region-level failure surfaces here and is retried by this same call,
+        # then propagates to the caller for per-region skipping.
+        pages = [client.list_inference_profiles(typeEquals="APPLICATION")]
+
+    profiles = []
+    for page in pages:
+        for prof in page.get("inferenceProfileSummaries", []):
+            arn = prof.get("inferenceProfileArn")
+            if not arn:
+                continue
+            try:
+                tags = client.list_tags_for_resource(resourceARN=arn).get("tags", [])
+            except Exception:
+                # A single untaggable profile shouldn't hide the rest.
+                continue
+            tag_map = {t["key"]: t["value"] for t in tags}
+            if tag_map.get(zone_tag_key, "").lower() == zone_lower and prof.get("status", "ACTIVE") == "ACTIVE":
+                profiles.append({
+                    "arn": arn,
+                    "name": prof.get("inferenceProfileName", "") or "",
+                    # ccwb:Model tag is the short model name (e.g. "opus-4-1")
+                    # set by `ccwb inference-zone create`; may be absent for
+                    # profiles created another way.
+                    "model": tag_map.get("ccwb:Model", "") or "",
+                    "description": prof.get("description", "") or "",
+                })
+    return profiles
+
+
 def _discover_zone_profiles(zone, assumed_creds):
     """Discover a zone's application-inference-profiles LIVE, by tag.
 
@@ -137,40 +186,32 @@ def _discover_zone_profiles(zone, assumed_creds):
     zone_tag_key = _get_zone_tag_key()
     found_region, found_profiles = None, []
     for region in _get_discovery_regions():
-        client = boto3.client(
-            "bedrock",
-            region_name=region,
-            aws_access_key_id=assumed_creds["AccessKeyId"],
-            aws_secret_access_key=assumed_creds["SecretAccessKey"],
-            aws_session_token=assumed_creds["SessionToken"],
-        )
-        profiles = []
+        # One unusable region must NOT abort the whole scan. A region that is a
+        # DISABLED opt-in region raises UnrecognizedClientException ("The security
+        # token included in the request is invalid") -- which reads like an auth
+        # bug but is really "this account has not enabled that region". SCPs,
+        # regions where Bedrock isn't available, and throttling land here too.
+        #
+        # This mattered in practice: DiscoveryRegions ended with a disabled opt-in
+        # region, so any zone whose profiles were NOT found earlier in the list
+        # died on that region and the user got a misleading credential error
+        # instead of "no profiles for zone X". Zones that matched early (the
+        # common case) returned before reaching it, which hid the bug entirely.
         try:
-            paginator = client.get_paginator("list_inference_profiles")
-            pages = paginator.paginate(typeEquals="APPLICATION")
-        except Exception:
-            # Fall back to a single call if pagination isn't supported
-            pages = [client.list_inference_profiles(typeEquals="APPLICATION")]
-        for page in pages:
-            for prof in page.get("inferenceProfileSummaries", []):
-                arn = prof.get("inferenceProfileArn")
-                if not arn:
-                    continue
-                try:
-                    tags = client.list_tags_for_resource(resourceARN=arn).get("tags", [])
-                except Exception:
-                    continue
-                tag_map = {t["key"]: t["value"] for t in tags}
-                if tag_map.get(zone_tag_key, "").lower() == zkey and prof.get("status", "ACTIVE") == "ACTIVE":
-                    profiles.append({
-                        "arn": arn,
-                        "name": prof.get("inferenceProfileName", "") or "",
-                        # ccwb:Model tag is the short model name (e.g. "opus-4-1")
-                        # set by `ccwb inference-zone create`; may be absent for
-                        # profiles created another way.
-                        "model": tag_map.get("ccwb:Model", "") or "",
-                        "description": prof.get("description", "") or "",
-                    })
+            client = boto3.client(
+                "bedrock",
+                region_name=region,
+                aws_access_key_id=assumed_creds["AccessKeyId"],
+                aws_secret_access_key=assumed_creds["SecretAccessKey"],
+                aws_session_token=assumed_creds["SessionToken"],
+            )
+            profiles = _list_zone_profiles_in_region(client, zone_tag_key, zkey)
+        except Exception as exc:  # noqa: BLE001 - any region failure is skippable
+            print(
+                f"WARNING: inference-profile discovery skipped region {region}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            continue
         if profiles:
             found_region, found_profiles = region, profiles
             break
