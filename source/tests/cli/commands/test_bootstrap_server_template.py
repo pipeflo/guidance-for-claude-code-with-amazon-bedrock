@@ -180,10 +180,14 @@ class TestResourcePolicy:
         Deny with no Condition at all.
         """
         stmts = tpl["Resources"]["BootstrapRestApi"]["Properties"]["Policy"]["Statement"]
-        unwired = self._branch(stmts, "else")
+        # The else branch is itself an Fn::If on AllowAnyVpce; the deny-all case is
+        # ITS else branch.
+        fallback = self._branch(stmts, "else")
+        inner_cond, _permissive, deny_all = fallback["Fn::If"]
+        assert inner_cond == "AllowAnyVpce"
 
-        assert len(unwired) == 1
-        only = unwired[0]
+        assert len(deny_all) == 1
+        only = deny_all[0]
         assert only["Effect"] == "Deny"
         # No Condition -> unconditional deny, satisfiable by no caller.
         assert "Condition" not in only
@@ -301,3 +305,65 @@ class TestLambdaAndOutputs:
         """GovCloud support: ARNs must use ${AWS::Partition}."""
         rendered = str(tpl["Resources"]["BootstrapRestApiPermission"]["Properties"]["SourceArn"])
         assert "AWS::Partition" in rendered
+
+
+class TestDiscoveryMode:
+    """AllowAnyVpcEndpoint: a transitional policy so the endpoint id can be FOUND.
+
+    A private REST API's policy must name the caller's execute-api endpoint. When
+    that endpoint is owned by a central networking team its id may be genuinely
+    unavailable -- it does not show up in describe-vpc-endpoints from the workload
+    account. Discovery mode allows any source vpce for exactly one round trip, so
+    the Lambda can log the caller's identity and reveal the id.
+
+    It is a deliberate widening, so the important properties are that it is
+    OFF by default and that an explicit endpoint always overrides it.
+    """
+
+    def test_parameter_defaults_to_false(self, tpl):
+        """Must be opt-in. A permissive policy by default would be a real regression."""
+        p = tpl["Parameters"]["AllowAnyVpcEndpoint"]
+        assert p["Default"] == "false"
+        assert p["AllowedValues"] == ["true", "false"]
+
+    def test_explicit_endpoint_wins_over_discovery(self, tpl):
+        """Setting both must give the TIGHT policy, never the permissive one --
+        otherwise a leftover discovery flag would silently keep it wide open."""
+        cond = str(tpl["Conditions"]["AllowAnyVpce"])
+        assert "AllowAnyVpcEndpoint" in cond
+        assert "VpcEndpointId" in cond
+        assert "Fn::And" in cond
+
+    def test_policy_has_three_modes_in_precedence_order(self, tpl):
+        """HasEndpoint (tight) > AllowAnyVpce (permissive) > bare Deny."""
+        stmts = tpl["Resources"]["BootstrapRestApi"]["Properties"]["Policy"]["Statement"]
+        outer_cond, tight, fallback = stmts["Fn::If"]
+        assert outer_cond == "HasEndpoint"
+        assert {s["Effect"] for s in tight} == {"Allow", "Deny"}
+
+        inner_cond, permissive, deny_all = fallback["Fn::If"]
+        assert inner_cond == "AllowAnyVpce"
+        # Permissive: a single unconditional Allow.
+        assert len(permissive) == 1
+        assert permissive[0]["Effect"] == "Allow"
+        assert "Condition" not in permissive[0]
+        # Still-unwired: a single unconditional Deny.
+        assert len(deny_all) == 1
+        assert deny_all[0]["Effect"] == "Deny"
+        assert "Condition" not in deny_all[0]
+
+    def test_endpoint_configured_reports_discovery(self, tpl):
+        """deploy.py branches on this to decide whether to save the URL and how loudly
+        to warn, so the three states must all be distinguishable."""
+        v = str(tpl["Outputs"]["EndpointConfigured"]["Value"])
+        assert "discovery" in v
+        assert "AllowAnyVpce" in v
+        assert "HasEndpoint" in v
+
+    def test_discovery_mode_publishes_the_standard_hostname(self, tpl):
+        """With nothing associated only the standard hostname exists -- and it is the
+        request through it that produces the log line we need. Reporting NOT-REACHABLE
+        here would stop anyone ever making that request."""
+        v = str(tpl["Outputs"]["BootstrapUrl"]["Value"])
+        assert "AllowAnyVpce" in v
+        assert "NOT-REACHABLE" in v  # still the answer when discovery is OFF too

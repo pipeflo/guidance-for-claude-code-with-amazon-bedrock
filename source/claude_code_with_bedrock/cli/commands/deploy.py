@@ -1147,8 +1147,28 @@ class DeployCommand(Command):
                 #
                 # Warn LOUDLY. A "successful" deploy that answers nothing is a worse
                 # experience than a refusal unless the operator knows exactly why.
+                allow_any_vpce = bool(
+                    getattr(profile, "claude_desktop_allow_any_vpc_endpoint", False)
+                ) and not vpc_endpoint_id
+
                 endpoint_unwired = not vpc_endpoint_id and (not vpc_id or not subnet_ids)
-                if endpoint_unwired:
+                if endpoint_unwired and allow_any_vpce:
+                    console.print(
+                        "[bold yellow]Deploying in DISCOVERY mode: the resource policy will "
+                        "allow ANY source VPC endpoint.[/bold yellow]"
+                    )
+                    console.print(
+                        "[yellow]This is wider than the intended posture. Every request still "
+                        "needs a valid OIDC access token for your tenant (STS verifies it before "
+                        "issuing anything), but do not leave it on for rollout.[/yellow]"
+                    )
+                    console.print(
+                        "[dim]  Make one real request, then read the endpoint id from the Lambda "
+                        "log line beginning 'callerNetwork:'. Set that as "
+                        "claude_desktop_vpc_endpoint_id, set "
+                        "claude_desktop_allow_any_vpc_endpoint back to false, and redeploy.[/dim]\n"
+                    )
+                elif endpoint_unwired:
                     console.print(
                         "[bold yellow]⚠  Deploying WITHOUT an execute-api VPC endpoint — "
                         "the API will NOT be reachable.[/bold yellow]"
@@ -1201,6 +1221,7 @@ class DeployCommand(Command):
                     f"SubnetIds={','.join(subnet_ids)}",
                     f"StageName={stage_name}",
                     f"AssociateVpcEndpoint={'true' if associate else 'false'}",
+                    f"AllowAnyVpcEndpoint={'true' if allow_any_vpce else 'false'}",
                 ]
                 # Omitted when empty so the template default applies.
                 if ingress_cidr:
@@ -1272,7 +1293,40 @@ class DeployCommand(Command):
                     # a failure operationally. Say so plainly, and do NOT persist the
                     # URL: it changes once a same-account endpoint is associated, so a
                     # trust anchor generated now would point somewhere that never works.
-                    if str(outputs.get("EndpointConfigured", "true")).lower() != "true":
+                    endpoint_state = str(outputs.get("EndpointConfigured", "true")).lower()
+
+                    if endpoint_state == "discovery":
+                        console.print(
+                            "\n[bold yellow]Deployed in DISCOVERY mode — reachable from ANY VPC "
+                            "endpoint.[/bold yellow]"
+                        )
+                        console.print(f"\n[bold]Bootstrap URL:[/bold] {bootstrap_url}")
+                        console.print(
+                            "[dim]  This is the standard execute-api hostname, so it only resolves "
+                            "where private DNS is enabled on the endpoint your clients use.[/dim]"
+                        )
+                        console.print(
+                            "\n[bold]Now find the real endpoint id:[/bold]\n"
+                            "  1. Make one request from a client machine (a 401 is enough — the "
+                            "policy is what we're testing, not the token)\n"
+                            "  2. [cyan]aws logs filter-log-events --log-group-name "
+                            f"/aws/lambda/{stack_name}-bootstrap \\\n"
+                            "       --filter-pattern callerNetwork[/cyan]\n"
+                            "  3. Take the vpce- id from that line, set "
+                            "[cyan]claude_desktop_vpc_endpoint_id[/cyan],\n"
+                            "     set [cyan]claude_desktop_allow_any_vpc_endpoint[/cyan] to false, "
+                            "and redeploy"
+                        )
+                        console.print(
+                            "\n[yellow]Do not roll out to users in this state.[/yellow] The URL is "
+                            "saved so you can test, but tighten the policy first."
+                        )
+                        if bootstrap_url and bootstrap_url != "N/A":
+                            profile.claude_desktop_bootstrap_endpoint = bootstrap_url
+                            Config.load().save_profile(profile)
+                        return result
+
+                    if endpoint_state != "true":
                         console.print(
                             "\n[bold yellow]Bootstrap stack deployed, but NOT reachable."
                             "[/bold yellow]"

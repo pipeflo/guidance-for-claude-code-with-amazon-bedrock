@@ -205,6 +205,10 @@ class Profile:
     # account): association is same-account only, so clients then use the standard
     # execute-api hostname, which needs private DNS on that endpoint.
     claude_desktop_associate_vpc_endpoint: bool = True
+    # Discovery/transitional: allow ANY source vpce so one request can reveal the
+    # real endpoint id from the Lambda logs. Widens access -- see the template
+    # parameter docs. Ignored when claude_desktop_vpc_endpoint_id is set.
+    claude_desktop_allow_any_vpc_endpoint: bool = False
 
     # Legacy field support
     @property

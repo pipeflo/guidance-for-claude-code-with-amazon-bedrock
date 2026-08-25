@@ -973,3 +973,64 @@ class TestBuildInferenceModels:
         ])
         for m in models:
             assert "supports1m" not in m
+
+
+class TestCallerNetworkLogging:
+    """The Lambda logs requestContext.identity so the VPC endpoint id can be found.
+
+    A private REST API's resource policy must name the caller's execute-api endpoint,
+    and in a large org that id may be genuinely unavailable -- a central-account
+    endpoint does not appear in describe-vpc-endpoints from the workload account.
+    Deploy with AllowAnyVpcEndpoint, make one request, read the id from this line.
+
+    The obvious risk of logging request context is leaking the bearer token, so that
+    is pinned here.
+    """
+
+    def test_logs_identity_with_greppable_prefix(self, reload_handler, capsys):
+        event = {
+            "httpMethod": "GET",
+            "path": "/config",
+            "requestContext": {
+                "identity": {
+                    "vpceId": "vpce-0abc123def456789",
+                    "vpcId": "vpc-0999888777",
+                    "sourceIp": "10.20.30.40",
+                }
+            },
+        }
+        reload_handler._log_caller_network_identity(event)
+        out = capsys.readouterr().out
+        assert "callerNetwork:" in out
+        assert "vpce-0abc123def456789" in out
+
+    def test_never_logs_the_bearer_token(self, reload_handler, capsys):
+        """The Authorization header lives at the TOP level of the event, not under
+        requestContext.identity -- but assert it, because a future 'log the whole
+        event' convenience change would quietly start writing tokens to CloudWatch."""
+        event = {
+            "httpMethod": "GET",
+            "headers": {"authorization": "Bearer super-secret-token-value"},
+            "requestContext": {"identity": {"vpceId": "vpce-0abc123def456789"}},
+        }
+        reload_handler._log_caller_network_identity(event)
+        out = capsys.readouterr().out
+        assert "super-secret-token-value" not in out
+        assert "Bearer" not in out
+
+    def test_missing_identity_is_reported_not_crashed(self, reload_handler, capsys):
+        reload_handler._log_caller_network_identity({"httpMethod": "GET"})
+        assert "callerNetwork: none" in capsys.readouterr().out
+
+    def test_unserialisable_identity_does_not_break_the_request(self, reload_handler, capsys):
+        """Diagnostics must never be able to fail a real request."""
+
+        class _Explodes:
+            def __repr__(self):
+                raise RuntimeError("boom")
+
+        reload_handler._log_caller_network_identity(
+            {"requestContext": {"identity": {"x": _Explodes()}}}
+        )
+        out = capsys.readouterr().out
+        assert "callerNetwork" in out

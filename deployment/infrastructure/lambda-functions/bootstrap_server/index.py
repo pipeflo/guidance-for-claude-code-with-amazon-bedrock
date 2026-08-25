@@ -739,6 +739,35 @@ def _response(status_code: int, body: dict, extra_headers: dict = None) -> dict:
     }
 
 
+def _log_caller_network_identity(event):
+    """Log the caller's network identity so the VPC endpoint id can be DISCOVERED.
+
+    Why this exists: a private REST API's resource policy must name the caller's
+    execute-api endpoint (`aws:SourceVpce`). In a large organisation the endpoint is
+    often owned by a networking team who cannot readily tell you its id -- and it
+    does not appear in `describe-vpc-endpoints` from the workload account when it
+    lives in a central account.
+
+    So: deploy once with AllowAnyVpcEndpoint=true, make ONE real request, and read
+    the id out of this log line. Then set VpcEndpointId and redeploy tight.
+
+    Logs the whole identity object rather than a single field on purpose -- the exact
+    key carrying the endpoint id is not worth guessing, and the surrounding values
+    (sourceIp, vpcId, userAgent) are useful for the same diagnosis. NOTHING here is
+    secret: the Authorization header lives at the top level of the event, not under
+    requestContext.identity, so no token is written to logs.
+    """
+    try:
+        identity = ((event.get("requestContext") or {}).get("identity")) or {}
+        if identity:
+            # Compact so it is greppable in CloudWatch: filter on "callerNetwork".
+            print("callerNetwork: " + json.dumps(identity, default=str, sort_keys=True))
+        else:
+            print("callerNetwork: none (no requestContext.identity on this event)")
+    except Exception as exc:  # noqa: BLE001 - diagnostics must never break a request
+        print(f"callerNetwork: unavailable ({type(exc).__name__})")
+
+
 def lambda_handler(event, context):
     """Main Lambda handler for the Bootstrap Server, invoked by API Gateway.
 
@@ -755,7 +784,9 @@ def lambda_handler(event, context):
         - 500: Internal server error
     """
     try:
-        # CORS preflight — the ALB has no built-in CORS handling.
+        _log_caller_network_identity(event)
+
+        # CORS preflight — API Gateway has no built-in CORS handling for ANY methods.
         method = (event.get("httpMethod") or "").upper()
         if method == "OPTIONS":
             return _response(204, {})

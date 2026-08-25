@@ -163,6 +163,27 @@ Parameters:
     Default: "true"
     AllowedValues: ["true", "false"]
 
+  AllowAnyVpcEndpoint:
+    Type: String
+    Description: >
+      DISCOVERY / TRANSITIONAL MODE. When "true" the resource policy allows any
+      source VPC endpoint instead of one specific vpce-id.
+
+      Use it when the endpoint is managed by a team who cannot readily tell you its
+      id: deploy with this on, make one real request, and read the endpoint id out
+      of the Lambda's logged requestContext.identity. Then set VpcEndpointId and
+      redeploy with this back to "false" to reach the tight policy.
+
+      Exposure while enabled: the API can be invoked from ANY execute-api endpoint
+      in ANY AWS account. That is a genuine widening, but bounded -- every request
+      still needs a valid OIDC access token for your tenant, which STS
+      AssumeRoleWithWebIdentity verifies before any credential is issued. Do not
+      leave this on permanently.
+
+      Ignored when VpcEndpointId is set: an explicit endpoint always wins.
+    Default: "false"
+    AllowedValues: ["true", "false"]
+
   StageName:
     Type: String
     Description: "REST API stage name. Appears in the invoke URL path."
@@ -192,6 +213,12 @@ Conditions:
   HasEndpoint: !Or
     - !Not [!Equals [!Ref VpcEndpointId, ""]]
     - !Condition HasVpcInputs
+
+  # Discovery mode: allow any source vpce because we don't know the id yet. Only
+  # meaningful when no explicit endpoint was given -- an explicit one always wins.
+  AllowAnyVpce: !And
+    - !Equals [!Ref AllowAnyVpcEndpoint, "true"]
+    - !Equals [!Ref VpcEndpointId, ""]
 
   # A VPC endpoint in another account cannot be associated with this API, so the
   # dedicated {api-id}-{vpce-id} hostname is unavailable there. An endpoint we
@@ -357,10 +384,20 @@ Resources:
                     - CreateVpcEndpoint
                     - !Ref ExecuteApiEndpoint
                     - !Ref VpcEndpointId
-          - - Effect: Deny
-              Principal: "*"
-              Action: "execute-api:Invoke"
-              Resource: "execute-api:/*"
+          - !If
+            # Discovery mode: we don't know the endpoint id yet, so allow any source
+            # vpce so ONE real request can get through and reveal it (the Lambda logs
+            # requestContext.identity). Tighten by setting VpcEndpointId and
+            # redeploying with AllowAnyVpcEndpoint back to "false".
+            - AllowAnyVpce
+            - - Effect: Allow
+                Principal: "*"
+                Action: "execute-api:Invoke"
+                Resource: "execute-api:/*"
+            - - Effect: Deny
+                Principal: "*"
+                Action: "execute-api:Invoke"
+                Resource: "execute-api:/*"
 
   ConfigResource:
     Type: AWS::ApiGateway::Resource
@@ -409,12 +446,15 @@ Resources:
 Outputs:
   EndpointConfigured:
     Description: >
-      "true" when an execute-api VPC endpoint is wired up and the API is reachable.
-      "false" means the stack deployed but the API answers nothing yet -- supply
-      VpcEndpointId (or VpcId + SubnetIds) and redeploy. Callers should treat
-      BootstrapUrl as provisional while this is "false"; the final hostname changes
-      once a same-account endpoint is associated.
-    Value: !If [HasEndpoint, "true", "false"]
+      "true"      - an execute-api endpoint is wired up; policy scoped to it.
+      "discovery" - AllowAnyVpcEndpoint is on: reachable from ANY source vpce so the
+                    real endpoint id can be discovered from the Lambda logs. Widened
+                    on purpose; tighten before rollout.
+      "false"     - no endpoint and no discovery mode: deployed, answers nothing.
+    Value: !If
+      - HasEndpoint
+      - "true"
+      - !If [AllowAnyVpce, "discovery", "false"]
 
   BootstrapUrl:
     Description: >
@@ -433,7 +473,14 @@ Outputs:
           - ApiId: !Ref BootstrapRestApi
             VpceId: !If [CreateVpcEndpoint, !Ref ExecuteApiEndpoint, !Ref VpcEndpointId]
         - !Sub "https://${BootstrapRestApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/config"
-      - "NOT-REACHABLE-no-execute-api-vpc-endpoint-configured"
+      - !If
+        # Discovery mode has no associated endpoint, so only the standard hostname
+        # exists. It resolves to whichever execute-api endpoint the client's VPC
+        # uses, which REQUIRES private DNS enabled on that endpoint -- and is exactly
+        # the request whose logs reveal the endpoint id.
+        - AllowAnyVpce
+        - !Sub "https://${BootstrapRestApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/config"
+        - "NOT-REACHABLE-no-execute-api-vpc-endpoint-configured"
     Export:
       Name: !Sub "${AWS::StackName}-BootstrapUrl"
 
