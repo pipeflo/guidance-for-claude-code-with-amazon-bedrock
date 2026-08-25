@@ -1138,20 +1138,36 @@ class DeployCommand(Command):
                 stage_name = getattr(profile, "claude_desktop_stage_name", "") or "prod"
                 associate = getattr(profile, "claude_desktop_associate_vpc_endpoint", True)
 
-                if not vpc_endpoint_id and (not vpc_id or not subnet_ids):
+                # No endpoint inputs is a SUPPORTED but UNREACHABLE deployment. It was
+                # previously a hard abort; that blocked teams whose networking sign-off
+                # lags the rest of the rollout, for no safety benefit -- the API is
+                # private either way, and the template emits a deny-all resource policy
+                # until an endpoint exists. Deploying now proves out the Lambda, IAM,
+                # packaging and Okta wiring; the endpoint is a later, additive step.
+                #
+                # Warn LOUDLY. A "successful" deploy that answers nothing is a worse
+                # experience than a refusal unless the operator knows exactly why.
+                endpoint_unwired = not vpc_endpoint_id and (not vpc_id or not subnet_ids)
+                if endpoint_unwired:
                     console.print(
-                        "[red]The bootstrap server is served from a private REST API, which needs "
-                        "an execute-api VPC endpoint.[/red]"
+                        "[bold yellow]⚠  Deploying WITHOUT an execute-api VPC endpoint — "
+                        "the API will NOT be reachable.[/bold yellow]"
                     )
                     console.print(
-                        "[yellow]Supply an existing endpoint, or a VPC and at least one subnet so "
-                        "one can be created for you.[/yellow]"
+                        "[yellow]A private REST API is reachable only through an execute-api "
+                        "interface VPC endpoint. Until one is supplied the resource policy denies "
+                        "every caller, so requests will time out or return 403.[/yellow]"
                     )
                     console.print(
-                        "[dim]  Run 'ccwb init' and complete the Claude Desktop bootstrap section, "
-                        "then re-run 'ccwb deploy bootstrap'.[/dim]"
+                        "[dim]  Everything else (Lambda, IAM, packaging, Okta issuer/audience) IS "
+                        "deployed and verifiable.[/dim]"
                     )
-                    return 1
+                    console.print(
+                        "[dim]  To make it live, set claude_desktop_vpc_endpoint_id (or "
+                        "claude_desktop_vpc_id + claude_desktop_subnet_ids) and re-run "
+                        "'ccwb deploy bootstrap'. The URL changes when a same-account endpoint "
+                        "is associated, so do not push an MDM anchor until then.[/dim]\n"
+                    )
 
                 if vpc_endpoint_id and not associate:
                     console.print(
@@ -1251,6 +1267,35 @@ class DeployCommand(Command):
                 if result == 0:
                     outputs = get_stack_outputs(stack_name, profile.aws_region)
                     bootstrap_url = outputs.get("BootstrapUrl", "N/A")
+
+                    # An unwired stack is a real success at the CloudFormation level but
+                    # a failure operationally. Say so plainly, and do NOT persist the
+                    # URL: it changes once a same-account endpoint is associated, so a
+                    # trust anchor generated now would point somewhere that never works.
+                    if str(outputs.get("EndpointConfigured", "true")).lower() != "true":
+                        console.print(
+                            "\n[bold yellow]Bootstrap stack deployed, but NOT reachable."
+                            "[/bold yellow]"
+                        )
+                        console.print(
+                            "[yellow]No execute-api VPC endpoint is configured, so the resource "
+                            "policy denies every caller.[/yellow]"
+                        )
+                        console.print(f"[dim]  BootstrapUrl: {bootstrap_url}[/dim]")
+                        console.print(
+                            "\n[bold]To make it live:[/bold]\n"
+                            "  1. Locate or create an execute-api interface VPC endpoint\n"
+                            "  2. Set [cyan]claude_desktop_vpc_endpoint_id[/cyan] in the profile "
+                            "(plus [cyan]claude_desktop_associate_vpc_endpoint: false[/cyan] if it "
+                            "is in another account)\n"
+                            "  3. Re-run [cyan]ccwb deploy bootstrap[/cyan]"
+                        )
+                        console.print(
+                            "\n[dim]The URL is deliberately NOT saved to the profile, and no MDM "
+                            "anchor should be generated yet.[/dim]"
+                        )
+                        return result
+
                     console.print(f"\n[bold green]\u2713 Bootstrap server deployed![/bold green]")
                     console.print(f"\n[bold]Bootstrap URL:[/bold] {bootstrap_url}")
                     console.print(

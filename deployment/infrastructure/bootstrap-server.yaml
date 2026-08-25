@@ -170,15 +170,38 @@ Parameters:
     AllowedPattern: "^[a-zA-Z0-9_-]+$"
 
 Conditions:
-  # Create the endpoint only when the admin didn't point us at one.
-  CreateVpcEndpoint: !Equals [!Ref VpcEndpointId, ""]
+  # Did the admin give us a VPC + subnets to build an endpoint in?
+  HasVpcInputs: !And
+    - !Not [!Equals [!Ref VpcId, ""]]
+    - !Not [!Equals [!Join ["", !Ref SubnetIds], ""]]
+
+  # Create the endpoint only when the admin didn't point us at one AND gave us
+  # somewhere to put it. Without VPC inputs there is nothing to create.
+  CreateVpcEndpoint: !And
+    - !Equals [!Ref VpcEndpointId, ""]
+    - !Condition HasVpcInputs
+
+  # Is there an endpoint at all -- supplied or created?
+  #
+  # "Neither" is a DELIBERATE, supported state: it deploys the API, Lambda, IAM and
+  # packaging so the whole chain can be validated, while leaving the API
+  # UNREACHABLE until an execute-api endpoint is supplied. A private REST API is
+  # reachable only through such an endpoint, so there is no way to make it usable
+  # here -- but there is no reason to block the rest of the stack either. Supply
+  # VpcEndpointId (or VpcId + SubnetIds) and redeploy to make it live.
+  HasEndpoint: !Or
+    - !Not [!Equals [!Ref VpcEndpointId, ""]]
+    - !Condition HasVpcInputs
 
   # A VPC endpoint in another account cannot be associated with this API, so the
   # dedicated {api-id}-{vpce-id} hostname is unavailable there. An endpoint we
-  # create is always local, so it is always associated.
-  AssociateEndpoint: !Or
-    - !Equals [!Ref VpcEndpointId, ""]
-    - !Equals [!Ref AssociateVpcEndpoint, "true"]
+  # create is always local, so it is always associated. With no endpoint at all
+  # there is nothing to associate.
+  AssociateEndpoint: !And
+    - !Condition HasEndpoint
+    - !Or
+      - !Condition CreateVpcEndpoint
+      - !Equals [!Ref AssociateVpcEndpoint, "true"]
 
 Resources:
   BootstrapFunction:
@@ -304,29 +327,40 @@ Resources:
       # A PRIVATE API is inaccessible to every VPC until a resource policy grants
       # access. Scope it to the one endpoint so another VPC endpoint in any account
       # cannot invoke it. Enforced at the edge, before the Lambda runs.
+      #
+      # With NO endpoint configured we emit a bare Deny instead. Relying on an
+      # empty-string aws:SourceVpce match would be fragile (API Gateway may reject
+      # an empty condition value, and an empty value silently matching would be far
+      # worse than failing). An explicit Deny makes "deployed but not yet wired"
+      # unambiguous: the stack is complete, the API answers nothing.
       Policy:
         Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal: "*"
-            Action: "execute-api:Invoke"
-            Resource: "execute-api:/*"
-            Condition:
-              StringEquals:
-                "aws:SourceVpce": !If
-                  - CreateVpcEndpoint
-                  - !Ref ExecuteApiEndpoint
-                  - !Ref VpcEndpointId
-          - Effect: Deny
-            Principal: "*"
-            Action: "execute-api:Invoke"
-            Resource: "execute-api:/*"
-            Condition:
-              StringNotEquals:
-                "aws:SourceVpce": !If
-                  - CreateVpcEndpoint
-                  - !Ref ExecuteApiEndpoint
-                  - !Ref VpcEndpointId
+        Statement: !If
+          - HasEndpoint
+          - - Effect: Allow
+              Principal: "*"
+              Action: "execute-api:Invoke"
+              Resource: "execute-api:/*"
+              Condition:
+                StringEquals:
+                  "aws:SourceVpce": !If
+                    - CreateVpcEndpoint
+                    - !Ref ExecuteApiEndpoint
+                    - !Ref VpcEndpointId
+            - Effect: Deny
+              Principal: "*"
+              Action: "execute-api:Invoke"
+              Resource: "execute-api:/*"
+              Condition:
+                StringNotEquals:
+                  "aws:SourceVpce": !If
+                    - CreateVpcEndpoint
+                    - !Ref ExecuteApiEndpoint
+                    - !Ref VpcEndpointId
+          - - Effect: Deny
+              Principal: "*"
+              Action: "execute-api:Invoke"
+              Resource: "execute-api:/*"
 
   ConfigResource:
     Type: AWS::ApiGateway::Resource
@@ -373,20 +407,33 @@ Resources:
       SourceArn: !Sub "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${BootstrapRestApi}/*"
 
 Outputs:
+  EndpointConfigured:
+    Description: >
+      "true" when an execute-api VPC endpoint is wired up and the API is reachable.
+      "false" means the stack deployed but the API answers nothing yet -- supply
+      VpcEndpointId (or VpcId + SubnetIds) and redeploy. Callers should treat
+      BootstrapUrl as provisional while this is "false"; the final hostname changes
+      once a same-account endpoint is associated.
+    Value: !If [HasEndpoint, "true", "false"]
+
   BootstrapUrl:
     Description: >
       Endpoint for the MDM bootstrapUrl key. When the API is associated with the VPC
       endpoint this is the dedicated {api-id}-{vpce-id} hostname, which works whether
       or not private DNS is enabled and needs no extra request header. For a
       cross-account endpoint it falls back to the standard hostname, which REQUIRES
-      private DNS enabled on that endpoint.
+      private DNS enabled on that endpoint. With no endpoint configured this reports
+      NOT-REACHABLE rather than a plausible-looking URL -- see EndpointConfigured.
     Value: !If
-      - AssociateEndpoint
-      - !Sub
-        - "https://${ApiId}-${VpceId}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/config"
-        - ApiId: !Ref BootstrapRestApi
-          VpceId: !If [CreateVpcEndpoint, !Ref ExecuteApiEndpoint, !Ref VpcEndpointId]
-      - !Sub "https://${BootstrapRestApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/config"
+      - HasEndpoint
+      - !If
+        - AssociateEndpoint
+        - !Sub
+          - "https://${ApiId}-${VpceId}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/config"
+          - ApiId: !Ref BootstrapRestApi
+            VpceId: !If [CreateVpcEndpoint, !Ref ExecuteApiEndpoint, !Ref VpcEndpointId]
+        - !Sub "https://${BootstrapRestApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/config"
+      - "NOT-REACHABLE-no-execute-api-vpc-endpoint-configured"
     Export:
       Name: !Sub "${AWS::StackName}-BootstrapUrl"
 
@@ -401,8 +448,11 @@ Outputs:
     Value: !GetAtt BootstrapFunction.Arn
 
   VpcEndpointIdUsed:
-    Description: "The execute-api VPC endpoint serving this API — created here, or the one you supplied"
-    Value: !If [CreateVpcEndpoint, !Ref ExecuteApiEndpoint, !Ref VpcEndpointId]
+    Description: "The execute-api VPC endpoint serving this API - created here, or the one you supplied. NONE when the API is not yet wired."
+    Value: !If
+      - HasEndpoint
+      - !If [CreateVpcEndpoint, !Ref ExecuteApiEndpoint, !Ref VpcEndpointId]
+      - "NONE"
 
   RestApiId:
     Description: "Private REST API ID"

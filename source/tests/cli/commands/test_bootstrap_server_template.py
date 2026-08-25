@@ -25,9 +25,31 @@ class _CfnLoader(yaml.SafeLoader):
     """CloudFormation short-form tags (!Ref, !If, ...) aren't plain YAML."""
 
 
-_CfnLoader.add_multi_constructor(
-    "!", lambda loader, tag_suffix, node: {"Fn::" + tag_suffix: getattr(node, "value", None)}
-)
+def _cfn_tag(loader, tag_suffix, node):
+    """Construct a CFN short-form tag into {"Fn::<tag>": <value>}, RECURSIVELY.
+
+    The original version returned `node.value` raw, which left every nested tag as
+    an unconstructed yaml Node. Assertions then had to match Node repr strings
+    (`SequenceNode(tag='!Or', ...)`) rather than the data, so they only ever matched
+    by accident -- and a nested `!If` was entirely opaque.
+
+    Dispatch on node type and construct the CHILDREN with deep=True. Calling
+    `construct_object(node, deep=True)` on the node itself instead raises
+    "found unconstructable recursive node", because PyYAML is already mid-construction
+    of that same node.
+    """
+    if isinstance(node, yaml.ScalarNode):
+        value = loader.construct_scalar(node)
+    elif isinstance(node, yaml.SequenceNode):
+        value = loader.construct_sequence(node, deep=True)
+    elif isinstance(node, yaml.MappingNode):
+        value = loader.construct_mapping(node, deep=True)
+    else:  # pragma: no cover - yaml has no other node types
+        value = None
+    return {"Fn::" + tag_suffix: value}
+
+
+_CfnLoader.add_multi_constructor("!", _cfn_tag)
 
 
 @pytest.fixture(scope="module")
@@ -52,12 +74,19 @@ class TestPrivateEndpoint:
         assert "AssociateEndpoint" in tpl["Conditions"]
 
     def test_created_endpoint_is_always_associated(self, tpl):
-        """An endpoint we create is local by definition, so the condition must be
-        true whenever VpcEndpointId is empty — otherwise the common path would lose
-        its header-free hostname."""
-        cond = str(tpl["Conditions"]["AssociateEndpoint"])
-        assert "VpcEndpointId" in cond
-        assert "Fn::Or" in cond
+        """An endpoint we create is local by definition, so association must follow
+        automatically from CreateVpcEndpoint — otherwise the common path would lose
+        its header-free hostname.
+
+        Also gated on HasEndpoint: with no endpoint at all there is nothing to
+        associate, and emitting VpcEndpointIds would make the stack un-deployable.
+        """
+        cond = tpl["Conditions"]["AssociateEndpoint"]
+        assert "Fn::And" in cond
+        rendered = str(cond)
+        assert "CreateVpcEndpoint" in rendered
+        assert "HasEndpoint" in rendered
+        assert "Fn::Or" in rendered
 
     def test_url_falls_back_when_not_associated(self, tpl):
         """Without association the dedicated hostname does not exist, so BootstrapUrl
@@ -116,13 +145,98 @@ class TestResourcePolicy:
 
     def test_policy_scopes_to_source_vpce_both_ways(self, tpl):
         """Allow from our endpoint AND explicitly Deny everything else, so another
-        VPC endpoint in any account cannot invoke it."""
+        VPC endpoint in any account cannot invoke it.
+
+        The statement list is now an Fn::If on HasEndpoint, so reach into the
+        wired branch (index 1 of the Fn::If value: [cond, then, else]).
+        """
         stmts = tpl["Resources"]["BootstrapRestApi"]["Properties"]["Policy"]["Statement"]
-        effects = {s["Effect"] for s in stmts}
+        wired = self._branch(stmts, "then")
+        effects = {s["Effect"] for s in wired}
         assert effects == {"Allow", "Deny"}
-        rendered = str(stmts)
+        rendered = str(wired)
         assert "aws:SourceVpce" in rendered
         assert "StringNotEquals" in rendered
+
+    @staticmethod
+    def _branch(stmts, which):
+        """Pull the then/else branch out of the Fn::If wrapping Statement.
+
+        Fn::If value is [condition_name, then_value, else_value].
+        """
+        assert isinstance(stmts, dict) and "Fn::If" in stmts, (
+            "Statement should be conditional on HasEndpoint"
+        )
+        cond_name, then_branch, else_branch = stmts["Fn::If"]
+        assert cond_name == "HasEndpoint"
+        return then_branch if which == "then" else else_branch
+
+    def test_unwired_policy_denies_everything(self, tpl):
+        """With no endpoint the API must be shut, not open.
+
+        Relying on an empty-string aws:SourceVpce match would be fragile -- if an
+        empty value ever matched, a PRIVATE API would be invokable from ANY
+        execute-api endpoint in ANY AWS account. So the unwired branch is a bare
+        Deny with no Condition at all.
+        """
+        stmts = tpl["Resources"]["BootstrapRestApi"]["Properties"]["Policy"]["Statement"]
+        unwired = self._branch(stmts, "else")
+
+        assert len(unwired) == 1
+        only = unwired[0]
+        assert only["Effect"] == "Deny"
+        # No Condition -> unconditional deny, satisfiable by no caller.
+        assert "Condition" not in only
+        assert "aws:SourceVpce" not in str(only)
+
+
+class TestUnwiredDeployment:
+    """Deploying with no execute-api endpoint is SUPPORTED but UNREACHABLE.
+
+    It was previously a hard abort in deploy.py. That blocked teams whose
+    networking sign-off lags the rest of the rollout, for no safety benefit: the
+    API is private either way, and the resource policy denies all callers until an
+    endpoint exists. Deploying anyway proves out the Lambda, IAM, packaging and
+    Okta issuer/audience wiring, all of which are the same work regardless.
+
+    What must NOT happen is a stack that looks usable. These tests pin that.
+    """
+
+    def test_has_vpc_inputs_condition_exists(self, tpl):
+        cond = str(tpl["Conditions"]["HasVpcInputs"])
+        assert "VpcId" in cond
+        assert "SubnetIds" in cond
+
+    def test_endpoint_creation_requires_vpc_inputs(self, tpl):
+        """Without this, an empty VpcId/SubnetIds still satisfies CreateVpcEndpoint and
+        CloudFormation fails mid-create, leaving a ROLLBACK_COMPLETE stack that has to
+        be deleted by hand before any retry."""
+        cond = str(tpl["Conditions"]["CreateVpcEndpoint"])
+        assert "HasVpcInputs" in cond
+        assert "Fn::And" in cond
+
+    def test_has_endpoint_condition_covers_both_sources(self, tpl):
+        cond = str(tpl["Conditions"]["HasEndpoint"])
+        assert "VpcEndpointId" in cond
+        assert "HasVpcInputs" in cond
+
+    def test_endpoint_configured_output_exists(self, tpl):
+        """The deploy command reads this to decide whether to warn and whether to
+        persist the URL. Renaming it silently breaks that branch."""
+        assert "EndpointConfigured" in tpl["Outputs"]
+        assert "HasEndpoint" in str(tpl["Outputs"]["EndpointConfigured"]["Value"])
+
+    def test_url_reports_not_reachable_when_unwired(self, tpl):
+        """Emitting a plausible-looking hostname would get an MDM anchor built against
+        an endpoint that can never answer."""
+        rendered = str(tpl["Outputs"]["BootstrapUrl"]["Value"])
+        assert "HasEndpoint" in rendered
+        assert "NOT-REACHABLE" in rendered
+
+    def test_vpc_endpoint_id_used_reports_none(self, tpl):
+        rendered = str(tpl["Outputs"]["VpcEndpointIdUsed"]["Value"])
+        assert "HasEndpoint" in rendered
+        assert "NONE" in rendered
 
 
 class TestNoCertificateOrDns:
