@@ -768,6 +768,69 @@ def _log_caller_network_identity(event):
         print(f"callerNetwork: unavailable ({type(exc).__name__})")
 
 
+def _health_response(event):
+    """Friendly HTML reachability page for the /health path.
+
+    Returns 200 with a green 'reachable' page a non-technical user can read in a
+    browser. Deliberately shows the caller's own source IP and VPC endpoint id:
+    both are the caller's own network identity echoed back (not a secret), and the
+    VPC endpoint id is exactly what an admin needs to scope the resource policy, so
+    the same page doubles as the endpoint-discovery tool.
+    """
+    identity = ((event.get("requestContext") or {}).get("identity")) or {}
+    # The key carrying the endpoint id has varied across API Gateway versions, so
+    # surface whichever vpce-looking value is present rather than guess one name.
+    vpce = ""
+    for k, v in identity.items():
+        if isinstance(v, str) and v.startswith("vpce-"):
+            vpce = v
+            break
+    src_ip = identity.get("sourceIp", "") or ""
+    stage = (event.get("requestContext") or {}).get("stage", "") or ""
+    ts = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+
+    def esc(s):
+        return (
+            str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        )
+
+    rows = "".join(
+        f"<tr><td>{esc(k)}</td><td><code>{esc(v)}</code></td></tr>"
+        for k, v in (
+            ("Reached via VPC endpoint", vpce or "(not reported)"),
+            ("Your source IP", src_ip or "(not reported)"),
+            ("Stage", stage),
+            ("Checked at", ts),
+        )
+    )
+    html = (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>Bootstrap server - reachable</title></head>"
+        "<body style='font-family:system-ui,Segoe UI,Arial,sans-serif;"
+        "max-width:640px;margin:3rem auto;padding:0 1rem;color:#1a1a1a'>"
+        "<div style='font-size:3rem;line-height:1'>&#9989;</div>"
+        "<h1 style='margin:.3rem 0'>Connected</h1>"
+        "<p>Your device can reach the Claude Desktop bootstrap server. "
+        "This confirms network connectivity only &mdash; signing in still requires "
+        "your organization login.</p>"
+        "<table style='border-collapse:collapse;width:100%;font-size:.9rem'>"
+        "<style>td{border-bottom:1px solid #eee;padding:.4rem .2rem;text-align:left}"
+        "td:first-child{color:#666;width:45%}</style>"
+        f"{rows}</table></body></html>"
+    )
+    return {
+        "statusCode": 200,
+        "isBase64Encoded": False,
+        "headers": {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+        "body": html,
+    }
+
+
 def lambda_handler(event, context):
     """Main Lambda handler for the Bootstrap Server, invoked by API Gateway.
 
@@ -790,6 +853,19 @@ def lambda_handler(event, context):
         method = (event.get("httpMethod") or "").upper()
         if method == "OPTIONS":
             return _response(204, {})
+
+        # Unauthenticated reachability probe. A user opens <url>/health in a browser;
+        # a green page means their desktop can reach the private endpoint, a hang or
+        # connection error means it cannot. This is the whole connectivity test with
+        # no token, no Okta, no curl -- a helpdesk can drive it. It is gated by the
+        # SAME resource policy as everything else (private endpoint only), so it
+        # cannot be reached from outside the network, and it exposes nothing sensitive
+        # -- only the caller's own source IP and VPC endpoint, echoed back (which also
+        # happens to be the value needed to tighten the resource policy). It never
+        # touches STS, mints no token, and reads no config.
+        resource_path = event.get("resource") or event.get("path") or ""
+        if resource_path.rstrip("/").endswith("/health") or resource_path.rstrip("/") == "health":
+            return _health_response(event)
 
         claims = _extract_claims(event)
         token = _extract_bearer_token(event)

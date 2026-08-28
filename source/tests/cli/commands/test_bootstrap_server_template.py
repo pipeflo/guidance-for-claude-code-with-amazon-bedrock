@@ -57,6 +57,21 @@ def tpl():
     return yaml.load(_TEMPLATE.read_text(), Loader=_CfnLoader)
 
 
+def _deployment_logical_id(tpl):
+    """Find the Deployment by TYPE, not name. Its logical id is deliberately bumped
+    (…Deployment2, …Deployment3) whenever the API surface changes, so tests must not
+    hardcode it."""
+    ids = [
+        k for k, r in tpl["Resources"].items() if r["Type"] == "AWS::ApiGateway::Deployment"
+    ]
+    assert len(ids) == 1, f"expected exactly one Deployment, found {ids}"
+    return ids[0]
+
+
+def _deployment(tpl):
+    return tpl["Resources"][_deployment_logical_id(tpl)]
+
+
 class TestPrivateEndpoint:
     def test_api_is_private(self, tpl):
         """The entire point. A REST API is the only kind that can be PRIVATE."""
@@ -262,22 +277,40 @@ class TestNoCertificateOrDns:
 
 
 class TestRouting:
-    def test_only_config_path_exists(self, tpl):
-        """Any other path is rejected by API Gateway before the Lambda runs."""
-        res = [r for r in tpl["Resources"].values() if r["Type"] == "AWS::ApiGateway::Resource"]
-        assert len(res) == 1
-        assert res[0]["Properties"]["PathPart"] == "config"
+    def test_only_config_and_health_paths_exist(self, tpl):
+        """Two paths: /config (the real endpoint) and /health (an unauthenticated
+        reachability probe). Any OTHER path is rejected by API Gateway before the
+        Lambda runs."""
+        parts = sorted(
+            r["Properties"]["PathPart"]
+            for r in tpl["Resources"].values()
+            if r["Type"] == "AWS::ApiGateway::Resource"
+        )
+        assert parts == ["config", "health"]
 
     def test_method_is_any_so_lambda_sees_options(self, tpl):
         """ANY lets the Lambda answer CORS preflight itself."""
-        m = tpl["Resources"]["ConfigMethod"]["Properties"]
-        assert m["HttpMethod"] == "ANY"
-        assert m["Integration"]["Type"] == "AWS_PROXY"
+        for name in ("ConfigMethod", "HealthMethod"):
+            m = tpl["Resources"][name]["Properties"]
+            assert m["HttpMethod"] == "ANY"
+            assert m["Integration"]["Type"] == "AWS_PROXY"
 
-    def test_deployment_waits_for_the_method(self, tpl):
-        """Without DependsOn, the deployment can be created before the method and
-        the stage serves a 403."""
-        assert tpl["Resources"]["BootstrapRestApiDeployment"].get("DependsOn") == "ConfigMethod"
+    def test_health_needs_no_auth(self, tpl):
+        """The whole point is that a browser with no token gets a page, not a 401."""
+        assert tpl["Resources"]["HealthMethod"]["Properties"]["AuthorizationType"] == "NONE"
+
+    def test_deployment_waits_for_both_methods(self, tpl):
+        """Without DependsOn, the deployment can be created before a method exists and
+        that route 403s on the stage."""
+        dep = _deployment(tpl)
+        assert set(dep.get("DependsOn")) == {"ConfigMethod", "HealthMethod"}
+
+    def test_stage_points_at_the_current_deployment(self, tpl):
+        """The Stage must reference whichever Deployment logical id is current --
+        a stale ref would serve an old API snapshot without the new route."""
+        dep_id = _deployment_logical_id(tpl)
+        stage = tpl["Resources"]["BootstrapRestApiStage"]["Properties"]
+        assert stage["DeploymentId"] == {"Fn::Ref": dep_id}
 
     def test_stage_is_parameterised_and_in_the_url(self, tpl):
         assert "StageName" in tpl["Parameters"]

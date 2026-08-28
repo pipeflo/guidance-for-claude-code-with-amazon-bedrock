@@ -1034,3 +1034,62 @@ class TestCallerNetworkLogging:
         )
         out = capsys.readouterr().out
         assert "callerNetwork" in out
+
+
+class TestHealthEndpoint:
+    """/health is an unauthenticated, browser-openable reachability probe.
+
+    It exists so a non-technical user can test connectivity to the PRIVATE endpoint
+    by opening a URL -- a green page means their desktop reaches it, a hang means it
+    doesn't -- with no token, no Okta, no curl. It must never touch STS or reveal
+    anything beyond the caller's own echoed-back network identity.
+    """
+
+    @staticmethod
+    def _health_event(vpce="vpce-0abc123", src="10.20.30.40", resource="/health"):
+        return {
+            "httpMethod": "GET",
+            "path": resource,
+            "resource": resource,
+            "headers": {},
+            "requestContext": {"stage": "prod", "identity": {"vpceId": vpce, "sourceIp": src}},
+        }
+
+    def test_returns_200_html_without_a_token(self, reload_handler, mock_sts):
+        r = reload_handler.lambda_handler(self._health_event(), None)
+        assert r["statusCode"] == 200
+        assert "text/html" in r["headers"]["Content-Type"]
+        assert "Connected" in r["body"]
+
+    def test_makes_no_sts_call(self, reload_handler, mock_sts):
+        """The probe must be free of the credential path entirely."""
+        reload_handler.lambda_handler(self._health_event(), None)
+        mock_sts.assume_role_with_web_identity.assert_not_called()
+
+    def test_echoes_caller_vpce_and_ip(self, reload_handler, mock_sts):
+        """Doubles as the endpoint-discovery tool: the page shows the vpce the caller
+        arrived through, which is what scopes the resource policy."""
+        r = reload_handler.lambda_handler(
+            self._health_event(vpce="vpce-06198cd828771c8a2", src="172.18.52.9"), None
+        )
+        assert "vpce-06198cd828771c8a2" in r["body"]
+        assert "172.18.52.9" in r["body"]
+
+    def test_health_never_returns_a_token(self, reload_handler, mock_sts):
+        """A regression that routed a real config through /health would be a leak."""
+        r = reload_handler.lambda_handler(self._health_event(), None)
+        assert "inferenceBedrockBearerToken" not in r["body"]
+        assert "bedrock-api-key" not in r["body"]
+
+    def test_config_path_still_requires_auth(self, reload_handler, mock_sts):
+        """/health must not have loosened /config: no token there is still 401."""
+        r = reload_handler.lambda_handler(_event(path="/config"), None)
+        assert r["statusCode"] == 401
+
+    def test_html_escapes_identity_values(self, reload_handler, mock_sts):
+        """Identity values are echoed into HTML; a crafted value must not inject markup."""
+        r = reload_handler.lambda_handler(
+            self._health_event(vpce="vpce-<script>alert(1)</script>"), None
+        )
+        assert "<script>alert(1)</script>" not in r["body"]
+        assert "&lt;script&gt;" in r["body"]

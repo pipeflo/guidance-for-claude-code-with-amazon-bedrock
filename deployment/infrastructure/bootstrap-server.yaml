@@ -422,9 +422,44 @@ Resources:
         IntegrationHttpMethod: POST
         Uri: !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${BootstrapFunction.Arn}/invocations"
 
-  BootstrapRestApiDeployment:
+  # Unauthenticated reachability probe. A user opens <url>/health in a browser;
+  # a green page proves their desktop can reach the private endpoint. Gated by the
+  # same resource policy as /config (private endpoint only), and the Lambda returns
+  # only the caller's own source IP + VPC endpoint -- nothing sensitive, no STS, no
+  # token. See _health_response in the Lambda.
+  HealthResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref BootstrapRestApi
+      ParentId: !GetAtt BootstrapRestApi.RootResourceId
+      PathPart: "health"
+
+  HealthMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BootstrapRestApi
+      ResourceId: !Ref HealthResource
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${BootstrapFunction.Arn}/invocations"
+
+  # NOTE ON THE LOGICAL ID: an AWS::ApiGateway::Deployment snapshots the API at
+  # create time. CloudFormation only creates a NEW snapshot when this resource's
+  # logical id changes -- editing methods/resources alone does NOT redeploy the
+  # stage, so a new route would exist but 404 on /prod. Whenever you change the API
+  # surface (add/remove a resource or method), BUMP the suffix (…Deployment2 ->
+  # …Deployment3) and update the Stage reference below. The '2' suffix here is the
+  # bump that shipped the /health route on top of stacks that predate it.
+  BootstrapRestApiDeployment2:
     Type: AWS::ApiGateway::Deployment
-    DependsOn: ConfigMethod
+    # Both methods must exist before the deployment snapshots the API, or the new
+    # route is silently absent from the stage.
+    DependsOn:
+      - ConfigMethod
+      - HealthMethod
     Properties:
       RestApiId: !Ref BootstrapRestApi
 
@@ -432,7 +467,7 @@ Resources:
     Type: AWS::ApiGateway::Stage
     Properties:
       RestApiId: !Ref BootstrapRestApi
-      DeploymentId: !Ref BootstrapRestApiDeployment
+      DeploymentId: !Ref BootstrapRestApiDeployment2
       StageName: !Ref StageName
 
   BootstrapRestApiPermission:
