@@ -323,13 +323,9 @@ Resources:
                 - !Sub 'arn:${AWS::Partition}:bedrock:*::foundation-model/anthropic.claude-opus-*'
                 - !Sub 'arn:${AWS::Partition}:bedrock:*::foundation-model/anthropic.claude-sonnet-*'
                 - !Sub 'arn:${AWS::Partition}:bedrock:*::foundation-model/anthropic.claude-haiku-*'
-                - !Sub 'arn:${AWS::Partition}:bedrock:*::foundation-model/anthropic.claude-fable-*'
-                - !Sub 'arn:${AWS::Partition}:bedrock:*::foundation-model/anthropic.claude-mythos-*'
                 - !Sub 'arn:${AWS::Partition}:bedrock:::foundation-model/anthropic.claude-opus-*'
                 - !Sub 'arn:${AWS::Partition}:bedrock:::foundation-model/anthropic.claude-sonnet-*'
                 - !Sub 'arn:${AWS::Partition}:bedrock:::foundation-model/anthropic.claude-haiku-*'
-                - !Sub 'arn:${AWS::Partition}:bedrock:::foundation-model/anthropic.claude-fable-*'
-                - !Sub 'arn:${AWS::Partition}:bedrock:::foundation-model/anthropic.claude-mythos-*'
             - !Ref 'AWS::NoValue'
 
           # --- List / discovery permissions ---
