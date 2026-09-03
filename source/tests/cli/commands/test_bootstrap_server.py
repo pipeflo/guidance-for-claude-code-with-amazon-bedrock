@@ -688,8 +688,13 @@ class TestZoneRouting:
         config = reload_handler._build_config_response(claims, "user.token")
 
         assert "banner" in config
-        banner = json.loads(config["banner"])
+        banner = config["banner"]
+        # Native object per bootstrap-config-v2, NOT a JSON string.
+        assert isinstance(banner, dict)
+        # enabled MUST be true or Desktop ignores every other banner field.
+        assert banner["enabled"] is True
         assert "EUROPE" in banner["text"]
+        assert len(banner["text"]) <= 200
 
     def test_banner_includes_cost_attribution(self, reload_handler, zone_env, mock_sts):
         """The header banner shows the zone AND the cost-attribution value from the
@@ -700,7 +705,8 @@ class TestZoneRouting:
             "https://aws.amazon.com/tags/principal_tags/Project": "Alpha",
         }
         config = reload_handler._build_config_response(claims, "user.token")
-        banner = json.loads(config["banner"])
+        banner = config["banner"]
+        assert banner["enabled"] is True
         assert "EUROPE" in banner["text"]
         assert "Project: Alpha" in banner["text"]
 
@@ -708,7 +714,8 @@ class TestZoneRouting:
         """No cost tag on the token → banner shows the zone only, no dangling label."""
         claims = {"sub": "u12", "groups": ["ccwb-europe-beta"]}
         config = reload_handler._build_config_response(claims, "user.token")
-        banner = json.loads(config["banner"])
+        banner = config["banner"]
+        assert banner["enabled"] is True
         assert "EUROPE" in banner["text"]
         assert "Project:" not in banner["text"]
 

@@ -724,17 +724,23 @@ def _build_config_response(claims: dict, user_token: str) -> dict:
 
     # Header banner: inference zone + cost-attribution value, so the user can see
     # which zone they are in and which cost center they are billed to.
+    #
+    # Per bootstrap-config-v2, `banner` is a NATIVE object (not a JSON string, and
+    # not a flat "banner.text" key), and `enabled` MUST be true — "when false or
+    # unset, the other banner fields are ignored", so omitting it hides the banner
+    # entirely. `text` is a single line, max 200 chars, truncated on overflow.
     if zone_name:
         cost_tag_key = _get_cost_tag_key()
         cost_value = _resolve_cost_attribution(claims, cost_tag_key)
         banner_text = f"Claude Desktop — {zone_name.upper()} Zone"
         if cost_value:
             banner_text += f" · {cost_tag_key}: {cost_value}"
-        config["banner"] = json.dumps({
-            "text": banner_text,
+        config["banner"] = {
+            "enabled": True,
+            "text": banner_text[:200],
             "backgroundColor": "#1565c0",
             "textColor": "#ffffff",
-        })
+        }
 
     return config
 
