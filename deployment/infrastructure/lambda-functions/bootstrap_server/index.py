@@ -258,9 +258,18 @@ def _model_label_and_tier(profile: dict):
     return label, family, (major, minor)
 
 
-# NOTE: there is intentionally no 1M-context ("supports1m") helper here. Bedrock
-# rejects the picker's "<id>[1m]" invocation form for application-inference-profile
-# ARNs, so we never advertise it — see the NOTE in _build_inference_models.
+# Tiers whose current models offer a 1M-token context window. Haiku does not.
+# `supports1m` is a per-deployment capability assertion (bootstrap-config-v2): the
+# picker adds a "1M context window" variant for these, and 1M is signalled to
+# Bedrock at request time (the app sends the bare model id — the profile ARN — not
+# a "[1m]"-suffixed one). Confirmed on this account: Converse to the profile ARN
+# with additionalModelRequestFields.anthropic_beta=["context-1m-…"] succeeds for
+# opus and sonnet. Haiku is excluded (no 1M window).
+_TIERS_WITH_1M = {"opus", "sonnet", "fable", "mythos"}
+
+
+def _tier_offers_1m(tier) -> bool:
+    return tier in _TIERS_WITH_1M
 
 
 def _build_inference_models(profiles: list) -> list:
@@ -294,15 +303,11 @@ def _build_inference_models(profiles: list) -> list:
             entry["anthropicFamilyTier"] = e["tier"]
             if newest_by_tier.get(e["tier"]) is e:
                 entry["isFamilyDefault"] = True
-        # NOTE: we deliberately do NOT set `supports1m`. The schema says to set it
-        # "only if the deployment accepts 1M-token context for it", and the picker's
-        # 1M entry invokes the model as "<id>[1m]". Bedrock rejects that [1m] suffix
-        # on an APPLICATION-INFERENCE-PROFILE ARN (ValidationException: "not
-        # authorized to invoke this API operation") — which is what we return for
-        # GDPR zone isolation + cost tagging. (1M on Bedrock is a request-time
-        # anthropic_beta field, which the [1m] picker entry does not use, so there is
-        # no way to offer a working 1M variant for a profile ARN via this flag.)
-        # Advertising it made Sonnet 5 / 4.6 fail with a 503 while Opus 4.8 worked.
+        # Offer the 1M-context variant for tiers that support it (not Haiku). The app
+        # sends the bare ARN and requests 1M via a beta field at invocation, which
+        # this account accepts for the profile ARNs (see _TIERS_WITH_1M).
+        if _tier_offers_1m(e["tier"]):
+            entry["supports1m"] = True
         models.append(entry)
     return models
 
@@ -653,6 +658,10 @@ def _build_config_response(claims: dict, user_token: str) -> dict:
         # Bedrock control plane (ListFoundationModels/ListInferenceProfiles) — the
         # federated role has no control-plane list permission and it would 403.
         "modelDiscoveryEnabled": "false",
+        # With no saved selection, start the picker on the 1M-context variant of the
+        # default model when it offers one (i.e. any tier in _TIERS_WITH_1M). No
+        # effect for models without supports1m.
+        "modelPrefer1mContext": True,
         "inferenceSessionLifetimeSec": INFERENCE_SESSION_LIFETIME_SEC,
         "expiresAt": expires_at,
         "user": {

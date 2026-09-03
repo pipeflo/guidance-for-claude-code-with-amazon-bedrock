@@ -577,6 +577,7 @@ class TestZoneRouting:
                 "labelOverride": "Claude Opus 4.1",
                 "anthropicFamilyTier": "opus",
                 "isFamilyDefault": True,
+                "supports1m": True,
             }
         ]
 
@@ -913,6 +914,7 @@ class TestBuildInferenceModels:
             "labelOverride": "Claude Opus 4.1",
             "anthropicFamilyTier": "opus",
             "isFamilyDefault": True,
+            "supports1m": True,
         }]
 
     def test_newest_version_per_family_is_default(self, reload_handler):
@@ -944,20 +946,20 @@ class TestBuildInferenceModels:
         assert models[0]["labelOverride"] == "Claude Haiku 4.5"
         assert models[0]["anthropicFamilyTier"] == "haiku"
 
-    def test_supports1m_never_set_even_for_sonnet_5_and_4_6(self, reload_handler):
-        """supports1m must NOT be set, even for Sonnet 5 / 4.6.
+    def test_supports1m_set_for_1m_capable_tiers(self, reload_handler):
+        """opus / sonnet / fable get supports1m=True (they offer a 1M window).
 
-        The picker's 1M entry invokes the model as "<id>[1m]", and Bedrock rejects
-        that suffix on an application-inference-profile ARN (ValidationException),
-        which surfaced as a 503 in Claude Desktop while Opus (unflagged) worked. The
-        schema says to set supports1m only if the deployment accepts 1M for the
-        model; ours does not via that mechanism, so it is never advertised."""
+        The app sends the bare ARN and requests 1M via a beta field at invocation,
+        which this account accepts for the profile ARNs; only Haiku is excluded."""
         models = reload_handler._build_inference_models([
             {"arn": "arn:...:/s5", "name": "usa-sonnet-5", "model": "sonnet-5", "description": ""},
             {"arn": "arn:...:/s46", "name": "usa-sonnet-4-6", "model": "sonnet-4-6", "description": ""},
+            {"arn": "arn:...:/o48", "name": "usa-opus-4-8", "model": "opus-4-8", "description": ""},
+            {"arn": "arn:...:/f5", "name": "usa-fable-5", "model": "fable-5", "description": ""},
         ])
-        for m in models:
-            assert "supports1m" not in m
+        by_arn = {m["name"]: m for m in models}
+        for a in ("arn:...:/s5", "arn:...:/s46", "arn:...:/o48", "arn:...:/f5"):
+            assert by_arn[a].get("supports1m") is True, a
 
     def test_major_only_label_has_no_trailing_zero(self, reload_handler):
         """A major-only id renders as 'Claude Sonnet 5', not 'Claude Sonnet 5.0'."""
@@ -969,12 +971,11 @@ class TestBuildInferenceModels:
         assert by_arn["arn:...:/s5"]["labelOverride"] == "Claude Sonnet 5"
         assert by_arn["arn:...:/f5"]["labelOverride"] == "Claude Fable 5"
 
-    def test_supports1m_absent_for_200k_and_other_families(self, reload_handler):
-        """Sonnet 4.5 (200K) and non-sonnet families must NOT claim 1M."""
+    def test_supports1m_absent_for_haiku_and_unknown_families(self, reload_handler):
+        """Haiku has no 1M window, and an unrecognized family must not claim 1M."""
         models = reload_handler._build_inference_models([
-            {"arn": "arn:...:/s45", "name": "usa-sonnet-4-5", "model": "sonnet-4-5", "description": ""},
-            {"arn": "arn:...:/o48", "name": "usa-opus-4-8", "model": "opus-4-8", "description": ""},
-            {"arn": "arn:...:/f5", "name": "usa-fable-5", "model": "fable-5", "description": ""},
+            {"arn": "arn:...:/h45", "name": "usa-haiku-4-5", "model": "haiku-4-5", "description": ""},
+            {"arn": "arn:...:/x", "name": "some-custom-profile", "model": "", "description": ""},
         ])
         for m in models:
             assert "supports1m" not in m
