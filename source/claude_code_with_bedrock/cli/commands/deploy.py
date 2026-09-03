@@ -1091,6 +1091,9 @@ class DeployCommand(Command):
                 discovery_regions = ",".join(getattr(profile, "allowed_bedrock_regions", []) or [profile.aws_region])
                 # The Zone tag key is fixed by the GDPR isolation design ("Zone").
                 zone_tag_key = "Zone"
+                # Cost-attribution tag key for the header banner (e.g. Project /
+                # CostCenter) — the same key the cost-attribution IAM Deny uses.
+                cost_tag_key = getattr(profile, "cost_attribution_tag_key", "Project") or "Project"
 
                 role_config = getattr(profile, "claude_desktop_role_config", {}) or {}
                 feature_defaults = getattr(profile, "claude_desktop_feature_defaults", {}) or {}
@@ -1233,6 +1236,7 @@ class DeployCommand(Command):
                     f"OtlpEndpoint={otlp_endpoint}",
                     f"DiscoveryRegions={discovery_regions}",
                     f"ZoneTagKey={zone_tag_key}",
+                    f"CostTagKey={cost_tag_key}",
                     f"RoleConfig={json.dumps(role_config) if role_config else ''}",
                     f"FeatureDefaults={json.dumps(feature_defaults) if feature_defaults else ''}",
                     f"GroupPrefix={group_prefix}",

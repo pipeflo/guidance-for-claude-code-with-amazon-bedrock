@@ -101,6 +101,12 @@ def _get_discovery_regions():
 def _get_zone_tag_key():
     return os.environ.get("ZONE_TAG_KEY", "Zone")
 
+def _get_cost_tag_key():
+    """The principal-tag key carrying cost attribution — 'Project' or, for some
+    customers, 'CostCenter'. Matches the profile's cost_attribution_tag_key and the
+    aws:PrincipalTag/<key> the cost-attribution IAM Deny checks."""
+    return os.environ.get("COST_TAG_KEY", "Project")
+
 def _get_oidc_issuer():
     return os.environ.get("OIDC_ISSUER", "")
 
@@ -493,6 +499,27 @@ def _resolve_zone_name(claims: dict, prefix: str) -> str | None:
     return None
 
 
+def _resolve_cost_attribution(claims: dict, cost_tag_key: str) -> str | None:
+    """Read the user's cost-attribution value (e.g. Project / CostCenter) from the
+    token's principal-tag claim — the SAME value STS applies as the session tag the
+    cost-attribution IAM policy enforces. Display-only, for the header banner.
+
+    No group-name fallback: unlike the zone, the cost value is not encoded in the
+    group name, so if the tag claim is absent we simply omit it from the banner.
+    """
+    flat = claims.get(f"https://aws.amazon.com/tags/principal_tags/{cost_tag_key}")
+    if isinstance(flat, str) and flat.strip():
+        return flat.strip()
+    nested = claims.get("https://aws.amazon.com/tags")
+    if isinstance(nested, dict):
+        vals = (nested.get("principal_tags") or {}).get(cost_tag_key)
+        if isinstance(vals, list) and vals:
+            return str(vals[0]).strip()
+        if isinstance(vals, str) and vals.strip():
+            return vals.strip()
+    return None
+
+
 def _resolve_role(groups: list[str], role_config: dict, prefix: str) -> dict | None:
     """Resolve user's role from their group memberships.
 
@@ -695,10 +722,16 @@ def _build_config_response(claims: dict, user_token: str) -> dict:
             "x-user-email": user_email,
         }
 
-    # Zone banner (visual indicator for the user)
+    # Header banner: inference zone + cost-attribution value, so the user can see
+    # which zone they are in and which cost center they are billed to.
     if zone_name:
+        cost_tag_key = _get_cost_tag_key()
+        cost_value = _resolve_cost_attribution(claims, cost_tag_key)
+        banner_text = f"Claude Desktop — {zone_name.upper()} Zone"
+        if cost_value:
+            banner_text += f" · {cost_tag_key}: {cost_value}"
         config["banner"] = json.dumps({
-            "text": f"Claude Desktop — {zone_name.upper()} Zone",
+            "text": banner_text,
             "backgroundColor": "#1565c0",
             "textColor": "#ffffff",
         })

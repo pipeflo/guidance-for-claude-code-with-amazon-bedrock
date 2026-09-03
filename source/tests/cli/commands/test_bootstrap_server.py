@@ -691,6 +691,27 @@ class TestZoneRouting:
         banner = json.loads(config["banner"])
         assert "EUROPE" in banner["text"]
 
+    def test_banner_includes_cost_attribution(self, reload_handler, zone_env, mock_sts):
+        """The header banner shows the zone AND the cost-attribution value from the
+        token's principal-tag claim (default key 'Project')."""
+        claims = {
+            "sub": "u11",
+            "groups": ["ccwb-europe-beta"],
+            "https://aws.amazon.com/tags/principal_tags/Project": "Alpha",
+        }
+        config = reload_handler._build_config_response(claims, "user.token")
+        banner = json.loads(config["banner"])
+        assert "EUROPE" in banner["text"]
+        assert "Project: Alpha" in banner["text"]
+
+    def test_banner_omits_cost_when_absent(self, reload_handler, zone_env, mock_sts):
+        """No cost tag on the token → banner shows the zone only, no dangling label."""
+        claims = {"sub": "u12", "groups": ["ccwb-europe-beta"]}
+        config = reload_handler._build_config_response(claims, "user.token")
+        banner = json.loads(config["banner"])
+        assert "EUROPE" in banner["text"]
+        assert "Project:" not in banner["text"]
+
 
 class TestZoneDiscovery:
     """Live discovery of a zone's inference-profile ARNs by Zone tag."""
