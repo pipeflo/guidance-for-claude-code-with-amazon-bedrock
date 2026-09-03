@@ -258,19 +258,9 @@ def _model_label_and_tier(profile: dict):
     return label, family, (major, minor)
 
 
-def _supports_1m(tier, ver) -> bool:
-    """Whether a model has a native 1M-token context window (per AWS model cards).
-
-    Confirmed native-1M (no beta header): Sonnet 4.6 and Sonnet 5. Sonnet 4.5 and
-    earlier are 200K. Opus/Haiku/Fable/Mythos are left unflagged until each is
-    verified against its model card — a wrong `supports1m` would misadvertise the
-    picker, so this errs on the side of NOT claiming 1M. `ver` is (major, minor);
-    a major-only id (e.g. sonnet-5) has minor 0.
-    """
-    if tier == "sonnet":
-        major, minor = ver
-        return major > 4 or (major == 4 and minor >= 6)
-    return False
+# NOTE: there is intentionally no 1M-context ("supports1m") helper here. Bedrock
+# rejects the picker's "<id>[1m]" invocation form for application-inference-profile
+# ARNs, so we never advertise it — see the NOTE in _build_inference_models.
 
 
 def _build_inference_models(profiles: list) -> list:
@@ -304,10 +294,15 @@ def _build_inference_models(profiles: list) -> list:
             entry["anthropicFamilyTier"] = e["tier"]
             if newest_by_tier.get(e["tier"]) is e:
                 entry["isFamilyDefault"] = True
-        # Advertise a native 1M context window where the model card confirms it,
-        # so the Claude Desktop picker can surface / prefer the 1M mode.
-        if _supports_1m(e["tier"], e["ver"]):
-            entry["supports1m"] = True
+        # NOTE: we deliberately do NOT set `supports1m`. The schema says to set it
+        # "only if the deployment accepts 1M-token context for it", and the picker's
+        # 1M entry invokes the model as "<id>[1m]". Bedrock rejects that [1m] suffix
+        # on an APPLICATION-INFERENCE-PROFILE ARN (ValidationException: "not
+        # authorized to invoke this API operation") — which is what we return for
+        # GDPR zone isolation + cost tagging. (1M on Bedrock is a request-time
+        # anthropic_beta field, which the [1m] picker entry does not use, so there is
+        # no way to offer a working 1M variant for a profile ARN via this flag.)
+        # Advertising it made Sonnet 5 / 4.6 fail with a 503 while Opus 4.8 worked.
         models.append(entry)
     return models
 

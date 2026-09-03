@@ -944,15 +944,20 @@ class TestBuildInferenceModels:
         assert models[0]["labelOverride"] == "Claude Haiku 4.5"
         assert models[0]["anthropicFamilyTier"] == "haiku"
 
-    def test_supports1m_set_for_sonnet_5_and_4_6(self, reload_handler):
-        """Native-1M models (Sonnet 5, Sonnet 4.6) get supports1m=True."""
+    def test_supports1m_never_set_even_for_sonnet_5_and_4_6(self, reload_handler):
+        """supports1m must NOT be set, even for Sonnet 5 / 4.6.
+
+        The picker's 1M entry invokes the model as "<id>[1m]", and Bedrock rejects
+        that suffix on an application-inference-profile ARN (ValidationException),
+        which surfaced as a 503 in Claude Desktop while Opus (unflagged) worked. The
+        schema says to set supports1m only if the deployment accepts 1M for the
+        model; ours does not via that mechanism, so it is never advertised."""
         models = reload_handler._build_inference_models([
             {"arn": "arn:...:/s5", "name": "usa-sonnet-5", "model": "sonnet-5", "description": ""},
             {"arn": "arn:...:/s46", "name": "usa-sonnet-4-6", "model": "sonnet-4-6", "description": ""},
         ])
-        by_arn = {m["name"]: m for m in models}
-        assert by_arn["arn:...:/s5"].get("supports1m") is True
-        assert by_arn["arn:...:/s46"].get("supports1m") is True
+        for m in models:
+            assert "supports1m" not in m
 
     def test_major_only_label_has_no_trailing_zero(self, reload_handler):
         """A major-only id renders as 'Claude Sonnet 5', not 'Claude Sonnet 5.0'."""
