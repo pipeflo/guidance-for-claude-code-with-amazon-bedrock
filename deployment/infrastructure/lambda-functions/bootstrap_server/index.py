@@ -107,6 +107,12 @@ def _get_cost_tag_key():
     aws:PrincipalTag/<key> the cost-attribution IAM Deny checks."""
     return os.environ.get("COST_TAG_KEY", "Project")
 
+def _get_cost_label():
+    """Human-readable label shown next to the cost value in the header banner.
+    Decoupled from the tag KEY: the value is still read via _get_cost_tag_key()
+    (e.g. the session tag 'Project'), but the banner presents it as 'Cost Center'."""
+    return os.environ.get("COST_LABEL", "Cost Center")
+
 def _get_oidc_issuer():
     return os.environ.get("OIDC_ISSUER", "")
 
@@ -734,7 +740,7 @@ def _build_config_response(claims: dict, user_token: str) -> dict:
         cost_value = _resolve_cost_attribution(claims, cost_tag_key)
         banner_text = f"Claude Desktop — {zone_name.upper()} Zone"
         if cost_value:
-            banner_text += f" · {cost_tag_key}: {cost_value}"
+            banner_text += f" · {_get_cost_label()}: {cost_value}"
         config["banner"] = {
             "enabled": True,
             "text": banner_text[:200],

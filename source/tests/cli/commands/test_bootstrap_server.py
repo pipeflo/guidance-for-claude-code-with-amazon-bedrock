@@ -697,8 +697,9 @@ class TestZoneRouting:
         assert len(banner["text"]) <= 200
 
     def test_banner_includes_cost_attribution(self, reload_handler, zone_env, mock_sts):
-        """The header banner shows the zone AND the cost-attribution value from the
-        token's principal-tag claim (default key 'Project')."""
+        """The header banner shows the zone AND the cost-attribution value. The value
+        is read from the token's principal-tag claim (key 'Project'), but the label
+        shown is the human-readable 'Cost Center' (decoupled from the tag key)."""
         claims = {
             "sub": "u11",
             "groups": ["ccwb-europe-beta"],
@@ -708,7 +709,8 @@ class TestZoneRouting:
         banner = config["banner"]
         assert banner["enabled"] is True
         assert "EUROPE" in banner["text"]
-        assert "Project: Alpha" in banner["text"]
+        # Label is "Cost Center", value comes from the Project tag.
+        assert "Cost Center: Alpha" in banner["text"]
 
     def test_banner_omits_cost_when_absent(self, reload_handler, zone_env, mock_sts):
         """No cost tag on the token → banner shows the zone only, no dangling label."""
@@ -717,7 +719,18 @@ class TestZoneRouting:
         banner = config["banner"]
         assert banner["enabled"] is True
         assert "EUROPE" in banner["text"]
-        assert "Project:" not in banner["text"]
+        assert "Cost Center:" not in banner["text"]
+
+    def test_banner_label_overridable(self, reload_handler, zone_env, mock_sts, monkeypatch):
+        """COST_LABEL env overrides the banner label without touching the tag key."""
+        monkeypatch.setenv("COST_LABEL", "Billing Code")
+        claims = {
+            "sub": "u13",
+            "groups": ["ccwb-europe-beta"],
+            "https://aws.amazon.com/tags/principal_tags/Project": "Alpha",
+        }
+        config = reload_handler._build_config_response(claims, "user.token")
+        assert "Billing Code: Alpha" in config["banner"]["text"]
 
 
 class TestZoneDiscovery:

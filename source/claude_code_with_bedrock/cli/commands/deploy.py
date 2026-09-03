@@ -1094,6 +1094,10 @@ class DeployCommand(Command):
                 # Cost-attribution tag key for the header banner (e.g. Project /
                 # CostCenter) — the same key the cost-attribution IAM Deny uses.
                 cost_tag_key = getattr(profile, "cost_attribution_tag_key", "Project") or "Project"
+                # Human-readable banner label, decoupled from the tag key so the
+                # value can come from a 'Project' tag while the banner reads
+                # 'Cost Center'. Overridable via profile.cost_attribution_label.
+                cost_label = getattr(profile, "cost_attribution_label", "Cost Center") or "Cost Center"
 
                 role_config = getattr(profile, "claude_desktop_role_config", {}) or {}
                 feature_defaults = getattr(profile, "claude_desktop_feature_defaults", {}) or {}
@@ -1237,6 +1241,7 @@ class DeployCommand(Command):
                     f"DiscoveryRegions={discovery_regions}",
                     f"ZoneTagKey={zone_tag_key}",
                     f"CostTagKey={cost_tag_key}",
+                    f"CostLabel={cost_label}",
                     f"RoleConfig={json.dumps(role_config) if role_config else ''}",
                     f"FeatureDefaults={json.dumps(feature_defaults) if feature_defaults else ''}",
                     f"GroupPrefix={group_prefix}",

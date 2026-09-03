@@ -86,6 +86,11 @@ Parameters:
     Description: "The principal-tag key carrying cost attribution (e.g. Project or CostCenter). Shown in the Desktop header banner; matches the profile's cost_attribution_tag_key."
     Default: "Project"
 
+  CostLabel:
+    Type: String
+    Description: "Human-readable label shown before the cost value in the Desktop header banner. Decoupled from CostTagKey so the value can come from a 'Project' tag while the banner reads 'Cost Center'."
+    Default: "Cost Center"
+
   RoleConfig:
     Type: String
     Description: "JSON mapping of role names to model/MCP config (e.g. {\"consulting\":{\"models\":[\"claude-opus-4-6-v1:0\"],\"max_tokens_per_window\":\"5000000\"}})"
@@ -255,6 +260,7 @@ Resources:
           DISCOVERY_REGIONS: !Ref DiscoveryRegions
           ZONE_TAG_KEY: !Ref ZoneTagKey
           COST_TAG_KEY: !Ref CostTagKey
+          COST_LABEL: !Ref CostLabel
           ROLE_CONFIG: !Ref RoleConfig
           FEATURE_DEFAULTS: !Ref FeatureDefaults
           GROUP_PREFIX: !Ref GroupPrefix
