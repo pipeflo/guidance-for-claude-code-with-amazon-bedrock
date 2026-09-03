@@ -1070,16 +1070,32 @@ class TestHealthEndpoint:
         """Doubles as the endpoint-discovery tool: the page shows the vpce the caller
         arrived through, which is what scopes the resource policy."""
         r = reload_handler.lambda_handler(
-            self._health_event(vpce="vpce-06198cd828771c8a2", src="172.18.52.9"), None
+            self._health_event(vpce="vpce-0123456789abcdef0", src="10.0.0.9"), None
         )
-        assert "vpce-06198cd828771c8a2" in r["body"]
-        assert "172.18.52.9" in r["body"]
+        assert "vpce-0123456789abcdef0" in r["body"]
+        assert "10.0.0.9" in r["body"]
 
     def test_health_never_returns_a_token(self, reload_handler, mock_sts):
         """A regression that routed a real config through /health would be a leak."""
         r = reload_handler.lambda_handler(self._health_event(), None)
         assert "inferenceBedrockBearerToken" not in r["body"]
         assert "bedrock-api-key" not in r["body"]
+
+    def test_alb_event_shows_forwarded_ip_and_no_vpce_row(self, reload_handler, mock_sts):
+        """Behind an ALB there is no requestContext.identity: the client IP arrives
+        in x-forwarded-for, and there is no VPC endpoint to report. The page must
+        still render 'Connected' with the caller's IP and omit the vpce row."""
+        alb_health = {
+            "httpMethod": "GET",
+            "path": "/health",
+            "headers": {"x-forwarded-for": "10.0.0.9, 10.0.0.5"},
+            "requestContext": {"elb": {"targetGroupArn": "arn:aws:elasticloadbalancing:::targetgroup/tg"}},
+        }
+        r = reload_handler.lambda_handler(alb_health, None)
+        assert r["statusCode"] == 200
+        assert "Connected" in r["body"]
+        assert "10.0.0.9" in r["body"]  # first hop of x-forwarded-for
+        assert "VPC endpoint" not in r["body"]  # no vpce over an ALB
 
     def test_config_path_still_requires_auth(self, reload_handler, mock_sts):
         """/health must not have loosened /config: no token there is still 401."""

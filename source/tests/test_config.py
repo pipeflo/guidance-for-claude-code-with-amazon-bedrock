@@ -62,6 +62,33 @@ class TestProfileModel:
         assert profile.cross_region_profile == "us"
         assert profile.allowed_bedrock_regions == ["us-east-1", "us-east-2", "us-west-2"]
 
+    def test_from_dict_ignores_unknown_keys(self):
+        """A profile written by a newer build, or carrying since-removed fields (e.g.
+        the private-REST-API endpoint fields that preceded the ALB), must LOAD, not
+        crash. Before this guard, `cls(**data)` raised TypeError on the first unknown
+        key and every ccwb command died on profile load."""
+        data = {
+            "name": "test",
+            "provider_domain": "test.okta.com",
+            "client_id": "test-client",
+            "credential_storage": "session",
+            "aws_region": "us-east-1",
+            "identity_pool_name": "test-pool",
+            # Stale keys from the private-REST-API era, no longer dataclass fields:
+            "claude_desktop_vpc_endpoint_id": "vpce-legacy",
+            "claude_desktop_stage_name": "prod",
+            "claude_desktop_associate_vpc_endpoint": False,
+            "claude_desktop_allow_any_vpc_endpoint": True,
+            "some_future_field_we_do_not_know": {"nested": 1},
+        }
+
+        profile = Profile.from_dict(data)  # must not raise
+
+        assert profile.name == "test"
+        # The current ALB field is present with its default; stale keys are dropped.
+        assert profile.claude_desktop_alb_scheme == "internal"
+        assert not hasattr(profile, "claude_desktop_vpc_endpoint_id")
+
     def test_migration_us_regions_to_cross_region_profile(self):
         """Test that existing US regions configs get 'us' cross-region profile."""
         # Legacy config without cross_region_profile but with US regions

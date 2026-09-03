@@ -1126,81 +1126,103 @@ class DeployCommand(Command):
                     else:
                         token_audience = profile.client_id
 
-                # Endpoint inputs. A PRIVATE REST API needs no certificate and no DNS
-                # record — AWS provides TLS for the execute-api hostname. It does need
-                # a VPC endpoint: either one the customer already runs, or one created
-                # here from a VPC + subnets they supply. We never create the VPC — a
-                # fresh one would be unreachable, which defeats the purpose.
-                vpc_endpoint_id = getattr(profile, "claude_desktop_vpc_endpoint_id", "") or ""
+                # Endpoint (ALB) inputs. All customer-supplied: this solution does
+                # not provision VPCs, subnets, certificates or connectivity.
+                alb_scheme = getattr(profile, "claude_desktop_alb_scheme", "") or "internal"
                 vpc_id = getattr(profile, "claude_desktop_vpc_id", "") or ""
                 subnet_ids = list(getattr(profile, "claude_desktop_subnet_ids", []) or [])
-                ingress_cidr = getattr(profile, "claude_desktop_endpoint_ingress_cidr", "") or ""
-                stage_name = getattr(profile, "claude_desktop_stage_name", "") or "prod"
-                associate = getattr(profile, "claude_desktop_associate_vpc_endpoint", True)
+                certificate_arn = getattr(profile, "claude_desktop_certificate_arn", "") or ""
+                alb_ingress_cidr = getattr(profile, "claude_desktop_alb_ingress_cidr", "") or ""
 
-                # No endpoint inputs is a SUPPORTED but UNREACHABLE deployment. It was
-                # previously a hard abort; that blocked teams whose networking sign-off
-                # lags the rest of the rollout, for no safety benefit -- the API is
-                # private either way, and the template emits a deny-all resource policy
-                # until an endpoint exists. Deploying now proves out the Lambda, IAM,
-                # packaging and Okta wiring; the endpoint is a later, additive step.
-                #
-                # Warn LOUDLY. A "successful" deploy that answers nothing is a worse
-                # experience than a refusal unless the operator knows exactly why.
-                allow_any_vpce = bool(
-                    getattr(profile, "claude_desktop_allow_any_vpc_endpoint", False)
-                ) and not vpc_endpoint_id
+                # When we created the VPC, its stack is the source of truth — the
+                # profile has no subnet IDs to record, since CloudFormation minted them.
+                if getattr(profile, "claude_desktop_create_vpc", False):
+                    net_stack = profile.stack_names.get(
+                        "bootstrap-networking", f"{profile.identity_pool_name}-bootstrap-networking"
+                    )
+                    net_outputs = get_stack_outputs(net_stack, profile.aws_region) or {}
+                    if not net_outputs.get("VpcId") or not net_outputs.get("SubnetIds"):
+                        console.print(
+                            f"[red]Could not read VPC outputs from stack '{net_stack}'.[/red]"
+                        )
+                        console.print(
+                            "[dim]Your profile requests a new VPC, so that stack must deploy first. "
+                            "Run 'ccwb deploy bootstrap' (which deploys both in order) rather than "
+                            "deploying this stack on its own.[/dim]"
+                        )
+                        return 1
+                    vpc_id = net_outputs["VpcId"]
+                    subnet_ids = [s for s in net_outputs["SubnetIds"].split(",") if s]
+                    # Default ingress to the new VPC's CIDR — the admin never saw it
+                    # to type it in, and for a private VPC this is the only sane value.
+                    if not alb_ingress_cidr:
+                        alb_ingress_cidr = net_outputs.get("VpcCidr", "") or ""
+                    console.print(
+                        f"[dim]Using the VPC created by '{net_stack}': {vpc_id} "
+                        f"({len(subnet_ids)} subnets)[/dim]"
+                    )
+                alb_additional_cidr = (
+                    getattr(profile, "claude_desktop_alb_additional_ingress_cidr", "") or ""
+                )
+                domain_name = getattr(profile, "claude_desktop_domain_name", "") or ""
+                hosted_zone_id = getattr(profile, "claude_desktop_hosted_zone_id", "") or ""
 
-                endpoint_unwired = not vpc_endpoint_id and (not vpc_id or not subnet_ids)
-                if endpoint_unwired and allow_any_vpce:
+                cert_validation_zone_id = (
+                    getattr(profile, "claude_desktop_cert_validation_zone_id", "") or ""
+                )
+                # No certificate ARN is fine IF the stack can request one: it needs a
+                # domain to request it for and a public zone to publish the DNS
+                # validation record in. Without both, CloudFormation would sit waiting
+                # for a validation that can never complete.
+                will_create_cert = bool(
+                    not certificate_arn and domain_name and (cert_validation_zone_id or hosted_zone_id)
+                )
+
+                missing = []
+                if not vpc_id and not getattr(profile, "claude_desktop_create_vpc", False):
+                    missing.append("VPC")
+                if len(subnet_ids) < 2 and not getattr(profile, "claude_desktop_create_vpc", False):
+                    missing.append("at least 2 subnets in different Availability Zones")
+                if not certificate_arn and not will_create_cert:
+                    missing.append(
+                        "either an ACM certificate ARN, or a domain name + hosted zone so one "
+                        "can be requested for you"
+                    )
+                if missing:
                     console.print(
-                        "[bold yellow]Deploying in DISCOVERY mode: the resource policy will "
-                        "allow ANY source VPC endpoint.[/bold yellow]"
+                        "[red]The bootstrap server is fronted by a load balancer, which needs "
+                        "networking details this profile doesn't have yet.[/red]"
+                    )
+                    console.print(f"[yellow]Missing: {', '.join(missing)}.[/yellow]")
+                    console.print(
+                        "[dim]These are supplied by you (the solution never creates VPCs, subnets "
+                        "or certificates). Run 'ccwb init' and complete the Claude Desktop "
+                        "bootstrap section, then re-run 'ccwb deploy bootstrap'.[/dim]"
+                    )
+                    return 1
+
+                if will_create_cert:
+                    console.print(
+                        f"[yellow]No certificate supplied — one will be requested for "
+                        f"[cyan]{domain_name}[/cyan] and validated via DNS.[/yellow]"
                     )
                     console.print(
-                        "[yellow]This is wider than the intended posture. Every request still "
-                        "needs a valid OIDC access token for your tenant (STS verifies it before "
-                        "issuing anything), but do not leave it on for rollout.[/yellow]"
-                    )
-                    console.print(
-                        "[dim]  Make one real request, then read the endpoint id from the Lambda "
-                        "log line beginning 'callerNetwork:'. Set that as "
-                        "claude_desktop_vpc_endpoint_id, set "
-                        "claude_desktop_allow_any_vpc_endpoint back to false, and redeploy.[/dim]\n"
-                    )
-                elif endpoint_unwired:
-                    console.print(
-                        "[bold yellow]⚠  Deploying WITHOUT an execute-api VPC endpoint — "
-                        "the API will NOT be reachable.[/bold yellow]"
-                    )
-                    console.print(
-                        "[yellow]A private REST API is reachable only through an execute-api "
-                        "interface VPC endpoint. Until one is supplied the resource policy denies "
-                        "every caller, so requests will time out or return 403.[/yellow]"
-                    )
-                    console.print(
-                        "[dim]  Everything else (Lambda, IAM, packaging, Okta issuer/audience) IS "
-                        "deployed and verifiable.[/dim]"
-                    )
-                    console.print(
-                        "[dim]  To make it live, set claude_desktop_vpc_endpoint_id (or "
-                        "claude_desktop_vpc_id + claude_desktop_subnet_ids) and re-run "
-                        "'ccwb deploy bootstrap'. The URL changes when a same-account endpoint "
-                        "is associated, so do not push an MDM anchor until then.[/dim]\n"
+                        "[dim]  The stack waits for ACM to issue it, which usually takes a few "
+                        "minutes. The validation zone must be PUBLIC and must host that name, or "
+                        "the deploy will sit waiting rather than fail.[/dim]"
                     )
 
-                if vpc_endpoint_id and not associate:
+                # A cert whose domain nobody resolves is useless: without DNS the
+                # client must use the raw ALB name, which fails TLS verification.
+                if not (domain_name and hosted_zone_id):
                     console.print(
-                        f"[dim]Serving through {vpc_endpoint_id} in another account. Clients will use "
-                        f"the standard execute-api hostname, so private DNS must be enabled on that "
-                        f"endpoint.[/dim]"
+                        "[yellow]Note:[/yellow] no domain name + hosted zone configured, so no DNS "
+                        "record will be created."
                     )
-                elif vpc_endpoint_id:
-                    console.print(f"[dim]Serving through existing VPC endpoint {vpc_endpoint_id}.[/dim]")
-                else:
                     console.print(
-                        f"[dim]An execute-api VPC endpoint will be created in {vpc_id} "
-                        f"({len(subnet_ids)} subnet(s)).[/dim]"
+                        "[dim]  After deploy, point your own DNS at the AlbDnsName output. Clients "
+                        "must connect on a hostname covered by your certificate — the raw ALB "
+                        "hostname will fail TLS verification.[/dim]"
                     )
 
                 params = [
@@ -1216,16 +1238,19 @@ class DeployCommand(Command):
                     f"GroupPrefix={group_prefix}",
                     f"FederatedRoleArn={profile.federated_role_arn}",
                     f"MaxSessionDuration={max_session_duration}",
-                    f"VpcEndpointId={vpc_endpoint_id}",
+                    f"AlbScheme={alb_scheme}",
                     f"VpcId={vpc_id}",
                     f"SubnetIds={','.join(subnet_ids)}",
-                    f"StageName={stage_name}",
-                    f"AssociateVpcEndpoint={'true' if associate else 'false'}",
-                    f"AllowAnyVpcEndpoint={'true' if allow_any_vpce else 'false'}",
+                    f"CertificateArn={certificate_arn}",
+                    f"DomainName={domain_name}",
+                    f"HostedZoneId={hosted_zone_id}",
+                    f"CertificateValidationZoneId={cert_validation_zone_id}",
                 ]
-                # Omitted when empty so the template default applies.
-                if ingress_cidr:
-                    params.append(f"EndpointIngressCidr={ingress_cidr}")
+                # Omit empty CIDRs so the template defaults apply.
+                if alb_ingress_cidr:
+                    params.append(f"AlbIngressCidr={alb_ingress_cidr}")
+                if alb_additional_cidr:
+                    params.append(f"AlbAdditionalIngressCidr={alb_additional_cidr}")
 
                 # The handler (~18KB) exceeds the 4KB inline-ZipFile limit, so the
                 # template references a local dir (Code: ./lambda-functions/...) and
@@ -1288,83 +1313,42 @@ class DeployCommand(Command):
                 if result == 0:
                     outputs = get_stack_outputs(stack_name, profile.aws_region)
                     bootstrap_url = outputs.get("BootstrapUrl", "N/A")
-
-                    # An unwired stack is a real success at the CloudFormation level but
-                    # a failure operationally. Say so plainly, and do NOT persist the
-                    # URL: it changes once a same-account endpoint is associated, so a
-                    # trust anchor generated now would point somewhere that never works.
-                    endpoint_state = str(outputs.get("EndpointConfigured", "true")).lower()
-
-                    if endpoint_state == "discovery":
-                        console.print(
-                            "\n[bold yellow]Deployed in DISCOVERY mode — reachable from ANY VPC "
-                            "endpoint.[/bold yellow]"
-                        )
-                        console.print(f"\n[bold]Bootstrap URL:[/bold] {bootstrap_url}")
-                        console.print(
-                            "[dim]  This is the standard execute-api hostname, so it only resolves "
-                            "where private DNS is enabled on the endpoint your clients use.[/dim]"
-                        )
-                        console.print(
-                            "\n[bold]Now find the real endpoint id:[/bold]\n"
-                            "  1. Make one request from a client machine (a 401 is enough — the "
-                            "policy is what we're testing, not the token)\n"
-                            "  2. [cyan]aws logs filter-log-events --log-group-name "
-                            f"/aws/lambda/{stack_name}-bootstrap \\\n"
-                            "       --filter-pattern callerNetwork[/cyan]\n"
-                            "  3. Take the vpce- id from that line, set "
-                            "[cyan]claude_desktop_vpc_endpoint_id[/cyan],\n"
-                            "     set [cyan]claude_desktop_allow_any_vpc_endpoint[/cyan] to false, "
-                            "and redeploy"
-                        )
-                        console.print(
-                            "\n[yellow]Do not roll out to users in this state.[/yellow] The URL is "
-                            "saved so you can test, but tighten the policy first."
-                        )
-                        if bootstrap_url and bootstrap_url != "N/A":
-                            profile.claude_desktop_bootstrap_endpoint = bootstrap_url
-                            Config.load().save_profile(profile)
-                        return result
-
-                    if endpoint_state != "true":
-                        console.print(
-                            "\n[bold yellow]Bootstrap stack deployed, but NOT reachable."
-                            "[/bold yellow]"
-                        )
-                        console.print(
-                            "[yellow]No execute-api VPC endpoint is configured, so the resource "
-                            "policy denies every caller.[/yellow]"
-                        )
-                        console.print(f"[dim]  BootstrapUrl: {bootstrap_url}[/dim]")
-                        console.print(
-                            "\n[bold]To make it live:[/bold]\n"
-                            "  1. Locate or create an execute-api interface VPC endpoint\n"
-                            "  2. Set [cyan]claude_desktop_vpc_endpoint_id[/cyan] in the profile "
-                            "(plus [cyan]claude_desktop_associate_vpc_endpoint: false[/cyan] if it "
-                            "is in another account)\n"
-                            "  3. Re-run [cyan]ccwb deploy bootstrap[/cyan]"
-                        )
-                        console.print(
-                            "\n[dim]The URL is deliberately NOT saved to the profile, and no MDM "
-                            "anchor should be generated yet.[/dim]"
-                        )
-                        return result
-
-                    console.print(f"\n[bold green]\u2713 Bootstrap server deployed![/bold green]")
+                    health_url = outputs.get("BootstrapUrlHealth", "")
+                    alb_dns_name = outputs.get("AlbDnsName", "")
+                    console.print("\n[bold green]\u2713 Bootstrap server deployed![/bold green]")
                     console.print(f"\n[bold]Bootstrap URL:[/bold] {bootstrap_url}")
+                    if health_url:
+                        console.print(f"[bold]Health check:[/bold] {health_url}")
+                        console.print(
+                            "[dim]  Open the health URL in a browser from a user desktop \u2014 a "
+                            "green 'Connected' page proves reachability, no sign-in needed.[/dim]"
+                        )
+                    # No Route 53 record was created (external DNS): tell the admin
+                    # exactly where to point their own CNAME.
+                    if not (domain_name and hosted_zone_id) and alb_dns_name:
+                        console.print(
+                            f"\n[yellow]Point your DNS for the certificate's hostname at:[/yellow] "
+                            f"[cyan]{alb_dns_name}[/cyan]"
+                        )
                     console.print(
-                        "\n[dim]Add this URL as 'bootstrapUrl' in your MDM anchor profile "
+                        "\n[dim]Add the Bootstrap URL as 'bootstrapUrl' in your MDM anchor profile "
                         "(or run 'ccwb claude-desktop generate').[/dim]"
                     )
-                    console.print(
-                        "\n[yellow]This endpoint is PRIVATE.[/yellow] It is reachable only through "
-                        "the execute-api VPC endpoint — from inside the VPC, or over your own "
-                        "VPN / Direct Connect."
-                    )
-                    console.print(
-                        "[dim]  Verify before rollout: it should time out from an off-network "
-                        "machine and return 401 (not a timeout) from an on-network one.[/dim]"
-                    )
+                    if alb_scheme == "internal":
+                        console.print(
+                            "\n[yellow]This endpoint is PRIVATE.[/yellow] Devices can only reach it "
+                            "from inside the VPC or over your own VPN / Direct Connect."
+                        )
+                        console.print(
+                            "[dim]  Verify before rollout: the URL should time out from an "
+                            "off-network machine and return 401 (not a timeout) from an "
+                            "on-network one.[/dim]"
+                        )
+                    else:
+                        console.print(
+                            "\n[yellow]This endpoint is PUBLIC (internet-facing).[/yellow] "
+                            "Consider attaching an AWS WAF web ACL to the load balancer."
+                        )
                     # Persist endpoint to profile for trust-anchor generation
                     if bootstrap_url and bootstrap_url != "N/A":
                         profile.claude_desktop_bootstrap_endpoint = bootstrap_url

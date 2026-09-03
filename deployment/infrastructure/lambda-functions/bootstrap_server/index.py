@@ -1,5 +1,5 @@
 # ABOUTME: Lambda handler for the Claude Desktop Bootstrap Server (credential broker)
-# ABOUTME: Runs behind a PRIVATE API Gateway REST API. Decodes the user's OIDC token,
+# ABOUTME: Runs behind an internal Application Load Balancer. Decodes the user's OIDC token,
 # ABOUTME: exchanges it for STS credentials via AssumeRoleWithWebIdentity (session tags
 # ABOUTME: intact) — which is what authoritatively validates it — and mints a Bedrock token.
 
@@ -22,12 +22,12 @@ WHERE IS THE JWT VALIDATION?  (the obvious review question)
 
 This used to sit behind an API Gateway HTTP API whose native JWT authorizer
 verified the token before the function ran. HTTP APIs cannot be made private (and
-support neither resource policies nor WAF), so the endpoint is now a PRIVATE REST
-API — which has no equivalent built-in JWT authorizer. An ALB was tried in
-between and rejected: it cannot validate JWTs (its authenticate-oidc action is a
-browser-redirect flow, wrong for a bearer-token API call) and it would have
-required a customer-supplied ACM certificate, whereas execute-api provides
-AWS-managed TLS.
+support neither resource policies nor WAF), so the endpoint is now an internal
+Application Load Balancer — which has no built-in JWT authorizer (an ALB's
+authenticate-oidc action is a browser-redirect flow, the wrong shape for a
+bearer-token API call). An internal ALB has only private IPs, so it is reachable
+solely from inside the VPC or over the customer's own VPN / Direct Connect, and
+its HTTPS listener uses a customer-supplied ACM certificate.
 
 **STS is the authoritative validator.** `AssumeRoleWithWebIdentity` verifies the
 token's signature against the IdP's published JWKS, checks `iss` against the IAM
@@ -772,21 +772,29 @@ def _health_response(event):
     """Friendly HTML reachability page for the /health path.
 
     Returns 200 with a green 'reachable' page a non-technical user can read in a
-    browser. Deliberately shows the caller's own source IP and VPC endpoint id:
-    both are the caller's own network identity echoed back (not a secret), and the
-    VPC endpoint id is exactly what an admin needs to scope the resource policy, so
-    the same page doubles as the endpoint-discovery tool.
+    browser. Deliberately shows the caller's own source IP (their own network
+    identity echoed back, not a secret) so a helpdesk can confirm which client
+    reached the endpoint.
+
+    Behind an internal ALB the client IP arrives in the x-forwarded-for header, not
+    in requestContext (which carries only the ALB's target-group ARN). Fall back to
+    requestContext.identity for any deployment that still fronts this with an API
+    Gateway, and surface a VPC endpoint id only when one is actually present.
     """
+    headers = event.get("headers", {}) or {}
     identity = ((event.get("requestContext") or {}).get("identity")) or {}
-    # The key carrying the endpoint id has varied across API Gateway versions, so
-    # surface whichever vpce-looking value is present rather than guess one name.
+
+    # Client IP: first hop of x-forwarded-for (ALB), else requestContext.identity.
+    xff = headers.get("x-forwarded-for", headers.get("X-Forwarded-For", "")) or ""
+    src_ip = (xff.split(",")[0].strip() if xff else "") or identity.get("sourceIp", "") or ""
+
+    # A VPC endpoint id only exists on an API-Gateway private-endpoint deployment;
+    # an ALB has none. Surface whichever vpce-looking value is present, if any.
     vpce = ""
-    for k, v in identity.items():
+    for v in identity.values():
         if isinstance(v, str) and v.startswith("vpce-"):
             vpce = v
             break
-    src_ip = identity.get("sourceIp", "") or ""
-    stage = (event.get("requestContext") or {}).get("stage", "") or ""
     ts = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
 
     def esc(s):
@@ -794,14 +802,12 @@ def _health_response(event):
             str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         )
 
+    row_pairs = [("Your source IP", src_ip or "(not reported)")]
+    if vpce:
+        row_pairs.append(("Reached via VPC endpoint", vpce))
+    row_pairs.append(("Checked at", ts))
     rows = "".join(
-        f"<tr><td>{esc(k)}</td><td><code>{esc(v)}</code></td></tr>"
-        for k, v in (
-            ("Reached via VPC endpoint", vpce or "(not reported)"),
-            ("Your source IP", src_ip or "(not reported)"),
-            ("Stage", stage),
-            ("Checked at", ts),
-        )
+        f"<tr><td>{esc(k)}</td><td><code>{esc(v)}</code></td></tr>" for k, v in row_pairs
     )
     html = (
         "<!doctype html><html><head><meta charset='utf-8'>"

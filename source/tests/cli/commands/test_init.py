@@ -507,60 +507,60 @@ class TestExistingConfigRoundTrip:
         assert cd["role_config"]["engineering"]["models"] == ["claude-opus-4-6-v1:0"]
 
     def test_bootstrap_endpoint_settings_preserved(self, monkeypatch):
-        """Endpoint settings survive the round-trip.
+        """ALB endpoint settings survive the round-trip.
 
-        These are painful to re-enter (VPC endpoint / VPC / subnet IDs), and losing
-        them silently would fail the deploy guard or, worse, quietly re-create a
-        second VPC endpoint alongside the one already in use.
+        These are painful to re-enter (VPC, subnet and certificate IDs), and
+        silently losing them would flip a private endpoint back to the default or
+        fail the deploy guard.
         """
         profile = self._make_profile(
             cowork_config_mode="dynamic",
-            claude_desktop_vpc_endpoint_id="vpce-0abc123",
-            claude_desktop_stage_name="prod",
-        )
-        existing = self._build_existing_config(profile, monkeypatch)
-
-        cd = existing["claude_desktop"]
-        assert cd["vpc_endpoint_id"] == "vpce-0abc123"
-        assert cd["stage_name"] == "prod"
-
-    def test_cross_account_endpoint_flag_preserved(self, monkeypatch):
-        """A central-networking-account endpoint cannot be associated. Losing that
-        flag would flip the URL back to a hostname that does not exist."""
-        profile = self._make_profile(
-            cowork_config_mode="dynamic",
-            claude_desktop_vpc_endpoint_id="vpce-0central",
-            claude_desktop_associate_vpc_endpoint=False,
-        )
-        cd = self._build_existing_config(profile, monkeypatch)["claude_desktop"]
-        assert cd["vpc_endpoint_id"] == "vpce-0central"
-        assert cd["associate_vpc_endpoint"] is False
-
-    def test_endpoint_creation_settings_preserved(self, monkeypatch):
-        """The create-an-endpoint path keeps its VPC, subnets and ingress CIDR."""
-        profile = self._make_profile(
-            cowork_config_mode="dynamic",
+            claude_desktop_alb_scheme="internal",
             claude_desktop_vpc_id="vpc-0abc123",
             claude_desktop_subnet_ids=["subnet-0aaa", "subnet-0bbb"],
-            claude_desktop_endpoint_ingress_cidr="10.50.0.0/16",
+            claude_desktop_certificate_arn=(
+                "arn:aws:acm:us-east-1:123456789012:certificate/11111111-2222-3333-4444-555555555555"
+            ),
+            claude_desktop_alb_ingress_cidr="10.50.0.0/16",
+            claude_desktop_alb_additional_ingress_cidr="10.200.0.0/22",
+            claude_desktop_domain_name="bootstrap.internal.example.com",
+            claude_desktop_hosted_zone_id="Z0EXAMPLEZONE",
         )
         existing = self._build_existing_config(profile, monkeypatch)
 
         cd = existing["claude_desktop"]
+        assert cd["alb_scheme"] == "internal"
         assert cd["vpc_id"] == "vpc-0abc123"
         assert cd["subnet_ids"] == ["subnet-0aaa", "subnet-0bbb"]
-        assert cd["endpoint_ingress_cidr"] == "10.50.0.0/16"
-        assert cd["vpc_endpoint_id"] == ""
+        assert cd["certificate_arn"].startswith("arn:aws:acm:")
+        assert cd["alb_ingress_cidr"] == "10.50.0.0/16"
+        assert cd["alb_additional_ingress_cidr"] == "10.200.0.0/22"
+        assert cd["domain_name"] == "bootstrap.internal.example.com"
+        assert cd["hosted_zone_id"] == "Z0EXAMPLEZONE"
 
-    def test_bootstrap_endpoint_defaults(self, monkeypatch):
-        """A vanilla profile reports empty endpoint inputs and the default stage."""
-        cd = self._build_existing_config(self._make_profile(), monkeypatch)["claude_desktop"]
+    def test_bootstrap_endpoint_defaults_to_internal(self, monkeypatch):
+        """A profile with no endpoint config defaults to the private scheme."""
+        existing = self._build_existing_config(self._make_profile(), monkeypatch)
 
-        assert cd["vpc_endpoint_id"] == ""
-        assert cd["subnet_ids"] == []
-        assert cd["stage_name"] == "prod"
-        # Default is to associate: the common path creates a local endpoint.
-        assert cd["associate_vpc_endpoint"] is True
+        assert existing["claude_desktop"]["alb_scheme"] == "internal"
+        assert existing["claude_desktop"]["subnet_ids"] == []
+        # Bring-your-own-VPC is the default; creating one is opt-in.
+        assert existing["claude_desktop"]["create_vpc"] is False
+
+    def test_create_vpc_settings_preserved(self, monkeypatch):
+        """create_vpc + the CIDR survive, so re-running init doesn't silently
+        switch a customer from 'create a VPC' back to 'pick an existing one'."""
+        profile = self._make_profile(
+            cowork_config_mode="dynamic",
+            claude_desktop_create_vpc=True,
+            claude_desktop_vpc_cidr="10.77.0.0/16",
+            claude_desktop_alb_scheme="internal",
+        )
+        existing = self._build_existing_config(profile, monkeypatch)
+
+        cd = existing["claude_desktop"]
+        assert cd["create_vpc"] is True
+        assert cd["vpc_cidr"] == "10.77.0.0/16"
 
     def test_quota_fields_preserved(self, monkeypatch):
         """Daily limit and enforcement modes survive (previously dropped)."""

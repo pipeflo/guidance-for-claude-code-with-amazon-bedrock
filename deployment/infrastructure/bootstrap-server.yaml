@@ -1,31 +1,25 @@
 # ABOUTME: CloudFormation template for the Claude Desktop Bootstrap Server (credential broker)
-# ABOUTME: Deploys a PRIVATE API Gateway REST API + Lambda that brokers a per-user Bedrock
-# ABOUTME: bearer token via AssumeRoleWithWebIdentity and returns per-user config at sign-in.
-# ABOUTME: No end-user binary; pure MDM trust anchor on devices.
+# ABOUTME: Deploys an Application Load Balancer (internal or internet-facing) + Lambda that
+# ABOUTME: brokers a per-user Bedrock bearer token via AssumeRoleWithWebIdentity and returns
+# ABOUTME: per-user config at sign-in. No end-user binary; pure MDM trust anchor on devices.
 
-# WHY A PRIVATE REST API
-#   The endpoint must be reachable only over the customer's private network. Of the
-#   options AWS offers, only a REST API can be PRIVATE ("you can only configure
-#   REST APIs as private" — an HTTP API cannot, and neither supports it on the
-#   client-facing side otherwise).
-#
-#   Crucially, a private REST API keeps AWS-MANAGED TLS on the execute-api
-#   hostname, so this template needs NO ACM certificate, NO public hosted zone and
-#   NO DNS record. That is why it replaced an internal Application Load Balancer:
-#   an ALB HTTPS listener requires a certificate you supply, and AWS will not issue
-#   one for *.elb.amazonaws.com.
-#
-#   Reachability is the customer's responsibility. This template provisions NO
-#   connectivity — no VPN, Direct Connect, Transit Gateway or peering — and does
-#   not create a VPC. A brand-new VPC would be pointless here: nothing could reach
-#   the endpoint inside it.
+# WHY AN ALB AND NOT API GATEWAY
+#   An API Gateway HTTP API cannot be made private ("you can only configure REST
+#   APIs as private") and supports neither resource policies nor AWS WAF. With
+#   AlbScheme=internal the ALB has only private IPs, so the endpoint is reachable
+#   exclusively from inside the VPC or over the customer's own VPN / Direct
+#   Connect. This template provisions NO connectivity (no VPN, Direct Connect,
+#   Transit Gateway or peering) and NO hosted zone or certificate: the VPC,
+#   subnets, certificate and DNS are all customer-supplied inputs.
 #
 # WHERE TOKEN VALIDATION WENT
-#   There is no API Gateway JWT authorizer (REST APIs do not offer one). The
-#   authoritative validator is STS: AssumeRoleWithWebIdentity verifies the token's
-#   signature against the IdP's JWKS plus iss/aud/exp before any credential is
-#   issued. The Lambda also runs a cheap signature-free pre-check on iss/aud/exp
-#   purely to fail fast. See the Lambda module docstring for the full argument.
+#   There is no API Gateway JWT authorizer any more — an ALB cannot validate JWTs,
+#   and its authenticate-oidc action is a browser-redirect flow, which is the
+#   wrong shape for a bearer-token API call. The authoritative validator is STS:
+#   AssumeRoleWithWebIdentity verifies the token's signature against the IdP's
+#   JWKS plus iss/aud/exp before any credential is issued. The Lambda also runs a
+#   cheap signature-free pre-check on iss/aud/exp purely to fail fast. See the
+#   Lambda module docstring for the full argument.
 
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
@@ -33,8 +27,8 @@ Description: >
   configuration dynamically at sign-in as an alternative to static MDM profiles.
   Exchanges the user's OIDC token for STS credentials (session tags intact), mints
   a short-term Amazon Bedrock bearer token scoped to the user's zone, and returns
-  it with region, models, feature toggles and OTEL settings. Served from a PRIVATE
-  API Gateway REST API reachable only through an execute-api VPC endpoint.
+  it with region, models, feature toggles and OTEL settings. Fronted by an
+  Application Load Balancer that can be internal (private) or internet-facing.
 
 Parameters:
   OidcIssuerUrl:
@@ -120,115 +114,115 @@ Parameters:
     MaxValue: 43200
 
   # ---------------------------------------------------------------------------
-  # Endpoint (private REST API). No certificate, no hosted zone, no DNS record:
-  # AWS provides TLS for the execute-api hostname.
+  # Endpoint (ALB) — customer-supplied networking. Nothing here creates
+  # connectivity; reaching an internal ALB is the customer's responsibility
+  # (VPN / Direct Connect / in-VPC clients).
   # ---------------------------------------------------------------------------
-  VpcEndpointId:
+  AlbScheme:
     Type: String
     Description: >
-      Existing com.amazonaws.<region>.execute-api interface VPC endpoint to serve
-      the API through. Leave EMPTY to have this stack create one, in which case
-      VpcId and SubnetIds are required. Supply your own if your organisation
-      manages endpoints centrally.
-    Default: ""
+      internal = private endpoint, only reachable from within the VPC or over the
+      customer's own VPN/Direct Connect (recommended). internet-facing = public
+      ALB; if you choose this, front it with AWS WAF.
+    Default: internal
+    AllowedValues:
+      - internal
+      - internet-facing
 
   VpcId:
-    Type: String
-    Description: "VPC to create the execute-api endpoint in. Required only when VpcEndpointId is empty."
-    Default: ""
+    Type: AWS::EC2::VPC::Id
+    Description: "VPC to place the load balancer in"
 
   SubnetIds:
-    Type: CommaDelimitedList
+    Type: List<AWS::EC2::Subnet::Id>
     Description: >
-      Subnets for the execute-api endpoint, ideally one per Availability Zone you
-      serve. Required only when VpcEndpointId is empty.
+      At least two subnets in DIFFERENT Availability Zones for the load balancer.
+      For AlbScheme=internal use private subnets. No NAT is required: the ALB
+      needs no outbound access and the Lambda is invoked through the Lambda API
+      rather than from inside the subnet.
+
+  CertificateArn:
+    Type: String
+    Description: >
+      ACM certificate ARN for the HTTPS listener, in THIS region. Leave EMPTY to
+      have the stack request one for DomainName, DNS-validated via
+      CertificateValidationZoneId (or HostedZoneId). Supply your own when you use
+      ACM Private CA, an imported certificate, or a domain outside Route 53. The
+      certificate's domain must match the hostname clients connect to, otherwise
+      TLS verification fails.
     Default: ""
 
-  EndpointIngressCidr:
+  CertificateValidationZoneId:
     Type: String
     Description: >
-      CIDR allowed to reach the created VPC endpoint on 443 — normally the VPC CIDR
-      plus, via routing, your VPN clients. Ignored when VpcEndpointId is supplied.
+      Optional. PUBLIC Route 53 hosted zone used only to publish the ACM DNS
+      validation record. Needed when HostedZoneId is a PRIVATE zone: ACM's
+      validators query public DNS, so a private zone cannot prove domain control.
+      Defaults to HostedZoneId, which is correct when that zone is public.
+      Ignored when CertificateArn is supplied.
+    Default: ""
+
+  AlbIngressCidr:
+    Type: String
+    Description: >
+      CIDR allowed to reach the listener on 443 — normally the VPC CIDR. Use
+      0.0.0.0/0 only with AlbScheme=internet-facing.
     Default: "10.0.0.0/8"
+    AllowedPattern: "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
+    ConstraintDescription: "Must be a valid IPv4 CIDR block"
 
-  AssociateVpcEndpoint:
+  AlbAdditionalIngressCidr:
     Type: String
     Description: >
-      Associate the API with the VPC endpoint. Association yields the dedicated
-      hostname {api-id}-{vpce-id}.execute-api... which needs no request header, and
-      is the right choice for an endpoint in THIS account. Set to "false" when the
-      endpoint lives in another account (e.g. a central networking account), where
-      association is not possible: rely on private DNS on that endpoint and use the
-      BootstrapUrlPrivateDns form instead.
-    Default: "true"
-    AllowedValues: ["true", "false"]
+      Optional second CIDR allowed on 443 — typically the VPN client CIDR, which
+      is outside the VPC range. Leave empty if not needed.
+    Default: ""
 
-  AllowAnyVpcEndpoint:
+  DomainName:
     Type: String
     Description: >
-      DISCOVERY / TRANSITIONAL MODE. When "true" the resource policy allows any
-      source VPC endpoint instead of one specific vpce-id.
+      Optional. Hostname clients use (must be covered by CertificateArn). Set this
+      together with HostedZoneId to have the stack create the alias record. Leave
+      both empty if your DNS is managed outside Route 53 — then point a CNAME at
+      the AlbDnsName output yourself.
+    Default: ""
 
-      Use it when the endpoint is managed by a team who cannot readily tell you its
-      id: deploy with this on, make one real request, and read the endpoint id out
-      of the Lambda's logged requestContext.identity. Then set VpcEndpointId and
-      redeploy with this back to "false" to reach the tight policy.
-
-      Exposure while enabled: the API can be invoked from ANY execute-api endpoint
-      in ANY AWS account. That is a genuine widening, but bounded -- every request
-      still needs a valid OIDC access token for your tenant, which STS
-      AssumeRoleWithWebIdentity verifies before any credential is issued. Do not
-      leave this on permanently.
-
-      Ignored when VpcEndpointId is set: an explicit endpoint always wins.
-    Default: "false"
-    AllowedValues: ["true", "false"]
-
-  StageName:
+  HostedZoneId:
     Type: String
-    Description: "REST API stage name. Appears in the invoke URL path."
-    Default: "prod"
-    AllowedPattern: "^[a-zA-Z0-9_-]+$"
+    Description: >
+      Optional. Route 53 hosted zone ID for DomainName. Works with either a PRIVATE
+      zone (recommended for AlbScheme=internal) or a public zone. A public zone
+      pointing at an internal ALB publishes your private IPs — valid, but some
+      security teams object.
+    Default: ""
 
 Conditions:
-  # Did the admin give us a VPC + subnets to build an endpoint in?
-  HasVpcInputs: !And
-    - !Not [!Equals [!Ref VpcId, ""]]
-    - !Not [!Equals [!Join ["", !Ref SubnetIds], ""]]
+  # Only create the DNS record when we have both halves; otherwise the admin
+  # wires DNS up themselves from the AlbDnsName output.
+  HasDns: !And
+    - !Not [!Equals [!Ref DomainName, ""]]
+    - !Not [!Equals [!Ref HostedZoneId, ""]]
 
-  # Create the endpoint only when the admin didn't point us at one AND gave us
-  # somewhere to put it. Without VPC inputs there is nothing to create.
-  CreateVpcEndpoint: !And
-    - !Equals [!Ref VpcEndpointId, ""]
-    - !Condition HasVpcInputs
+  # A domain name was supplied at all. Drives the published BootstrapUrl. This is
+  # DELIBERATELY separate from HasDns: a customer whose DNS lives OUTSIDE Route 53
+  # (e.g. corporate Infoblox/BIND) supplies DomainName but no HostedZoneId — they
+  # point their own CNAME at the AlbDnsName output. The MDM URL must still use their
+  # hostname (the one the certificate covers); the raw ALB name would fail TLS.
+  HasDomainName: !Not [!Equals [!Ref DomainName, ""]]
 
-  # Is there an endpoint at all -- supplied or created?
-  #
-  # "Neither" is a DELIBERATE, supported state: it deploys the API, Lambda, IAM and
-  # packaging so the whole chain can be validated, while leaving the API
-  # UNREACHABLE until an execute-api endpoint is supplied. A private REST API is
-  # reachable only through such an endpoint, so there is no way to make it usable
-  # here -- but there is no reason to block the rest of the stack either. Supply
-  # VpcEndpointId (or VpcId + SubnetIds) and redeploy to make it live.
-  HasEndpoint: !Or
-    - !Not [!Equals [!Ref VpcEndpointId, ""]]
-    - !Condition HasVpcInputs
+  HasAdditionalIngressCidr: !Not [!Equals [!Ref AlbAdditionalIngressCidr, ""]]
 
-  # Discovery mode: allow any source vpce because we don't know the id yet. Only
-  # meaningful when no explicit endpoint was given -- an explicit one always wins.
-  AllowAnyVpce: !And
-    - !Equals [!Ref AllowAnyVpcEndpoint, "true"]
-    - !Equals [!Ref VpcEndpointId, ""]
-
-  # A VPC endpoint in another account cannot be associated with this API, so the
-  # dedicated {api-id}-{vpce-id} hostname is unavailable there. An endpoint we
-  # create is always local, so it is always associated. With no endpoint at all
-  # there is nothing to associate.
-  AssociateEndpoint: !And
-    - !Condition HasEndpoint
+  # Request a certificate only when the admin didn't supply one. Requires a domain
+  # to request it FOR and a zone to publish the validation record IN — without both
+  # the stack would hang waiting for a validation that can never succeed.
+  CreateCertificate: !And
+    - !Equals [!Ref CertificateArn, ""]
+    - !Not [!Equals [!Ref DomainName, ""]]
     - !Or
-      - !Condition CreateVpcEndpoint
-      - !Equals [!Ref AssociateVpcEndpoint, "true"]
+      - !Not [!Equals [!Ref CertificateValidationZoneId, ""]]
+      - !Not [!Equals [!Ref HostedZoneId, ""]]
+
+  UseSeparateValidationZone: !Not [!Equals [!Ref CertificateValidationZoneId, ""]]
 
 Resources:
   BootstrapFunction:
@@ -244,8 +238,8 @@ Resources:
       Code: ./lambda-functions/bootstrap_server/
       Environment:
         Variables:
-          # API Gateway REST APIs have no JWT authorizer, so the function does a
-          # cheap signature-free pre-check on iss/aud/exp to fail fast. The
+          # An ALB cannot validate JWTs, so the function does a cheap
+          # signature-free pre-check on iss/aud/exp to fail fast. The
           # authoritative validation is STS AssumeRoleWithWebIdentity.
           OIDC_ISSUER: !Ref OidcIssuerUrl
           OIDC_AUDIENCE: !Ref OidcAudience
@@ -287,255 +281,214 @@ Resources:
         - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 
   # ---------------------------------------------------------------------------
-  # execute-api interface VPC endpoint (only when not supplied)
+  # Endpoint: Application Load Balancer -> Lambda target.
   #
-  # Private DNS is deliberately DISABLED. Enabling it would hijack
-  # execute-api.<region>.amazonaws.com for the WHOLE VPC, breaking any workload
-  # there that calls a public/regional API Gateway. Instead the API is ASSOCIATED
-  # with the endpoint, which yields the dedicated hostname
-  #   https://{api-id}-{vpce-id}.execute-api.<region>.amazonaws.com/<stage>
-  # That form needs no Host or x-apigw-api-id header — which matters, because
-  # Claude Desktop cannot send a custom header when fetching its bootstrap config.
+  # Chosen over API Gateway because an HTTP API cannot be made private
+  # ("you can only configure REST APIs as private") and supports neither
+  # resource policies nor AWS WAF. With AlbScheme=internal the endpoint has only
+  # private IPs, so it is reachable exclusively from inside the VPC or over the
+  # customer's own VPN / Direct Connect.
   # ---------------------------------------------------------------------------
-  EndpointSecurityGroup:
+  AlbSecurityGroup:
     Type: AWS::EC2::SecurityGroup
-    Condition: CreateVpcEndpoint
     Properties:
-      GroupDescription: !Sub "${AWS::StackName} execute-api endpoint - HTTPS from approved CIDR"
+      GroupDescription: !Sub "${AWS::StackName} bootstrap ALB - HTTPS from approved CIDRs"
       VpcId: !Ref VpcId
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 443
           ToPort: 443
-          CidrIp: !Ref EndpointIngressCidr
+          CidrIp: !Ref AlbIngressCidr
           Description: "HTTPS from approved CIDR"
+        - !If
+          - HasAdditionalIngressCidr
+          - IpProtocol: tcp
+            FromPort: 443
+            ToPort: 443
+            CidrIp: !Ref AlbAdditionalIngressCidr
+            Description: "HTTPS from additional approved CIDR (e.g. VPN clients)"
+          - !Ref AWS::NoValue
       Tags:
-        - Key: Name
-          Value: !Sub "${AWS::StackName}-execute-api-vpce-sg"
         - Key: Application
           Value: "claude-code-with-bedrock"
+        - Key: Component
+          Value: "bootstrap-server"
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-bootstrap-alb-sg"
 
-  ExecuteApiEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Condition: CreateVpcEndpoint
+  BootstrapAlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
-      ServiceName: !Sub "com.amazonaws.${AWS::Region}.execute-api"
-      VpcEndpointType: Interface
-      VpcId: !Ref VpcId
-      SubnetIds: !Ref SubnetIds
-      SecurityGroupIds:
-        - !Ref EndpointSecurityGroup
-      PrivateDnsEnabled: false
+      Name: !Sub "${AWS::StackName}-bs-alb"
+      Type: application
+      Scheme: !Ref AlbScheme
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+      Subnets: !Ref SubnetIds
+      Tags:
+        - Key: Application
+          Value: "claude-code-with-bedrock"
+        - Key: Component
+          Value: "bootstrap-server"
 
-  # ---------------------------------------------------------------------------
-  # Private REST API
-  #
-  # NOTE ON LOGICAL IDS: these are deliberately BootstrapRestApi* and not
-  # BootstrapApi*. Earlier releases used AWS::ApiGatewayV2::Api / ::Stage under the
-  # logical IDs BootstrapApi and BootstrapApiStage, and CloudFormation refuses to
-  # change the resource type of an existing logical ID ("Update of resource type is
-  # not permitted"). Renaming lets CFN delete the old pair and create these, so
-  # existing stacks update in place. Do NOT rename them back.
-  # ---------------------------------------------------------------------------
-  BootstrapRestApi:
-    Type: AWS::ApiGateway::RestApi
-    Properties:
-      Name: !Sub "${AWS::StackName}-api"
-      Description: "Claude Desktop Bootstrap Server (private)"
-      EndpointConfiguration:
-        Types:
-          - PRIVATE
-        # Omitted for a cross-account endpoint: association is same-account only.
-        # The resource policy below is what grants access either way.
-        VpcEndpointIds: !If
-          - AssociateEndpoint
-          - - !If [CreateVpcEndpoint, !Ref ExecuteApiEndpoint, !Ref VpcEndpointId]
-          - !Ref AWS::NoValue
-      # A PRIVATE API is inaccessible to every VPC until a resource policy grants
-      # access. Scope it to the one endpoint so another VPC endpoint in any account
-      # cannot invoke it. Enforced at the edge, before the Lambda runs.
-      #
-      # With NO endpoint configured we emit a bare Deny instead. Relying on an
-      # empty-string aws:SourceVpce match would be fragile (API Gateway may reject
-      # an empty condition value, and an empty value silently matching would be far
-      # worse than failing). An explicit Deny makes "deployed but not yet wired"
-      # unambiguous: the stack is complete, the API answers nothing.
-      Policy:
-        Version: "2012-10-17"
-        Statement: !If
-          - HasEndpoint
-          - - Effect: Allow
-              Principal: "*"
-              Action: "execute-api:Invoke"
-              Resource: "execute-api:/*"
-              Condition:
-                StringEquals:
-                  "aws:SourceVpce": !If
-                    - CreateVpcEndpoint
-                    - !Ref ExecuteApiEndpoint
-                    - !Ref VpcEndpointId
-            - Effect: Deny
-              Principal: "*"
-              Action: "execute-api:Invoke"
-              Resource: "execute-api:/*"
-              Condition:
-                StringNotEquals:
-                  "aws:SourceVpce": !If
-                    - CreateVpcEndpoint
-                    - !Ref ExecuteApiEndpoint
-                    - !Ref VpcEndpointId
-          - !If
-            # Discovery mode: we don't know the endpoint id yet, so allow any source
-            # vpce so ONE real request can get through and reveal it (the Lambda logs
-            # requestContext.identity). Tighten by setting VpcEndpointId and
-            # redeploying with AllowAnyVpcEndpoint back to "false".
-            - AllowAnyVpce
-            - - Effect: Allow
-                Principal: "*"
-                Action: "execute-api:Invoke"
-                Resource: "execute-api:/*"
-            - - Effect: Deny
-                Principal: "*"
-                Action: "execute-api:Invoke"
-                Resource: "execute-api:/*"
-
-  ConfigResource:
-    Type: AWS::ApiGateway::Resource
-    Properties:
-      RestApiId: !Ref BootstrapRestApi
-      ParentId: !GetAtt BootstrapRestApi.RootResourceId
-      PathPart: "config"
-
-  # ANY so the Lambda also sees OPTIONS and can answer CORS preflight itself.
-  # Only /config exists, so every other path is rejected by API Gateway.
-  ConfigMethod:
-    Type: AWS::ApiGateway::Method
-    Properties:
-      RestApiId: !Ref BootstrapRestApi
-      ResourceId: !Ref ConfigResource
-      HttpMethod: ANY
-      # Authorization is the STS exchange inside the Lambda, plus the resource
-      # policy above. See the "where token validation went" note in the header.
-      AuthorizationType: NONE
-      Integration:
-        Type: AWS_PROXY
-        IntegrationHttpMethod: POST
-        Uri: !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${BootstrapFunction.Arn}/invocations"
-
-  # Unauthenticated reachability probe. A user opens <url>/health in a browser;
-  # a green page proves their desktop can reach the private endpoint. Gated by the
-  # same resource policy as /config (private endpoint only), and the Lambda returns
-  # only the caller's own source IP + VPC endpoint -- nothing sensitive, no STS, no
-  # token. See _health_response in the Lambda.
-  HealthResource:
-    Type: AWS::ApiGateway::Resource
-    Properties:
-      RestApiId: !Ref BootstrapRestApi
-      ParentId: !GetAtt BootstrapRestApi.RootResourceId
-      PathPart: "health"
-
-  HealthMethod:
-    Type: AWS::ApiGateway::Method
-    Properties:
-      RestApiId: !Ref BootstrapRestApi
-      ResourceId: !Ref HealthResource
-      HttpMethod: ANY
-      AuthorizationType: NONE
-      Integration:
-        Type: AWS_PROXY
-        IntegrationHttpMethod: POST
-        Uri: !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${BootstrapFunction.Arn}/invocations"
-
-  # NOTE ON THE LOGICAL ID: an AWS::ApiGateway::Deployment snapshots the API at
-  # create time. CloudFormation only creates a NEW snapshot when this resource's
-  # logical id changes -- editing methods/resources alone does NOT redeploy the
-  # stage, so a new route would exist but 404 on /prod. Whenever you change the API
-  # surface (add/remove a resource or method), BUMP the suffix (…Deployment2 ->
-  # …Deployment3) and update the Stage reference below. The '2' suffix here is the
-  # bump that shipped the /health route on top of stacks that predate it.
-  BootstrapRestApiDeployment2:
-    Type: AWS::ApiGateway::Deployment
-    # Both methods must exist before the deployment snapshots the API, or the new
-    # route is silently absent from the stage.
-    DependsOn:
-      - ConfigMethod
-      - HealthMethod
-    Properties:
-      RestApiId: !Ref BootstrapRestApi
-
-  BootstrapRestApiStage:
-    Type: AWS::ApiGateway::Stage
-    Properties:
-      RestApiId: !Ref BootstrapRestApi
-      DeploymentId: !Ref BootstrapRestApiDeployment2
-      StageName: !Ref StageName
-
-  BootstrapRestApiPermission:
+  # Must exist before the target group registers the function.
+  BootstrapAlbPermission:
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !Ref BootstrapFunction
       Action: "lambda:InvokeFunction"
-      Principal: apigateway.amazonaws.com
-      SourceArn: !Sub "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${BootstrapRestApi}/*"
+      Principal: elasticloadbalancing.amazonaws.com
+      SourceArn: !Sub "arn:${AWS::Partition}:elasticloadbalancing:${AWS::Region}:${AWS::AccountId}:targetgroup/*"
+
+  BootstrapTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: BootstrapAlbPermission
+    Properties:
+      Name: !Sub "${AWS::StackName}-bs-tg"
+      TargetType: lambda
+      Targets:
+        - Id: !GetAtt BootstrapFunction.Arn
+      # MUST stay false. A health check would invoke the function with a
+      # synthetic request carrying no bearer token, get a 401, and mark the
+      # only target unhealthy -> the listener would return 503 to every client.
+      HealthCheckEnabled: false
+      Tags:
+        - Key: Application
+          Value: "claude-code-with-bedrock"
+
+  # Default action is a 404 so only the /config path reaches the function.
+  # Only created when no CertificateArn was supplied. CloudFormation publishes the
+  # DNS validation record itself and BLOCKS until ACM issues, so the zone must be
+  # public and must actually host DomainName — otherwise the stack waits instead of
+  # failing fast.
+  BootstrapCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Condition: CreateCertificate
+    Properties:
+      DomainName: !Ref DomainName
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          HostedZoneId: !If
+            - UseSeparateValidationZone
+            - !Ref CertificateValidationZoneId
+            - !Ref HostedZoneId
+      Tags:
+        - Key: Application
+          Value: "claude-code-with-bedrock"
+        - Key: Component
+          Value: "bootstrap-server"
+
+  BootstrapHttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref BootstrapAlb
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      Certificates:
+        - CertificateArn: !If
+            - CreateCertificate
+            - !Ref BootstrapCertificate
+            - !Ref CertificateArn
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: "404"
+            ContentType: "application/json"
+            MessageBody: '{"error":"not_found"}'
+
+  BootstrapConfigRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref BootstrapHttpsListener
+      Priority: 1
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values:
+              - "/config"
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref BootstrapTargetGroup
+
+  # Unauthenticated reachability probe. A user opens <url>/health in a browser; a
+  # green page proves their desktop can reach the ALB. Same target group as /config
+  # (the Lambda distinguishes by path and returns only the caller's own source IP,
+  # echoed back from x-forwarded-for — no STS, no token, no config). Any path other
+  # than /config and /health hits the listener's default 404 action.
+  BootstrapHealthRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref BootstrapHttpsListener
+      Priority: 2
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values:
+              - "/health"
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref BootstrapTargetGroup
+
+  # Alias record. Behaves identically for a PRIVATE or a public hosted zone.
+  BootstrapDnsRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: HasDns
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt BootstrapAlb.DNSName
+        HostedZoneId: !GetAtt BootstrapAlb.CanonicalHostedZoneID
+        EvaluateTargetHealth: false
 
 Outputs:
-  EndpointConfigured:
-    Description: >
-      "true"      - an execute-api endpoint is wired up; policy scoped to it.
-      "discovery" - AllowAnyVpcEndpoint is on: reachable from ANY source vpce so the
-                    real endpoint id can be discovered from the Lambda logs. Widened
-                    on purpose; tighten before rollout.
-      "false"     - no endpoint and no discovery mode: deployed, answers nothing.
-    Value: !If
-      - HasEndpoint
-      - "true"
-      - !If [AllowAnyVpce, "discovery", "false"]
-
   BootstrapUrl:
     Description: >
-      Endpoint for the MDM bootstrapUrl key. When the API is associated with the VPC
-      endpoint this is the dedicated {api-id}-{vpce-id} hostname, which works whether
-      or not private DNS is enabled and needs no extra request header. For a
-      cross-account endpoint it falls back to the standard hostname, which REQUIRES
-      private DNS enabled on that endpoint. With no endpoint configured this reports
-      NOT-REACHABLE rather than a plausible-looking URL -- see EndpointConfigured.
+      Bootstrap server endpoint URL for the MDM bootstrapUrl key. Uses DomainName
+      whenever one is supplied — including when DNS is managed outside Route 53 and
+      this stack creates no record — because clients must connect on the hostname the
+      certificate covers. Only when NO DomainName is set does it fall back to the raw
+      ALB name, which WILL fail TLS hostname verification: use that only for in-VPC
+      smoke tests, and publish a real hostname before rollout.
     Value: !If
-      - HasEndpoint
-      - !If
-        - AssociateEndpoint
-        - !Sub
-          - "https://${ApiId}-${VpceId}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/config"
-          - ApiId: !Ref BootstrapRestApi
-            VpceId: !If [CreateVpcEndpoint, !Ref ExecuteApiEndpoint, !Ref VpcEndpointId]
-        - !Sub "https://${BootstrapRestApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/config"
-      - !If
-        # Discovery mode has no associated endpoint, so only the standard hostname
-        # exists. It resolves to whichever execute-api endpoint the client's VPC
-        # uses, which REQUIRES private DNS enabled on that endpoint -- and is exactly
-        # the request whose logs reveal the endpoint id.
-        - AllowAnyVpce
-        - !Sub "https://${BootstrapRestApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/config"
-        - "NOT-REACHABLE-no-execute-api-vpc-endpoint-configured"
+      - HasDomainName
+      - !Sub "https://${DomainName}/config"
+      - !Sub "https://${BootstrapAlb.DNSName}/config"
     Export:
       Name: !Sub "${AWS::StackName}-BootstrapUrl"
 
-  BootstrapUrlPrivateDns:
+  BootstrapUrlHealth:
     Description: >
-      Alternative URL, valid ONLY if private DNS is enabled on the execute-api
-      endpoint. Enabling it affects the whole VPC, so prefer BootstrapUrl.
-    Value: !Sub "https://${BootstrapRestApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/config"
+      Unauthenticated reachability probe. Open this in a browser from a user desktop:
+      a green "Connected" page proves the device can reach the endpoint. Needs no
+      token or sign-in. Uses DomainName when set, else the raw ALB name.
+    Value: !If
+      - HasDomainName
+      - !Sub "https://${DomainName}/health"
+      - !Sub "https://${BootstrapAlb.DNSName}/health"
 
   BootstrapFunctionArn:
     Description: "Bootstrap Lambda function ARN"
     Value: !GetAtt BootstrapFunction.Arn
 
-  VpcEndpointIdUsed:
-    Description: "The execute-api VPC endpoint serving this API - created here, or the one you supplied. NONE when the API is not yet wired."
-    Value: !If
-      - HasEndpoint
-      - !If [CreateVpcEndpoint, !Ref ExecuteApiEndpoint, !Ref VpcEndpointId]
-      - "NONE"
+  AlbDnsName:
+    Description: "ALB DNS name - point your own CNAME here if DNS is managed outside Route 53"
+    Value: !GetAtt BootstrapAlb.DNSName
 
-  RestApiId:
-    Description: "Private REST API ID"
-    Value: !Ref BootstrapRestApi
+  AlbCanonicalHostedZoneId:
+    Description: "ALB canonical hosted zone ID, for creating an alias record yourself"
+    Value: !GetAtt BootstrapAlb.CanonicalHostedZoneID
+
+  AlbScheme:
+    Description: "Whether the endpoint is private (internal) or public (internet-facing)"
+    Value: !Ref AlbScheme
+
+  CertificateArnUsed:
+    Description: "The certificate on the listener — created by this stack, or the one you supplied"
+    Value: !If
+      - CreateCertificate
+      - !Ref BootstrapCertificate
+      - !Ref CertificateArn

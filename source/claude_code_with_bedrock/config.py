@@ -192,23 +192,32 @@ class Profile:
 
     # Bootstrap endpoint: a PRIVATE API Gateway REST API, reachable only through an
     # execute-api VPC endpoint. AWS provides TLS for the execute-api hostname, so
-    # there is no certificate, hosted zone or DNS record to manage. Devices reach it
-    # over the customer's own VPN / Direct Connect, which this solution never creates.
-    # Supply an existing endpoint, or leave it empty and give vpc_id + subnet_ids to
-    # have one created.
-    claude_desktop_vpc_endpoint_id: str = ""
+    # Bootstrap endpoint (ALB). "internal" keeps the endpoint private — reachable
+    # only from the VPC or over the customer's own VPN/Direct Connect, which this
+    # solution deliberately does NOT provision. The VPC, subnets, certificate and
+    # DNS are all customer-supplied; see assets/docs/BOOTSTRAP_SERVER.md.
+    claude_desktop_alb_scheme: str = "internal"
+    # When True, `ccwb deploy bootstrap` deploys bootstrap-networking.yaml FIRST and
+    # reads VpcId/SubnetIds from its outputs, ignoring the two fields below. The
+    # created VPC follows the scheme: internal => fully private (no IGW/NAT/route
+    # out); internet-facing => public subnets + IGW. Never a NAT gateway.
+    claude_desktop_create_vpc: bool = False
+    claude_desktop_vpc_cidr: str = "10.60.0.0/16"  # only used when creating a VPC
     claude_desktop_vpc_id: str = ""
-    claude_desktop_subnet_ids: list = field(default_factory=list)
-    claude_desktop_endpoint_ingress_cidr: str = ""  # defaults to the VPC CIDR
-    claude_desktop_stage_name: str = "prod"
-    # False when the endpoint lives in another account (e.g. a central networking
-    # account): association is same-account only, so clients then use the standard
-    # execute-api hostname, which needs private DNS on that endpoint.
-    claude_desktop_associate_vpc_endpoint: bool = True
-    # Discovery/transitional: allow ANY source vpce so one request can reveal the
-    # real endpoint id from the Lambda logs. Widens access -- see the template
-    # parameter docs. Ignored when claude_desktop_vpc_endpoint_id is set.
-    claude_desktop_allow_any_vpc_endpoint: bool = False
+    claude_desktop_subnet_ids: list = field(default_factory=list)  # >= 2, different AZs
+    claude_desktop_certificate_arn: str = ""  # ACM cert in the deploy region;
+    # empty => the stack requests one for claude_desktop_domain_name, DNS-validated.
+    # PUBLIC zone for the ACM validation record. Only needed when the record zone
+    # (claude_desktop_hosted_zone_id) is PRIVATE: ACM validators query public DNS,
+    # so a private zone cannot prove domain control. Empty => reuse the record zone.
+    claude_desktop_cert_validation_zone_id: str = ""
+    claude_desktop_alb_ingress_cidr: str = ""  # normally the VPC CIDR
+    claude_desktop_alb_additional_ingress_cidr: str = ""  # e.g. VPN client CIDR
+    # Optional: set BOTH to have the stack create the Route 53 alias record.
+    # Works with a private or a public hosted zone. Leave empty when DNS is
+    # managed outside Route 53 and point your own CNAME at the AlbDnsName output.
+    claude_desktop_domain_name: str = ""
+    claude_desktop_hosted_zone_id: str = ""
 
     # Legacy field support
     @property
@@ -295,7 +304,14 @@ class Profile:
                 if any(r.startswith("us-") for r in regions):
                     data["cross_region_profile"] = "us"
 
-        return cls(**data)
+        # Drop unknown keys before constructing. A profile written by a NEWER build
+        # (or a since-removed field, e.g. the private-REST-API endpoint fields that
+        # preceded the ALB) would otherwise reach `cls(**data)` and raise
+        # `TypeError: unexpected keyword argument …`, crashing every ccwb command on
+        # load. Ignoring stale keys makes profiles forward- and backward-tolerant;
+        # they're pruned on the next save_profile.
+        known = set(cls.__dataclass_fields__)
+        return cls(**{k: v for k, v in data.items() if k in known})
 
 
 class Config:
