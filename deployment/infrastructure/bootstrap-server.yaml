@@ -318,14 +318,19 @@ Resources:
 
   BootstrapAlb:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    # No explicit Name: an ALB name is capped at 32 chars, and
+    # "${AWS::StackName}-bs-alb" overflows for a normal-length stack name
+    # (e.g. claude-code-auth-bootstrap-bs-alb = 33 -> deploy fails). Let
+    # CloudFormation auto-generate a conformant name; a Name TAG keeps it readable.
     Properties:
-      Name: !Sub "${AWS::StackName}-bs-alb"
       Type: application
       Scheme: !Ref AlbScheme
       SecurityGroups:
         - !Ref AlbSecurityGroup
       Subnets: !Ref SubnetIds
       Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-bs-alb"
         - Key: Application
           Value: "claude-code-with-bedrock"
         - Key: Component
@@ -343,8 +348,10 @@ Resources:
   BootstrapTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     DependsOn: BootstrapAlbPermission
+    # No explicit Name: a target-group name is also capped at 32 chars, and
+    # "${AWS::StackName}-bs-tg" sits right at the edge (33 for a slightly longer
+    # stack name). Auto-generate it; a Name TAG keeps it readable.
     Properties:
-      Name: !Sub "${AWS::StackName}-bs-tg"
       TargetType: lambda
       Targets:
         - Id: !GetAtt BootstrapFunction.Arn
@@ -353,6 +360,8 @@ Resources:
       # only target unhealthy -> the listener would return 503 to every client.
       HealthCheckEnabled: false
       Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-bs-tg"
         - Key: Application
           Value: "claude-code-with-bedrock"
 

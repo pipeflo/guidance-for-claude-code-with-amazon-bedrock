@@ -171,3 +171,22 @@ class TestBootstrapUrlUsesDomain:
         assert "DomainName" in cond
         assert "HostedZoneId" in cond
         assert tpl["Resources"]["BootstrapDnsRecord"]["Condition"] == "HasDns"
+
+
+class TestNoHardcodedElbNames:
+    """ELB load-balancer and target-group NAMES are capped at 32 chars.
+
+    "${AWS::StackName}-bs-alb" overflows for a normal stack name (e.g.
+    claude-code-auth-bootstrap-bs-alb = 33) and the deploy fails at CREATE. Both
+    resources must let CloudFormation auto-generate the name; readability lives in a
+    Name TAG, which has no length cap. This test pins that so the landmine can't
+    return.
+    """
+
+    def test_alb_has_no_name_property(self, tpl):
+        props = tpl["Resources"]["BootstrapAlb"]["Properties"]
+        assert "Name" not in props
+
+    def test_target_group_has_no_name_property(self, tpl):
+        props = tpl["Resources"]["BootstrapTargetGroup"]["Properties"]
+        assert "Name" not in props
