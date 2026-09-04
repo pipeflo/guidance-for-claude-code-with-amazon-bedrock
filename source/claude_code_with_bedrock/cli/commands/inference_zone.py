@@ -24,6 +24,7 @@ when the API is unreachable or returns an unfamiliar naming scheme.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass
 
 import boto3
@@ -582,6 +583,96 @@ def _remove_zone_mapping(
 
 
 # --------------------------------------------------------------------------- #
+# Live tag discovery (fallback when the local profile map is empty/stale)
+# --------------------------------------------------------------------------- #
+
+# The Zone tag is fixed by the GDPR isolation design (see deploy.py) and is what
+# `ccwb inference-zone create` writes and the bootstrap Lambda discovers by.
+_ZONE_TAG_KEY = "Zone"
+# Used only when we have no better hint for where to look.
+_DISCOVERY_FALLBACK_REGIONS = ["us-east-1", "us-west-2", "eu-west-1", "eu-central-1"]
+
+
+def _discovery_region_candidates(profile: Profile, explicit_region: str | None) -> list[str]:
+    """Regions to scan for a zone's profiles, most-specific first, deduped.
+
+    An explicit --region wins; then the profile's allowed_bedrock_regions and
+    aws_region; finally a small commercial default set so discovery still works
+    on a freshly imported profile with nothing recorded.
+    """
+    regions: list[str] = []
+    for r in [explicit_region, *(getattr(profile, "allowed_bedrock_regions", None) or []),
+              getattr(profile, "aws_region", None)]:
+        if r and r not in regions:
+            regions.append(r)
+    for r in _DISCOVERY_FALLBACK_REGIONS:
+        if r not in regions:
+            regions.append(r)
+    return regions
+
+
+def _region_of_arn(arn: str) -> str:
+    """Region segment of an ARN (arn:partition:service:REGION:...), or '' if absent."""
+    parts = arn.split(":", 5)
+    return parts[3] if len(parts) >= 4 else ""
+
+
+def _discover_zone_profiles_by_tag(regions: list[str], zone: str | None = None) -> list[dict]:
+    """Live-discover APPLICATION inference profiles by the Zone tag.
+
+    Mirrors the bootstrap Lambda's discovery (ListInferenceProfiles +
+    ListTagsForResource, filter on the Zone tag) so the admin CLI works even when
+    the local ``zone_inference_profiles`` map is empty or has drifted from AWS
+    (e.g. profiles created on another machine, or a re-imported profile).
+
+    Scans ``regions`` with ambient boto3 credentials, deduping by ARN. A region
+    that is unusable (disabled opt-in region, SCP, throttling) is skipped, never
+    fatal. Returns ACTIVE profiles as dicts: {arn, name, model, region, zone},
+    where ``model`` is the ccwb:Model tag (may be "") and ``zone`` is the Zone tag
+    value. When ``zone`` is given, only that zone's profiles are returned.
+    """
+    zone_lower = (zone or "").lower() or None
+    seen: set[str] = set()
+    out: list[dict] = []
+    for region in regions:
+        try:
+            client = boto3.client("bedrock", region_name=region)
+            try:
+                paginator = client.get_paginator("list_inference_profiles")
+                pages = list(paginator.paginate(typeEquals="APPLICATION"))
+            except Exception:  # noqa: BLE001 - old API version: single call
+                pages = [client.list_inference_profiles(typeEquals="APPLICATION")]
+            for page in pages:
+                for prof in page.get("inferenceProfileSummaries", []):
+                    arn = prof.get("inferenceProfileArn")
+                    if not arn or arn in seen:
+                        continue
+                    if prof.get("status", "ACTIVE") != "ACTIVE":
+                        continue
+                    try:
+                        tags = client.list_tags_for_resource(resourceARN=arn).get("tags", [])
+                    except Exception:  # noqa: BLE001 - one untaggable profile shouldn't hide the rest
+                        continue
+                    tag_map = {t["key"]: t["value"] for t in tags}
+                    tag_zone = tag_map.get(_ZONE_TAG_KEY, "")
+                    if not tag_zone:
+                        continue
+                    if zone_lower and tag_zone.lower() != zone_lower:
+                        continue
+                    seen.add(arn)
+                    out.append({
+                        "arn": arn,
+                        "name": prof.get("inferenceProfileName", "") or "",
+                        "model": tag_map.get("ccwb:Model", "") or "",
+                        "region": _region_of_arn(arn) or tag_map.get("ccwb:Region", region),
+                        "zone": tag_zone,
+                    })
+        except Exception:  # noqa: BLE001 - region unusable: skip, not fatal
+            continue
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Commands
 # --------------------------------------------------------------------------- #
 
@@ -846,6 +937,12 @@ class InferenceZoneListCommand(Command):
     options = [
         option("profile", description="ccwb configuration profile", flag=False, default=None),
         option("zone", description="Filter to a single zone", flag=False, default=None),
+        option("region", description="Region to scan when discovering live", flag=False, default=None),
+        option(
+            "discover",
+            description="Ignore the local profile map and discover profiles live by the Zone tag",
+            flag=True,
+        ),
     ]
 
     def handle(self) -> int:  # pragma: no cover - thin CLI glue
@@ -861,43 +958,75 @@ class InferenceZoneListCommand(Command):
         zone_filter = (self.option("zone") or "").strip().lower() or None
 
         if zone_filter:
-            zones_to_show = {zone_filter: mapping.get(zone_filter, {})}
-            if not zones_to_show[zone_filter]:
-                console.print(
-                    f"[yellow]No profiles recorded for zone '{zone_filter}'.[/yellow]"
-                )
-                return 0
+            recorded = {zone_filter: mapping[zone_filter]} if mapping.get(zone_filter) else {}
         else:
-            zones_to_show = mapping
+            recorded = mapping
 
-        if not zones_to_show:
+        # Prefer the local map (fast, offline) unless --discover forces live.
+        if recorded and not self.option("discover"):
+            for zone in sorted(recorded):
+                models = recorded[zone]
+                table = Table(title=f"Zone '{zone}'", box=box.ROUNDED)
+                table.add_column("Model", style="magenta")
+                table.add_column("Region", style="cyan")
+                table.add_column("ARN")
+                for short in sorted(models):
+                    arn = models[short]
+                    table.add_row(short, _region_of_arn(arn) or "?", arn)
+                console.print(table)
+            if not zone_filter:
+                console.print(
+                    "\n[dim]End users need BOTH ANTHROPIC_MODEL and AWS_REGION set "
+                    "together (the region must match the ARN's region segment).[/dim]"
+                )
+            return 0
+
+        # Nothing recorded (or --discover): fall back to live tag discovery, the
+        # same mechanism the bootstrap Lambda uses. Handles a profile whose local
+        # map drifted from AWS (created on another machine, re-imported, etc.).
+        regions = _discovery_region_candidates(profile, self.option("region"))
+        console.print(
+            f"[dim]Discovering profiles live by the {_ZONE_TAG_KEY} tag across: "
+            f"{', '.join(regions)} …[/dim]"
+        )
+        try:
+            found = _discover_zone_profiles_by_tag(regions, zone_filter)
+        except NoCredentialsError:
+            console.print("[red]No AWS credentials available for live discovery.[/red]")
+            return 1
+
+        if not found:
+            scope = f" for zone '{zone_filter}'" if zone_filter else ""
             console.print(
-                "[yellow]No zones recorded.[/yellow] "
+                f"[yellow]No inference profiles found{scope} (locally or live).[/yellow] "
                 "Run [cyan]ccwb inference-zone create[/cyan]."
             )
             return 0
 
-        for zone in sorted(zones_to_show):
-            models = zones_to_show[zone]
-            table = Table(title=f"Zone '{zone}'", box=box.ROUNDED)
+        by_zone: dict[str, list[dict]] = {}
+        for p in found:
+            by_zone.setdefault(p["zone"], []).append(p)
+        for zone in sorted(by_zone):
+            rows = by_zone[zone]
+            counts = Counter((p["model"] or p["name"]) for p in rows)
+            table = Table(
+                title=f"Zone '{zone}'  [dim](discovered live — not in local profile)[/dim]",
+                box=box.ROUNDED,
+            )
             table.add_column("Model", style="magenta")
             table.add_column("Region", style="cyan")
             table.add_column("ARN")
-            for short in sorted(models):
-                arn = models[short]
-                # Extract region from the ARN: arn:aws:bedrock:<region>:...
-                parts = arn.split(":", 5)
-                region = parts[3] if len(parts) >= 4 else "?"
-                table.add_row(short, region, arn)
+            for p in sorted(rows, key=lambda x: ((x["model"] or x["name"]), x["arn"])):
+                label = p["model"] or p["name"] or "?"
+                if counts[p["model"] or p["name"]] > 1:
+                    label += "  [red](duplicate)[/red]"
+                table.add_row(label, p["region"], p["arn"])
             console.print(table)
-
-        # Print the exact env-var commands so the admin can copy directly
-        # into an email to zone users. Region is extracted from each ARN.
-        if not zone_filter and len(zones_to_show) > 0:
-            console.print(
-                "\n[dim]End users need BOTH ANTHROPIC_MODEL and AWS_REGION set "
-                "together (the region must match the ARN's region segment).[/dim]"
-            )
+        console.print(
+            "\n[dim]Discovered live and NOT recorded in the local profile. Remove with "
+            "[cyan]ccwb inference-zone delete --zone <zone> --model <model>[/cyan] "
+            "(add [cyan]--arn[/cyan] to pick one of a duplicate pair).[/dim]"
+        )
         return 0
 
 
@@ -916,7 +1045,18 @@ class InferenceZoneDeleteCommand(Command):
             flag=False,
             default=None,
         ),
-        option("region", description="AWS region", flag=False, default=None),
+        option(
+            "arn",
+            description="Delete exactly this profile ARN (disambiguates duplicate short-names)",
+            flag=False,
+            default=None,
+        ),
+        option("region", description="AWS region to scan/delete in", flag=False, default=None),
+        option(
+            "discover",
+            description="Ignore the local profile map; find the profile(s) live by the Zone tag",
+            flag=True,
+        ),
         option("yes", "y", description="Skip confirmation prompt", flag=True),
     ]
 
@@ -940,44 +1080,105 @@ class InferenceZoneDeleteCommand(Command):
             return 1
 
         model_short = (self.option("model") or "").strip() or None
-        region = self.option("region") or profile.aws_region
+        arn_opt = (self.option("arn") or "").strip() or None
+        region_opt = self.option("region")
 
         mapping = getattr(profile, "zone_inference_profiles", {}) or {}
         zone_map = mapping.get(zone, {})
-        if not zone_map:
-            console.print(
-                f"[red]Zone '{zone}' has no profiles recorded in the ccwb profile.[/red]"
-            )
-            return 1
 
-        if model_short:
-            if model_short not in zone_map:
-                console.print(
-                    f"[red]Zone '{zone}' has no '{model_short}' profile recorded.[/red]"
-                )
+        # Each target: {"short", "arn", "region"}. Region comes from the ARN so a
+        # profile is always deleted in its own home region, not a guessed default.
+        targets: list[dict] = []
+        use_map = bool(zone_map) and not self.option("discover") and not arn_opt
+
+        if use_map:
+            if model_short:
+                if model_short in zone_map:
+                    arn = zone_map[model_short]
+                    targets = [{"short": model_short, "arn": arn,
+                                "region": _region_of_arn(arn) or region_opt or profile.aws_region}]
+                else:
+                    # Recorded map exists but not this model — fall through to live
+                    # discovery rather than failing (the map may be partial/stale).
+                    use_map = False
+            else:
+                targets = [{"short": s, "arn": a,
+                            "region": _region_of_arn(a) or region_opt or profile.aws_region}
+                           for s, a in zone_map.items()]
+
+        if not use_map:
+            # Live tag discovery — same mechanism as the bootstrap Lambda. Lets the
+            # admin delete profiles that exist in AWS but aren't (or are wrongly)
+            # recorded locally, and disambiguate duplicate short-names by ARN.
+            regions = _discovery_region_candidates(profile, region_opt)
+            console.print(
+                f"[dim]Finding zone '{zone}' profile(s) live by the {_ZONE_TAG_KEY} tag "
+                f"across: {', '.join(regions)} …[/dim]"
+            )
+            try:
+                found = _discover_zone_profiles_by_tag(regions, zone)
+            except NoCredentialsError:
+                console.print("[red]No AWS credentials available for live discovery.[/red]")
                 return 1
-            targets = {model_short: zone_map[model_short]}
-        else:
-            targets = dict(zone_map)
+
+            if arn_opt:
+                found = [p for p in found if p["arn"] == arn_opt]
+                if not found:
+                    console.print(
+                        f"[red]No ACTIVE profile with ARN {arn_opt} tagged {_ZONE_TAG_KEY}={zone}.[/red]"
+                    )
+                    return 1
+            elif model_short:
+                ms = model_short.lower()
+                matches = [
+                    p for p in found
+                    if (p["model"] or "").lower() == ms or p["name"].lower().endswith(f"-{ms}")
+                ]
+                if not matches:
+                    console.print(
+                        f"[red]Zone '{zone}' has no '{model_short}' profile (recorded or live).[/red]"
+                    )
+                    return 1
+                if len(matches) > 1:
+                    console.print(
+                        f"[yellow]Multiple '{model_short}' profiles in zone '{zone}'. "
+                        f"Re-run with [cyan]--arn <arn>[/cyan] to pick one:[/yellow]"
+                    )
+                    for p in matches:
+                        console.print(f"  [{p['region']}]  {p['arn']}")
+                    return 1
+                found = matches
+
+            if not found:
+                console.print(f"[yellow]No profiles found for zone '{zone}'.[/yellow]")
+                return 1
+            targets = [{"short": (p["model"] or p["name"] or "?"), "arn": p["arn"],
+                        "region": p["region"] or region_opt or profile.aws_region}
+                       for p in found]
 
         # Confirm
         if not self.option("yes"):
             console.print(f"\n[bold]About to delete from zone '{zone}':[/bold]")
-            for short, arn in targets.items():
-                console.print(f"  {short}  {arn}")
+            for t in targets:
+                console.print(f"  {t['short']}  [{t['region']}]  {t['arn']}")
             resp = self.ask("\nDelete? [y/N] ", default="n")
             if not resp or resp.lower() not in ("y", "yes"):
                 console.print("Aborted.")
                 return 1
 
-        bedrock = boto3.client("bedrock", region_name=region)
         failed = []
-        for short, arn in targets.items():
+        clients: dict[str, object] = {}
+        for t in targets:
+            r = t["region"] or profile.aws_region
+            client = clients.get(r)
+            if client is None:
+                client = boto3.client("bedrock", region_name=r)
+                clients[r] = client
             try:
-                bedrock.delete_inference_profile(inferenceProfileIdentifier=arn)
-                _remove_zone_mapping(config, profile, zone, short)
-                console.print(f"[green]Deleted[/green] {short}  {arn}")
+                client.delete_inference_profile(inferenceProfileIdentifier=t["arn"])
+                _remove_zone_mapping(config, profile, zone, t["short"])
+                console.print(f"[green]Deleted[/green] {t['short']}  {t['arn']}")
             except ClientError as e:
-                failed.append((short, str(e)))
-                console.print(f"[red]FAILED {short}: {e}[/red]")
+                failed.append((t["short"], str(e)))
+                console.print(f"[red]FAILED {t['short']}: {e}[/red]")
         return 1 if failed else 0
